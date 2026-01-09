@@ -1,6 +1,12 @@
 from abc import ABC, abstractmethod
 
+from sqlalchemy import Engine
+
 class IDatabase(ABC):
+    @abstractmethod
+    def engine(self):
+        pass
+
     @abstractmethod
     def connect(self):
         pass

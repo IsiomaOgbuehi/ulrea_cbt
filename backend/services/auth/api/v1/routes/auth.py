@@ -7,6 +7,7 @@ from database.database import SessionDep
 from dependencies.user_dependencies import authenticate_user, get_current_active_user
 from dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from datetime import datetime, timedelta, timezone
+from database.schema import Hero
 
 fake_users_db = {
     "johndoe": {
@@ -24,8 +25,6 @@ fake_users_db = {
         "disabled": True,
     },
 }
-
-app = FastAPI()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.api_version.value}{AuthRoutes.base_route.value}{AuthRoutes.login.value}')
 
@@ -61,3 +60,11 @@ async def read_users_me(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ):
     return current_user
+
+
+@router.post("/heroes/")
+def create_hero(hero: Hero, session: SessionDep) -> Hero:
+    session.add(hero)
+    session.commit()
+    session.refresh(hero)
+    return hero
