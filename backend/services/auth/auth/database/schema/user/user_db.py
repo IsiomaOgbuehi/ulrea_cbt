@@ -11,11 +11,6 @@ class UserBase(SQLModel):
     email: EmailStr = Field(index=True)
     phone: str | None
     role: UserRole
-    org_id: UUID = Field(
-        foreign_key='organizations.id',
-        nullable=False,
-        index=True,
-    )
     updated_at: datetime | None = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         index=True,
@@ -27,6 +22,11 @@ class UserBase(SQLModel):
 class UserModel(UserBase, table=True):
     __tablename__ = 'users'
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    org_id: UUID = Field(
+        foreign_key='organizations.id',
+        nullable=False,
+        index=True,
+    )
     created_at: datetime | None = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         index=True,

@@ -9,10 +9,10 @@ from pwdlib import PasswordHash
 from dotenv import load_dotenv
 import os
 # from api.v1.routes.auth import oauth2_scheme, fake_users_db
-from models.user import UserInDB
-from models.token import TokenData
+from auth.models.user import UserInDB
+from auth.models.token import TokenData
 # from dependencies .user_dependencies import get_user
-from api.v1.auth_routes import AuthRoutes
+from auth.api.v1.auth_routes import AuthRoutes
 
 load_dotenv()
 

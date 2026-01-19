@@ -1,11 +1,11 @@
 from typing import Annotated
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from models.login_response import LoginResponse, Token, User
-from api.v1.auth_routes import AuthRoutes
-from database.database import SessionDep
-from dependencies.user_dependencies import authenticate_user, get_current_active_user
-from dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
+from auth.models.login_response import LoginResponse, Token, User
+from auth.api.v1.auth_routes import AuthRoutes
+from auth.database.database import SessionDep
+from auth.dependencies.user_dependencies import authenticate_user, get_current_active_user
+from auth.dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from datetime import datetime, timedelta, timezone
 # from database.schema.hero import Hero, HeroModel, HeroRead
 

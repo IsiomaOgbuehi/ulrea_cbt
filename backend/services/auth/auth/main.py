@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from sqlmodel import SQLModel
-from api.v1.routes import auth
-from api.v1.auth_routes import AuthRoutes
-from database.database import database_engine
+from auth.api.v1.routes import auth
+from auth.api.v1.auth_routes import AuthRoutes
+from auth.database.database import database_engine
 from contextlib import asynccontextmanager
 
 # @asynccontextmanager

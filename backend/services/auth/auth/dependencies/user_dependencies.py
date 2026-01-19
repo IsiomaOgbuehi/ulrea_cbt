@@ -3,8 +3,8 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException
 
-from models.user import User, UserInDB
-from dependencies.auth_dependencies import verify_password, get_current_user as current_user
+from auth.models.user import User, UserInDB
+from auth.dependencies.auth_dependencies import verify_password, get_current_user as current_user
 
 
 

@@ -2,8 +2,8 @@ from typing import Annotated
 
 from fastapi import Depends
 from sqlmodel import Field, SQLModel, Session
-from database.database_interface import IDatabase
-from database.postgres_database import PostgresDatabase
+from auth.database.database_interface import IDatabase
+from auth.database.postgres_database import PostgresDatabase
 
 # class Hero(SQLModel, table=True):
 #     id: int | None = Field(default=None, primary_key=True)
