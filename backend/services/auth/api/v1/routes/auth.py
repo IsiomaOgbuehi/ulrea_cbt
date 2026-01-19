@@ -7,7 +7,7 @@ from database.database import SessionDep
 from dependencies.user_dependencies import authenticate_user, get_current_active_user
 from dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from datetime import datetime, timedelta, timezone
-from database.schema import Hero
+# from database.schema.hero import Hero, HeroModel, HeroRead
 
 fake_users_db = {
     "johndoe": {
@@ -62,9 +62,46 @@ async def read_users_me(
     return current_user
 
 
-@router.post("/heroes/")
-def create_hero(hero: Hero, session: SessionDep) -> Hero:
-    session.add(hero)
-    session.commit()
-    session.refresh(hero)
-    return hero
+# @router.post("/heroes/", response_model=HeroModel)
+# async def create_hero(hero: Hero, session: SessionDep):
+    
+#     db_hero = HeroModel.model_validate(hero)
+#     session.add(db_hero)
+#     session.commit()
+#     session.refresh(db_hero)
+#     return db_hero
+
+# @router.put("/heroes/{hero_id}", response_model=HeroRead)
+# async def update_hero_put(
+#     hero_id: int,
+#     hero: Hero,
+#     session: SessionDep,
+# ):
+#     db_hero = session.get(HeroModel, hero_id)
+#     if not db_hero:
+#         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={'message': 'Hero not Found'})
+
+#     for key, value in hero.model_dump().items():
+#         setattr(db_hero, key, value)
+
+#     session.commit()
+#     session.refresh(db_hero)
+#     return db_hero
+
+# @router.patch("/heroes/{hero_id}", response_model=HeroRead)
+# def update_hero_patch(
+#     hero_id: int,
+#     hero: Hero,
+#     session: SessionDep,
+# ):
+#     db_hero = session.get(HeroModel, hero_id)
+#     if not db_hero:
+#         raise HTTPException(404)
+
+#     hero_data = hero.model_dump(exclude_unset=True)
+#     for key, value in hero_data.items():
+#         setattr(db_hero, key, value)
+
+#     session.commit()
+#     session.refresh(db_hero)
+#     return db_hero

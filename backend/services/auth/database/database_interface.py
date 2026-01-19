@@ -4,7 +4,7 @@ from sqlalchemy import Engine
 
 class IDatabase(ABC):
     @abstractmethod
-    def engine(self):
+    def engine(self) -> Engine:
         pass
 
     @abstractmethod

@@ -5,6 +5,7 @@ description = "Authentication Service"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.18.1",
     "fastapi[standard]>=0.122.0",
     "psycopg2-binary>=2.9.11",
     "pwdlib[argon2]>=0.3.0",
