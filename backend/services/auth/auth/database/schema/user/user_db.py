@@ -32,3 +32,4 @@ class UserModel(UserBase, table=True):
         index=True,
         nullable=False,
     )
+    password: str

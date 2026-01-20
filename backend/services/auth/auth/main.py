@@ -12,4 +12,4 @@ from contextlib import asynccontextmanager
 
 app = FastAPI(title='Auth Service') # lifespan=lifespan
 
-app.include_router(auth.router, prefix=AuthRoutes.api_version.value, tags=['auth'])
+app.include_router(auth.router, prefix=AuthRoutes.API_VERSION.value, tags=['auth'])

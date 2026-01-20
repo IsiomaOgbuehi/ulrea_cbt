@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, JSON
 from sqlmodel import Column, SQLModel, Field
+
+def json_column():
+    return JSONB().with_variant(JSON(), "sqlite")
 
 class OrganizationSettingsBase(SQLModel):
     org_id: UUID = Field(
@@ -11,7 +14,7 @@ class OrganizationSettingsBase(SQLModel):
     )
     version: int = Field(default=1)
     settings: dict = Field(
-        sa_column=Column(JSONB, nullable=False)
+        sa_column=Column(json_column(), nullable=False)
     )
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

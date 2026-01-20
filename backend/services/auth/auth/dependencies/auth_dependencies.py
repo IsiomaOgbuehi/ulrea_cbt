@@ -9,8 +9,8 @@ from pwdlib import PasswordHash
 from dotenv import load_dotenv
 import os
 # from api.v1.routes.auth import oauth2_scheme, fake_users_db
-from auth.models.user import UserInDB
-from auth.models.token import TokenData
+from auth.api_models.user import UserInDB
+from auth.api_models.token import TokenData
 # from dependencies .user_dependencies import get_user
 from auth.api.v1.auth_routes import AuthRoutes
 
@@ -40,7 +40,7 @@ fake_users_db = {
     },
 }
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.api_version.value}{AuthRoutes.base_route.value}{AuthRoutes.login.value}')
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.API_VERSION.value}{AuthRoutes.BASE_ROUTE.value}{AuthRoutes.LOGIN.value}')
 
 
 def verify_password(plain_password, hashed_password):

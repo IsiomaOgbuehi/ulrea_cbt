@@ -1,17 +1,16 @@
 from uuid import UUID
 from .organization_db import OrganizationBase
 from datetime import datetime
-from organization.organization_settings import OrganizationSettingsBase
+from .organization_settings import OrganizationSettingsBase
 
 class OrganizationGet(OrganizationBase):
     id: UUID
     created_at: datetime
 
-
-class OrganizationPatch(OrganizationBase):
+class OrganizationCreate(OrganizationBase):
     pass
 
-class OrganizationPut(OrganizationBase):
+class OrganizationUpdate(OrganizationBase):
     pass
 
 
@@ -19,5 +18,5 @@ class OrganizationSettingsGet(OrganizationSettingsBase):
     id: UUID
 
 
-class OrganisationSettingsEdit(OrganizationSettingsBase):
+class OrganisationSettingsUpdate(OrganizationSettingsBase):
     pass

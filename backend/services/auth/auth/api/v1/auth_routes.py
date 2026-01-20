@@ -1,7 +1,8 @@
 from enum import Enum
 
 class AuthRoutes(Enum):
-    base_route = '/auth'
-    api_version = '/api/v1'
-    token = '/token'
-    login = '/login'
+    BASE_ROUTE = '/auth'
+    API_VERSION = '/api/v1'
+    TOKEN = '/token'
+    LOGIN = '/login'
+    SIGNUP = '/signup'
