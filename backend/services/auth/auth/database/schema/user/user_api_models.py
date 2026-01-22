@@ -1,8 +1,11 @@
 from .user_db import UserBase
 from uuid import UUID
 
-class UsersGet(UserBase):
+class UserCreate(UserBase):
+    password: str
+
+class UserRead(UserBase):
     id: UUID
 
-class UserEdit(UserBase):
+class UserUpdate(UserBase):
     pass

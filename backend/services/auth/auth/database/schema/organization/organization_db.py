@@ -8,7 +8,7 @@ class OrganizationBase(SQLModel):
     name: str = Field(index=True)
     verified: bool | None = False
     address: str | None = Field(default=None)
-    email: EmailStr = Field(index=True)
+    email: EmailStr = Field(index=True, unique=True)
     phone: str | None = Field(index=True)
     organization_type: OrganizationType
     updated_at: datetime | None = Field(
@@ -25,3 +25,4 @@ class OrganizationModel(OrganizationBase, table=True):
         index=True,
         nullable=False,
     )
+    verified: bool | None = False

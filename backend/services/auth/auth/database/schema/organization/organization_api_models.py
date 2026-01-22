@@ -3,7 +3,7 @@ from .organization_db import OrganizationBase
 from datetime import datetime
 from .organization_settings import OrganizationSettingsBase
 
-class OrganizationGet(OrganizationBase):
+class OrganizationRead(OrganizationBase):
     id: UUID
     created_at: datetime
 
@@ -14,7 +14,7 @@ class OrganizationUpdate(OrganizationBase):
     pass
 
 
-class OrganizationSettingsGet(OrganizationSettingsBase):
+class OrganizationSettingsRead(OrganizationSettingsBase):
     id: UUID
 
 

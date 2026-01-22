@@ -14,8 +14,7 @@ from sqlalchemy.pool import StaticPool
 SQLALCHEMY_DATABASE_URL = 'sqlite:///:memory:'
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False}, poolclass=StaticPool,
-)
+    SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False}, poolclass=StaticPool)
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -45,14 +44,22 @@ def client():
 
 def test_create_item(client):
     response = client.post(
-        '/api/v1/auth/signup', json={'organization': {'name': 'Test Org', 'verified': False, 'address': 'Test Address', 
-                                                      'email': 'amycole@gmail.com', 'phone': '+2348039361659', 'organization_type': 'school'}}
+        '/api/v1/auth/signup', json={
+            'organization': {'name': 'Test Org', 'verified': False, 'address': 'Test Address', 
+            'email': 'amycole@gmail.com', 'phone': '+2348039361659', 'organization_type': 'school'},
+            'user': {
+                'firstname': 'John', 'lastname': 'Doe', 'email': 'johndoe@cbtech.com', 'phone': '+1848234593',
+                'role': 'super_admin', 'password': 'chekicicici'
+            }
+                            }
     )
     assert response.status_code == 200, response.json()
     data = response.json()
-    assert data["name"] == "Test Org"
-    assert data["phone"] == "+2348039361659"
-    assert "id" in data
+    print(data)
+    assert data['organization']['name'] == "Test Org"
+    assert data['user']['phone'] == "+1848234593"
+    assert "id" in data['organization']
+    assert "id" in data['user']
 
 
 # def setup() -> None:

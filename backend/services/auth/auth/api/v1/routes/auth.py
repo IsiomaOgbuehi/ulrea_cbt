@@ -8,7 +8,7 @@ from auth.dependencies.user_dependencies import authenticate_user, get_current_a
 from auth.dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from datetime import datetime, timedelta, timezone
 from auth.api_models import SignUp
-from auth.database.schema import OrganizationModel
+from auth.database.schema import OrganizationModel, UserModel, OrganizationRead, UserRead
 # from database.schema.hero import Hero, HeroModel, HeroRead
 
 fake_users_db = {
@@ -60,11 +60,38 @@ async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
 @router.post(AuthRoutes.SIGNUP.value)
 async def signup(signup_data: SignUp, session: SessionDep):
     organization = OrganizationModel.model_validate(signup_data.organization)
+    # user_data = 
+    # user = UserModel.model_validate(signup_data.user)
+
+
+    
 
     session.add(organization)
     session.commit()
     session.refresh(organization)
-    return organization
+
+    # 2️⃣ Create user (super admin)
+    user = UserModel.model_validate(
+        signup_data.user,
+        update={
+            "org_id": organization.id,
+        },
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    print(f'organization here===:', organization.model_dump())
+    return {
+        "organization": OrganizationRead.model_validate(
+            organization,
+            from_attributes=True
+        ),
+        "user": UserRead.model_validate(
+            user,
+            from_attributes=True
+        ),
+    }
 
 
 

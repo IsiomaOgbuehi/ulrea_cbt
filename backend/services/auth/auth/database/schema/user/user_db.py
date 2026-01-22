@@ -7,8 +7,8 @@ from .enums import UserRole
 class UserBase(SQLModel):
     firstname: str = Field(index=True)
     lastname: str
-    othername: str | None
-    email: EmailStr = Field(index=True)
+    othername: str | None = ''
+    email: EmailStr = Field(index=True, unique=True)
     phone: str | None
     role: UserRole
     updated_at: datetime | None = Field(
@@ -16,7 +16,6 @@ class UserBase(SQLModel):
         index=True,
         nullable=False,
     )
-    verified: bool | None = False
 
 
 class UserModel(UserBase, table=True):
@@ -33,3 +32,4 @@ class UserModel(UserBase, table=True):
         nullable=False,
     )
     password: str
+    verified: bool | None = False
