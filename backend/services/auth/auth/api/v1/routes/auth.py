@@ -1,32 +1,18 @@
 from typing import Annotated
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from auth.api_models.login_response import LoginResponse, Token, User
+from auth.api_models.login_response import LoginResponse, Token, User, TokenData
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import SessionDep
 from auth.dependencies.user_dependencies import authenticate_user, get_current_active_user
-from auth.dependencies.auth_dependencies import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
-from datetime import datetime, timedelta, timezone
-from auth.api_models import SignUp
+from auth.utility.jwt.jwt import create_access_token
+from datetime import datetime, timezone
+from auth.api_models import SignUp, SignUpResponse
 from auth.database.schema import OrganizationModel, UserModel, OrganizationRead, UserRead
-# from database.schema.hero import Hero, HeroModel, HeroRead
-
-fake_users_db = {
-    "johndoe": {
-        "username": "johndoe",
-        "full_name": "John Doe",
-        "email": "johndoe@example.com",
-        "hashed_password": "$argon2id$v=19$m=65536,t=3,p=4$wagCPXjifgvUFBzq4hqe3w$CYaIb8sB+wtD+Vu/P4uod1+Qof8h+1g7bbDlBID48Rc",
-        "disabled": False,
-    },
-    "alice": {
-        "username": "alice",
-        "full_name": "Alice Wonderson",
-        "email": "alice@example.com",
-        "hashed_password": "fakehashedsecret2",
-        "disabled": True,
-    },
-}
+from auth.utility.password.password_harsher import PasswordHasher
+import jwt
+from auth.utility.jwt.jwt import JWT_ALGORITHM, JWT_SECRET
+from auth.utility.redis.redis_client import redis_client
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.API_VERSION.value}{AuthRoutes.BASE_ROUTE.value}{AuthRoutes.LOGIN.value}')
 
@@ -36,35 +22,60 @@ router = APIRouter(
     responses={401: {'message': 'Unauthorized'}}
 )
 
-@router.post(AuthRoutes.LOGIN.value, response_model=Token)
-async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()]):
+'''LOGIN 🔐 '''
+@router.post(AuthRoutes.LOGIN.value, response_model=TokenData, summary="Login with email and password",
+    description="Use your **email address** as the username field.")
+async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], session: SessionDep):
     
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+    user = authenticate_user(session, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
-    )
+    
+    token_data = create_access_token(user.id)
 
-    return Token(access_token=access_token)
+    return TokenData(access_token=token_data.access_token)
 
+
+''' LOGOUT USER 🔒 '''
+@router.post(AuthRoutes.LOGOUT.value)
+async def logout(token: str = Depends(oauth2_scheme)):
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+    jti = payload['jti']
+    exp = payload['exp']
+
+    now = datetime.now(timezone.utc).timestamp()
+    ttl = int(exp - now)
+
+    if ttl > 0:
+        redis_client.setex(
+            f"blacklist:jti:{jti}",
+            ttl,
+            1
+        )
+
+    return {"detail": "Successfully logged out"}
+
+
+''' GET TOKEN 🔑 '''
 @router.get(AuthRoutes.TOKEN.value)
 async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
     return {'token': token}
 
-@router.post(AuthRoutes.SIGNUP.value)
+
+''' SIGN UP 🧑‍💻 '''
+@router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
 async def signup(signup_data: SignUp, session: SessionDep):
+
+    if signup_data.user.password != signup_data.user.confirm_password:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail={'message': 'Password and Confirm password mismatch'})
+
+    # 1️⃣ Create user (super admin)
     organization = OrganizationModel.model_validate(signup_data.organization)
-    # user_data = 
-    # user = UserModel.model_validate(signup_data.user)
-
-
-    
 
     session.add(organization)
     session.commit()
@@ -74,24 +85,27 @@ async def signup(signup_data: SignUp, session: SessionDep):
     user = UserModel.model_validate(
         signup_data.user,
         update={
-            "org_id": organization.id,
+            'org_id': organization.id,
+            'password': PasswordHasher.create(signup_data.user.password)
         },
     )
     session.add(user)
     session.commit()
     session.refresh(user)
 
-    print(f'organization here===:', organization.model_dump())
-    return {
-        "organization": OrganizationRead.model_validate(
+    token_data = create_access_token(user.id)
+    token = TokenData(access_token=token_data.access_token)
+
+    return SignUpResponse(
+        organization=OrganizationRead.model_validate(
             organization,
             from_attributes=True
         ),
-        "user": UserRead.model_validate(
+        user=UserRead.model_validate(
             user,
             from_attributes=True
         ),
-    }
+        token=token)
 
 
 

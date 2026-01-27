@@ -6,7 +6,6 @@ from .enums import OrganizationType
 
 class OrganizationBase(SQLModel):
     name: str = Field(index=True)
-    verified: bool | None = False
     address: str | None = Field(default=None)
     email: EmailStr = Field(index=True, unique=True)
     phone: str | None = Field(index=True)

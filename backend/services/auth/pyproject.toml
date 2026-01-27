@@ -12,6 +12,7 @@ dependencies = [
     "pyjwt>=2.10.1",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.1",
+    "redis>=7.1.0",
     "sqlmodel>=0.0.27",
 ]
 [tool.pytest.ini_options]

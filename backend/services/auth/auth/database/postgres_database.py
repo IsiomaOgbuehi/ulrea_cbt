@@ -27,7 +27,8 @@ class PostgresDatabase(IDatabase):
         return create_engine(DATABASE_URL, echo=True, connect_args=connect_args)
 
     def connect(self):
-         SQLModel.metadata.create_all(self.engine())
+         pass
+        #  SQLModel.metadata.create_all(self.engine())
     
     def disconnect(self):
         pass

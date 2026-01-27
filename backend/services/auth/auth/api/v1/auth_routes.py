@@ -6,3 +6,4 @@ class AuthRoutes(Enum):
     TOKEN = '/token'
     LOGIN = '/login'
     SIGNUP = '/signup'
+    LOGOUT = '/logout'
