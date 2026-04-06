@@ -84,6 +84,45 @@ def test_signup(client):
     assert "id" in data['user']
 
 
+def test_signup_with_otp(client):
+
+    email = "johndoe@cbtech.com"
+
+    # Step 1: Signup
+    response = client.post(
+        '/api/v1/auth/signup',
+        json={
+            'organization': {
+                'name': 'Test Org',
+                'verified': False,
+                'address': 'Test Address',
+                'email': 'amycole@gmail.com',
+                'phone': '+2348039361659',
+                'organization_type': 'school'
+            },
+            'user': {
+                'firstname': 'John',
+                'lastname': 'Doe',
+                'email': email,
+                'phone': '+1848234593',
+                'role': 'super_admin',
+                'password': 'chekicicici',
+                'confirm_password': 'chekicicici'
+            }
+        }
+    )
+
+    assert response.status_code == 200
+
+    # Step 2: Request OTP
+    otp = request_otp(client, email)
+
+    assert otp is not None  # only works in test/dev
+
+    # Step 3: Verify OTP
+    verify_otp(client, email, otp)
+
+
 def test_login(client):
     # create user first
     signup_call(client)
@@ -124,6 +163,30 @@ def test_logout(client):
     assert response.status_code == 200, response.json()
     data = response.json()
     assert data['detail'] == 'Successfully logged out'
+
+
+def request_otp(client, identifier):
+    response = client.post(
+        '/api/v1/auth/otp/request',
+        json={
+            "identifier": identifier,
+            "purpose": "signup",
+        }
+    )
+    assert response.status_code == 200
+    return response.json().get("otp")
+
+
+def verify_otp(client, identifier, otp):
+    response = client.post(
+        '/api/v1/auth/otp/verify',
+        json={
+            "identifier": identifier,
+            "purpose": "signup",
+            "otp": otp
+        }
+    )
+    assert response.status_code == 200
 
 
 # def setup() -> None:

@@ -7,3 +7,5 @@ class AuthRoutes(Enum):
     LOGIN = '/login'
     SIGNUP = '/signup'
     LOGOUT = '/logout'
+    REQUEST_OTP = '/otp/request'
+    VERIFY_OTP = '/otp/verify'

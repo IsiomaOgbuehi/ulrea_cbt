@@ -1,6 +1,8 @@
+import os
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlmodel import select
 from auth.api_models.login_response import LoginResponse, Token, User, TokenData
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import SessionDep
@@ -13,6 +15,14 @@ from auth.utility.password.password_harsher import PasswordHasher
 import jwt
 from auth.utility.jwt.jwt import JWT_ALGORITHM, JWT_SECRET
 from auth.utility.redis.redis_client import redis_client
+from auth.api_models.schemas.otp import OTPResponse, OTPRequestSchema, OTPVerifyResponse, OTPVerifySchema
+from auth.utility.otp.otp_service import OtpService
+import traceback
+import logging
+
+IS_DEV = os.getenv("ENVIRONMENT") == 'dev'
+
+# otp_secret = os.getenv("OTP_SECRET")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.API_VERSION.value}{AuthRoutes.BASE_ROUTE.value}{AuthRoutes.LOGIN.value}')
 
@@ -109,12 +119,107 @@ async def signup(signup_data: SignUp, session: SessionDep):
 
 
 
+@router.post(AuthRoutes.REQUEST_OTP.value, response_model=OTPResponse)
+async def request_otp(payload: OTPRequestSchema):
+
+    otp_secret = os.getenv('OTP_SECRET')
+
+    try:
+        otp = await OtpService.request_otp(
+            # tenant_id=payload.tenant_id,
+            purpose=payload.purpose,
+            identifier=payload.identifier,
+            otp_secret=otp_secret,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except Exception:
+        logging.exception("OTP error")
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if IS_DEV:
+        return OTPResponse(message="OTP generated successfully", otp=otp) 
+    
+    return OTPResponse(message="OTP generated successfully")
+
+
+
+@router.post(AuthRoutes.VERIFY_OTP.value, response_model=OTPResponse)
+async def verify_otp(
+    payload: OTPVerifySchema,
+    session: SessionDep):
+
+    otp_secret = os.getenv('OTP_SECRET')
+
+    try:
+        is_valid = await OtpService.verify_otp(
+            # tenant_id=payload.tenant_id,
+            purpose=payload.purpose,
+            identifier=payload.identifier,
+            otp=payload.otp,
+            otp_secret=otp_secret,
+        )
+
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid OTP"
+            )
+
+        # 👉 Activate user (example for signup flow)
+        if payload.purpose == "signup":
+            user = session.exec(
+                select(UserModel).where(UserModel.email == payload.identifier)
+            ).first()
+
+            if not user:
+                raise HTTPException(
+                    status_code=404,
+                    detail="User not found"
+                )
+
+            user.verified = True
+            session.add(user)
+            session.commit()
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=str(e)
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logging.exception("OTP verification error")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error"
+        )
+
+    return OTPVerifyResponse(
+    message="OTP verified successfully",
+    verified=True)
+
+
 @router.get("/users/me/", response_model=User)
 async def read_users_me(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ):
     return current_user
 
+
+'''
+If you want next, I can help you:
+
+Issue JWT immediately after OTP verification (passwordless auth 🔥)
+Add resend OTP cooldown
+Implement OTP for login (passwordless login)
+Mock Redis for tests (important for CI)
+'''
 
 # @router.post("/heroes/", response_model=HeroModel)
 # async def create_hero(hero: Hero, session: SessionDep):
