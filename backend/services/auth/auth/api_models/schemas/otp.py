@@ -1,6 +1,7 @@
 from sqlmodel import Field
 from pydantic import BaseModel, EmailStr
 from auth.utility.otp.otp_enums import OtpPurpose
+from auth.api_models.token import TokenData
 
 class OTPRequestSchema(BaseModel):
     identifier: EmailStr | str = Field(description="Email or phone")
@@ -21,3 +22,4 @@ class OTPResponse(BaseModel):
 class OTPVerifyResponse(BaseModel):
     message: str
     verified: bool
+    token: TokenData | None = None

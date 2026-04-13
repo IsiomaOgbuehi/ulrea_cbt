@@ -9,3 +9,10 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     access_token: str
     token_type: str | None = 'bearer'
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"

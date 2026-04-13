@@ -10,4 +10,7 @@ class SignUp(BaseModel):
 class SignUpResponse(BaseModel):
     organization: OrganizationRead
     user: UserRead
-    token: TokenData
+    # token: TokenData
+    otp_required: bool = True        # frontend uses this to route to OTP screen
+    otp_sent_to: str
+    otp: str | None = None # only populated in dev, stripped in prod 

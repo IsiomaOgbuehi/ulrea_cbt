@@ -1,11 +1,11 @@
-import os
 import hashlib
 import secrets
 import hmac
 import json
 from redis.asyncio import Redis
+from auth.core.settings import settings
 
-IS_DEV = os.getenv("ENVIRONMENT") == 'dev'
+IS_DEV = settings.ENVIRONMENT == "dev"
 
 OTP_TTL_SECONDS = 300
 RATE_LIMIT_WINDOW = 600
@@ -13,17 +13,16 @@ MAX_REQUESTS = 3
 MAX_ATTEMPTS = 5
 
 redis_client = Redis(decode_responses=True)
-otp_secret = os.getenv('OTP_SECRET')
 
 
 class OtpService:
+    _secret: str = settings.OTP_SECRET
 
     @classmethod
     async def request_otp(
         cls,
         purpose: str,
         identifier: str,
-        otp_secret: str,
     ):
         identifier = identifier.strip().lower()
 
@@ -34,7 +33,7 @@ class OtpService:
         key = cls._otp_key(purpose, identifier)
 
         payload = {
-            "otp_hash": cls._hash_otp(otp, otp_secret),
+            "otp_hash": cls._hash_otp(otp, cls._secret),
             "attempts": 0,
             "max_attempts": MAX_ATTEMPTS,
         }
@@ -50,7 +49,6 @@ class OtpService:
         purpose: str,
         identifier: str,
         otp: str,
-        otp_secret: str,
     ):
         identifier = identifier.strip().lower()
         key = cls._otp_key(purpose, identifier)
@@ -67,7 +65,7 @@ class OtpService:
             raise ValueError("Too many attempts")
 
         expected = data["otp_hash"]
-        provided = cls._hash_otp(otp, otp_secret)
+        provided = cls._hash_otp(otp, cls._secret)
 
         if not hmac.compare_digest(expected, provided):
             data["attempts"] += 1
@@ -120,3 +118,12 @@ class OtpService:
 
         if count > MAX_REQUESTS:
             raise ValueError("Too many OTP requests")
+        
+    
+    @classmethod
+    async def invalidate_otp(cls, purpose: str, identifier: str):
+        key = cls._otp_key(purpose, identifier)
+        await redis_client.delete(key)
+        # Also clear the rate limit increment so the failed attempt doesn't count
+        rl_key = f"otp_rl:{purpose}:{identifier.strip().lower()}"
+        await redis_client.decr(rl_key)

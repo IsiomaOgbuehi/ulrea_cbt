@@ -5,41 +5,21 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 from jwt.exceptions import InvalidTokenError
-# from pwdlib import PasswordHash
 from dotenv import load_dotenv
 import os
-# from api.v1.routes.auth import oauth2_scheme, fake_users_db
 from auth.api_models.user import UserInDB
 from auth.api_models.token import TokenData
-# from dependencies .user_dependencies import get_user
 from auth.api.v1.auth_routes import AuthRoutes
 from sqlmodel import Session
+from auth.core.settings import settings
 
 load_dotenv()
 
 
-SECRET_KEY = os.getenv('SECRET_KEY')
+SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# password_hash = PasswordHash.recommended()
-
-fake_users_db = {
-    "johndoe": {
-        "username": "johndoe",
-        "full_name": "John Doe",
-        "email": "johndoe@example.com",
-        "hashed_password": "fakehashedsecret",
-        "disabled": False,
-    },
-    "alice": {
-        "username": "alice",
-        "full_name": "Alice Wonderson",
-        "email": "alice@example.com",
-        "hashed_password": "fakehashedsecret2",
-        "disabled": True,
-    },
-}
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.API_VERSION.value}{AuthRoutes.BASE_ROUTE.value}{AuthRoutes.LOGIN.value}')
 

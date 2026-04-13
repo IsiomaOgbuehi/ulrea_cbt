@@ -9,6 +9,7 @@ class UserCreate(UserBase):
 class UserRead(UserBase):
     id: UUID
     org_id: UUID
+    verified: bool
 
 class UserUpdate(UserBase):
     pass

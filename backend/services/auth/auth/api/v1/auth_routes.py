@@ -9,3 +9,4 @@ class AuthRoutes(Enum):
     LOGOUT = '/logout'
     REQUEST_OTP = '/otp/request'
     VERIFY_OTP = '/otp/verify'
+    REFRESH_TOKEN = '/token/refresh'

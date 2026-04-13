@@ -1,17 +1,14 @@
 from fastapi import FastAPI
 from sqlalchemy import Engine
 from .database_interface import IDatabase
-from dotenv import load_dotenv
-import os
 from sqlmodel import SQLModel, create_engine, Session
+from auth.core.settings import settings
 
-load_dotenv()
-
-DATABASE_HOST = os.getenv('POSTGRES_SERVER')
-DATABASE_PORT = os.getenv('POSTGRES_PORT')
-DATABASE_NAME = os.getenv('POSTGRES_DB')
-DATABASE_USER = os.getenv('POSTGRES_USER')
-DATABASE_PASSWORD = os.getenv('POSTGRES_PASSWORD')
+DATABASE_HOST = settings.POSTGRES_SERVER
+DATABASE_PORT = settings.POSTGRES_PORT
+DATABASE_NAME = settings.POSTGRES_DB
+DATABASE_USER = settings.POSTGRES_USER
+DATABASE_PASSWORD = settings.POSTGRES_PASSWORD
 
 connect_args = {} #{"check_same_thread": False}
 
