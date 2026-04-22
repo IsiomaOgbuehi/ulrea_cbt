@@ -58,3 +58,38 @@ class EmailService:
     def mask_email(email: str) -> str:
         local, domain = email.split("@")
         return f"{local[0]}***@{domain}"  # j***@cbtech.com
+    
+    @staticmethod
+    async def send_staff_welcome_email(email: str, firstname: str, temp_password: str):
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #4A90E2; text-align: center;">Welcome to the Platform</h2>
+                    <p>Hello {firstname},</p>
+                    <p>An account has been created for you. Use the temporary password below to log in for the first time:</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <span style="font-size: 24px; font-weight: bold; letter-spacing: 3px; color: #000; background: #f4f4f4; padding: 10px 20px; border-radius: 5px;">
+                            {temp_password}
+                        </span>
+                    </div>
+                    <p><strong>You will be required to change this password on your first login.</strong></p>
+                    <p>If you did not expect this email, please contact your administrator immediately.</p>
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    <p style="font-size: 12px; color: #888; text-align: center;">
+                        This is an automated message, please do not reply.
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+
+        message = MessageSchema(
+            subject="Your Account Has Been Created",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html
+        )
+
+        fm = FastMail(conf)
+        await fm.send_message(message)

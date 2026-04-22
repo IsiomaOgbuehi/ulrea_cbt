@@ -11,7 +11,7 @@ JWT_ALGORITHM = settings.JWT_ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = float(settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 REFRESH_TOKEN_EXPIRE_DAYS = int(settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-def create_access_token(subject: UUID) -> Token:
+def create_access_token(subject: UUID, org_id: UUID, role: str) -> Token:
     jti = str(uuid4())
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=ACCESS_TOKEN_EXPIRE_MINUTES
@@ -20,7 +20,10 @@ def create_access_token(subject: UUID) -> Token:
     payload = {
         'sub': str(subject),
         'jti': jti,
+        'org_id': str(org_id),
+        'role': role,
         'exp': expires_at,
+        'type': 'access',
     }
 
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)

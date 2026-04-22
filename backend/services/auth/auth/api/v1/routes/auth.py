@@ -24,6 +24,8 @@ from auth.core.settings import settings
 from auth.api_models.token import RefreshResponse, RefreshRequest
 from uuid import UUID
 
+from auth.database.schema.user.enums import UserRole
+
 
 IS_DEV = settings.ENVIRONMENT == "dev"
 
@@ -48,11 +50,23 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not user.verified:
-        raise HTTPException(status_code=403, detail="Account not verified. Please verify your email first.")
+    # SUPER_ADMIN signs up via /signup — must complete OTP verification first
+    if user.role == UserRole.SUPER_ADMIN and not user.verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Account not verified. Please verify your email first."
+        )
 
-    token_data = create_access_token(user.id)
-    refresh_token = create_refresh_token(user.id)
+    # Staff created by admin (non SUPER_ADMIN) — allow through on first login for setup
+    # but block if they somehow ended up unverified after completing setup
+    if user.role != UserRole.SUPER_ADMIN and not user.verified and not user.is_first_login:
+        raise HTTPException(
+            status_code=403,
+            detail="Account not verified. Please contact your administrator."
+        )
+
+    token_data = create_access_token(user.id, user.org_id, user.role)
+    refresh = create_refresh_token(user.id)
 
     organization = None
     if user.org_id:
@@ -62,11 +76,11 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
 
     return LoginResponse(
         access_token=token_data.access_token,
-        refresh_token=refresh_token,
+        refresh_token=refresh,
         user=UserRead.model_validate(user, from_attributes=True),
         organization=OrganizationRead.model_validate(organization, from_attributes=True) if organization else None,
+        requires_setup=user.is_first_login,
     )
-
 
 ''' REFRESH TOKEN 🔄 '''
 @router.post(AuthRoutes.REFRESH_TOKEN.value, response_model=RefreshResponse)
@@ -103,7 +117,7 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
     if not user.verified:
         raise HTTPException(status_code=403, detail="Account is not verified.")
 
-    new_token = create_access_token(user.id)
+    new_token = create_access_token(user.id, user.org_id, user.role)
 
     return RefreshResponse(access_token=new_token.access_token)
 
@@ -136,9 +150,9 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
 
 
 ''' GET TOKEN 🔑 '''
-@router.get(AuthRoutes.TOKEN.value)
-async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
-    return {'token': token}
+# @router.get(AuthRoutes.TOKEN.value)
+# async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
+#     return {'token': token}
 
 
 ''' SIGN UP 🧑‍💻 '''
@@ -371,7 +385,7 @@ async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
             session.refresh(user)
 
             # 🎟️ Issue token now that account is verified
-            token_data = create_access_token(user.id)
+            token_data = create_access_token(user.id, user.org_id, user.role)
 
             return OTPVerifyResponse(
                 message="Account verified successfully.",
@@ -391,11 +405,11 @@ async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
 
 
 
-@router.get("/users/me/", response_model=User)
-async def read_users_me(
-    current_user: Annotated[User, Depends(get_current_active_user)],
-):
-    return current_user
+# @router.get("/users/me/", response_model=User)
+# async def read_users_me(
+#     current_user: Annotated[User, Depends(get_current_active_user)],
+# ):
+#     return current_user
 
 
 '''

@@ -11,3 +11,4 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     user: UserRead
     organization: OrganizationRead | None = None
+    requires_setup: bool = False  # frontend redirects to /setup if True

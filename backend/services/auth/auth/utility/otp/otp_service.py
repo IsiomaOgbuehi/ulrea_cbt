@@ -4,6 +4,7 @@ import hmac
 import json
 from redis.asyncio import Redis
 from auth.core.settings import settings
+from auth.utility.redis.redis_client import redis_client as _redis
 
 IS_DEV = settings.ENVIRONMENT == "dev"
 
@@ -12,7 +13,7 @@ RATE_LIMIT_WINDOW = 600
 MAX_REQUESTS = 3
 MAX_ATTEMPTS = 5
 
-redis_client = Redis(decode_responses=True)
+redis_client = _redis # Redis(decode_responses=True)
 
 
 class OtpService:

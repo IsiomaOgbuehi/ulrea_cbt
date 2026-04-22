@@ -12,21 +12,16 @@ from sqlmodel import Session, select
 
 
 def get_user(db: Session, email: str) -> UserModel:
-    user = db.exec(
+    return db.exec(
         select(UserModel).where(UserModel.email == email)
-    ).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    return UserModel.model_validate(user)
+    ).first()  # returns None if not found, never raises
 
 def authenticate_user(db:Session, email: str, password: str) -> UserRead:
     user = get_user(db, email)
     if not user:
-        return False
+        return None
+    if not user.password:
+        return None  # student has no password
     if not PasswordHasher.verify(password, user.password):
         return False
     return UserRead.model_validate(user)
