@@ -1,8 +1,14 @@
 from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 
+
 class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    ENVIRONMENT: str = "dev"
+
+    # Database
+    DATABASE_URL: str = "sqlite:///./item_bank.db"
 
     POSTGRES_SERVER: str
     POSTGRES_PORT: str
@@ -17,10 +23,11 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    AUTH_SERVICE_URL: str = "http://localhost:8000/api/v1"
+    INTERNAL_SECRET: str   # must match auth service
+
 
     OTP_SECRET: str
-    ENVIRONMENT: str = "dev"
-    INTERNAL_SECRET: str
     
     # Redis
     REDIS_URL: str
@@ -34,4 +41,5 @@ class Settings(BaseSettings):
     MAIL_SERVER: str = "smtp.gmail.com"
     MAIL_PORT: int = 587
 
-settings = Settings()  # raises immediately if any required field is missing
+
+settings = Settings()
