@@ -2,6 +2,7 @@ from enum import Enum
 
 class OtpPurpose(str, Enum):
     LOGIN = 'login'
+    LOGIN_VERIFICATION = 'login_verification'
     FORGOT_PASSWORD = 'forgot_password'
     SIGNUP = 'signup'
     CHANGE_PHONE = 'change_phone'

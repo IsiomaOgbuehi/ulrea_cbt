@@ -77,7 +77,7 @@ def test_super_admin_can_create_student(client):
     assert response.status_code == 200, response.json()
     data = response.json()
     assert data['role'] == 'student'
-    assert len(data['access_code']) == 6
+    assert len(data['access_code']) == 11
     assert data['is_first_login'] is True
 
 
@@ -125,6 +125,7 @@ def test_staff_first_login_setup(client):
     setup_response = client.post(
         "/api/v1/users/init/staff",
         json={
+            "email": TEACHER_PAYLOAD["email"],
             "current_password": temp_password,
             "new_password": "newSecurePass123!",
             "confirm_new_password": "newSecurePass123!",
@@ -207,3 +208,143 @@ def test_teacher_cannot_create_users(client):
     # Teacher tries to create another user — should be forbidden
     # (would need teacher to complete setup first to get a valid token)
     # This is a permissions test — the role check fires before anything else
+
+
+def test_staff_account_activation(client):
+    from auth.utility.jwt.token_activation import create_staff_activation_token
+
+    token = get_super_admin_token(client)
+
+    # Create teacher account
+    create_response = client.post(
+        "/api/v1/users/create/staff",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert create_response.status_code == 200, create_response.json()
+
+    created_user = create_response.json()
+
+    assert created_user["is_first_login"] is True
+    # assert created_user["verified"] is False
+
+    # Generate activation token
+    activation_token = create_staff_activation_token(
+        created_user["id"]
+    )
+
+    # Activate account
+    activate_response = client.post(
+        "/api/v1/users/staff/activate",
+        json={
+            "token": activation_token,
+            "password": "newSecurePass123!",
+            "confirm_password": "newSecurePass123!",
+        },
+    )
+
+    assert activate_response.status_code == 200, activate_response.json()
+
+    activate_data = activate_response.json()
+
+    assert activate_data["detail"] == "Account activated successfully."
+    assert "access_token" in activate_data
+    assert "refresh_token" in activate_data
+
+    # Login with new password
+    login_response = client.post(
+        "/api/v1/auth/login",
+        data={
+            "username": TEACHER_PAYLOAD["email"],
+            "password": "newSecurePass123!",
+        },
+    )
+
+    assert login_response.status_code == 200, login_response.json()
+
+    login_data = login_response.json()
+
+    assert "access_token" in login_data
+
+
+
+
+
+def test_student_can_fetch_security_question(client):
+    token = get_super_admin_token(client)
+
+    # Create student
+    create_response = client.post(
+        "/api/v1/users/create/students",
+        json=STUDENT_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert create_response.status_code == 200, create_response.json()
+
+    access_code = create_response.json()["access_code"]
+
+    # Complete first-time setup
+    setup_response = client.post(
+        "/api/v1/users/init/student",
+        json={
+            "access_code": access_code,
+            "favorite_question": "What is your pet's name?",
+            "favorite_answer": "Fluffy",
+        },
+    )
+
+    assert setup_response.status_code == 200, setup_response.json()
+
+    # Fetch security question
+    response = client.post(
+        "/api/v1/users/login/student/question",
+        json={
+            "access_code": access_code,
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+
+    data = response.json()
+
+    assert data["favorite_question"] == "What is your pet's name?"
+
+
+def test_student_question_invalid_access_code(client):
+    response = client.post(
+        "/api/v1/users/login/student/question",
+        json={
+            "access_code": "INVALID123",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Invalid access code."
+
+
+def test_student_question_requires_first_time_setup(client):
+    token = get_super_admin_token(client)
+
+    # Create student only (no setup yet)
+    create_response = client.post(
+        "/api/v1/users/create/students",
+        json=STUDENT_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    access_code = create_response.json()["access_code"]
+
+    response = client.post(
+        "/api/v1/users/login/student/question",
+        json={
+            "access_code": access_code,
+        },
+    )
+
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"]
+        == "Please complete first-time setup first."
+    )

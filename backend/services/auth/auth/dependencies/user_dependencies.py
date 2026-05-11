@@ -4,7 +4,8 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 
 # from auth.api_models.user import User, UserInDB
-from auth.database.schema import UserModel, UserRead
+from auth.database.schema import UserModel
+from auth.api_models.user_api_models import UserRead
 from auth.dependencies.auth_dependencies import get_current_user as current_user
 from auth.utility.password.password_harsher import PasswordHasher
 from sqlmodel import Session, select

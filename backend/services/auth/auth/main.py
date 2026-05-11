@@ -6,21 +6,39 @@ from auth.database.database import database_engine
 from contextlib import asynccontextmanager
 from redis.asyncio import Redis
 from auth.utility.redis.redis_client import redis_client
+from alembic.config import Config
+from alembic import command
+import logging
+import time
 
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     SQLModel.metadata.create_all(database_engine)
-#     yield
+def run_migrations():
+    alembic_cfg = Config("alembic.ini")
 
-# redis_client = Redis(
-#     decode_responses=True,
-#     socket_connect_timeout=2,
-#     socket_timeout=2,
-#     # retry_on_timeout=True,
-# )
+    for i in range(5):
+        try:
+            command.upgrade(alembic_cfg, "head")
+            logging.info("Migration successful")
+            return
+        except Exception as e:
+            logging.warning(f"Retry {i+1} failed: {e}")
+            time.sleep(3)
+
+    raise RuntimeError("Migration failed after retries")
+
+# def run_migrations():
+#     try:
+#         alembic_cfg = Config("alembic.ini")
+#         command.upgrade(alembic_cfg, "head")
+#         logging.info("Database migrations completed successfully")
+#     except Exception as e:
+#         logging.exception("Migration failed")
+#         raise RuntimeError(f"Migration failed: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Run migrations before accepting requests
+    # run_migrations()
+
     # Startup
     try:
         await redis_client.ping()

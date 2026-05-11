@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from auth.core.settings import settings
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
-from auth.utility.redis import redis_client
+from auth.utility.redis.redis_client import redis_client
 
 
 SECRET_KEY = settings.SECRET_KEY

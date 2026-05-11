@@ -6,3 +6,4 @@ class UserRole(str, Enum):
     TEACHER = 'teacher'
     STUDENT = 'student'
     SUPERVISOR = 'supervisor'
+    STAFF = 'staff'

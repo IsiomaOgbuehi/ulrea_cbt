@@ -19,7 +19,7 @@ class UserBase(SQLModel):
     institution_id: str | None = None   # like student or staff registration numbers
     
     # Student-specific
-    access_code: str | None = Field(default=None, index=True) # 6-char alphanumeric
+    access_code: str | None = Field(default=None, index=True, unique=True) # 6-char alphanumeric
     favorite_question: str | None = None
     favorite_answer_hash: str | None = None                   # hashed like password
 

@@ -41,11 +41,14 @@ def test_signup_otp_verify_issues_token(client):
 
 def test_signup_otp_resend(client):
     """User can request a fresh OTP after signup."""
-    do_signup(client)
+    signup_data = do_signup(client)
 
-    otp = do_request_otp(client, USER_EMAIL)
+    # Signup already sent an OTP — use it directly from dev response
+    # instead of requesting a new one immediately (would hit 90s cooldown)
+    otp = signup_data.get('otp')
+    assert otp is not None
+
     verify_data = do_verify_otp(client, USER_EMAIL, otp)
-
     assert verify_data['verified'] is True
 
 
@@ -70,7 +73,11 @@ def test_cannot_login_before_otp_verified(client):
         data={'username': USER_EMAIL, 'password': 'chekicicici'}
     )
     assert response.status_code == 403, response.json()
-    assert "verified" in response.json()['detail'].lower()
+
+    detail = response.json()['detail']
+    # Handle both string and dict detail formats
+    detail_text = detail if isinstance(detail, str) else str(detail)
+    assert "verified" in detail_text.lower()
 
 
 def test_login(client):

@@ -3,21 +3,21 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlmodel import select
-from auth.api_models.login_response import LoginResponse, Token, User, TokenData
+from auth.api_models.login_response import LoginResponse, TokenData
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import SessionDep
-from auth.dependencies.user_dependencies import authenticate_user, get_current_active_user
+from auth.dependencies.user_dependencies import authenticate_user
 from auth.utility.jwt.jwt import create_access_token, create_refresh_token, decode_refresh_token
 from datetime import datetime, timezone
 from auth.api_models import SignUp, SignUpResponse
-from auth.database.schema import OrganizationModel, UserModel, OrganizationRead, UserRead
+from auth.database.schema import OrganizationModel, UserModel, OrganizationRead
+from auth.api_models.user_api_models import StaffUserResponse, UserRead
 from auth.utility.password.password_harsher import PasswordHasher
 import jwt
 from auth.utility.redis.redis_client import redis_client
 from auth.api_models.schemas.otp import OTPResponse, OTPRequestSchema, OTPVerifyResponse, OTPVerifySchema
 from auth.utility.otp.otp_service import OtpService
 import logging
-from fastapi import BackgroundTasks
 import asyncio
 from auth.utility.email.email_service import EmailService
 from auth.core.settings import settings
@@ -25,6 +25,7 @@ from auth.api_models.token import RefreshResponse, RefreshRequest
 from uuid import UUID
 
 from auth.database.schema.user.enums import UserRole
+from auth.utility.otp.otp_enums import OtpPurpose
 
 
 IS_DEV = settings.ENVIRONMENT == "dev"
@@ -36,6 +37,26 @@ router = APIRouter(
     tags=['auth'],
     responses={401: {'message': 'Unauthorized'}}
 )
+
+async def handle_unverified_user(user: UserModel):
+    try:
+        otp = await OtpService.request_otp(
+            purpose=OtpPurpose.LOGIN_VERIFICATION,
+            identifier=user.email,
+        )
+
+        await EmailService.send_otp_email(user.email, otp)
+
+        return {
+            "message": "Account not verified. OTP has been sent.",
+            "code": "ACCOUNT_NOT_VERIFIED",
+            "action": "VERIFY_OTP",
+            "identifier": user.email
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=429, detail=str(e))  # 429 = Too Many Requests
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) 
 
 
 '''LOGIN 🔐 '''
@@ -52,18 +73,14 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
 
     # SUPER_ADMIN signs up via /signup — must complete OTP verification first
     if user.role == UserRole.SUPER_ADMIN and not user.verified:
-        raise HTTPException(
-            status_code=403,
-            detail="Account not verified. Please verify your email first."
-        )
+        detail = await handle_unverified_user(user)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
     # Staff created by admin (non SUPER_ADMIN) — allow through on first login for setup
     # but block if they somehow ended up unverified after completing setup
     if user.role != UserRole.SUPER_ADMIN and not user.verified and not user.is_first_login:
-        raise HTTPException(
-            status_code=403,
-            detail="Account not verified. Please contact your administrator."
-        )
+        detail = await handle_unverified_user(user)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
     token_data = create_access_token(user.id, user.org_id, user.role)
     refresh = create_refresh_token(user.id)
@@ -77,7 +94,7 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
     return LoginResponse(
         access_token=token_data.access_token,
         refresh_token=refresh,
-        user=UserRead.model_validate(user, from_attributes=True),
+        user=StaffUserResponse.model_validate(user, from_attributes=True),
         organization=OrganizationRead.model_validate(organization, from_attributes=True) if organization else None,
         requires_setup=user.is_first_login,
     )
@@ -149,10 +166,6 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
     return {"detail": "Successfully logged out"}
 
 
-''' GET TOKEN 🔑 '''
-# @router.get(AuthRoutes.TOKEN.value)
-# async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
-#     return {'token': token}
 
 
 ''' SIGN UP 🧑‍💻 '''
@@ -161,113 +174,69 @@ async def signup(signup_data: SignUp, session: SessionDep):
 
     if signup_data.user.password != signup_data.user.confirm_password:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={'message': 'Password and Confirm password mismatch'}
+            status_code=422,
+            detail={"message": "Password and Confirm password mismatch"}
         )
 
-    # 1️⃣ Create organization and user inside a transaction
+    # 1️⃣ Create org + user
     organization = OrganizationModel.model_validate(signup_data.organization)
     session.add(organization)
-    session.flush()  # get organization.id without committing yet
+    session.flush()
 
     user = UserModel.model_validate(
         signup_data.user,
         update={
-            'org_id': organization.id,
-            'password': PasswordHasher.create(signup_data.user.password),
-            'verified': False,
+            "org_id": organization.id,
+            "password": PasswordHasher.create(signup_data.user.password),
+            "verified": False,
         },
     )
+
     session.add(user)
-    session.flush()  # get user.id without committing yet
+    session.commit()  # ✅ commit FIRST
 
-    # 2️⃣ Generate OTP before committing — if this fails, nothing is saved
-    try:
-        otp = await OtpService.request_otp(
-            purpose="signup",
-            identifier=user.email,
-        )
-    except ValueError as e:
-        session.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        session.rollback()
-        logging.exception("OTP generation error during signup")
-        raise HTTPException(status_code=500, detail="Failed to generate OTP. Please try again.")
-
-    # 3️⃣ Send OTP before committing — if this fails, nothing is saved
-    try:
-        await asyncio.wait_for(
-            EmailService.send_otp_email(user.email, otp),
-            timeout=10.0
-        )
-    except asyncio.TimeoutError:
-        session.rollback()
-        await OtpService.invalidate_otp("signup", user.email)
-        logging.error("OTP email timed out during signup for %s", user.email)
-        raise HTTPException(status_code=502, detail="Email service timed out. Please try again.")
-    except Exception:
-        session.rollback()
-        await OtpService.invalidate_otp("signup", user.email)
-        logging.exception("OTP email failed during signup for %s", user.email)
-        raise HTTPException(status_code=502, detail="Failed to send OTP email. Please try again.")
-
-    # 4️⃣ Everything succeeded — now commit
-    session.commit()
-    session.refresh(organization)
     session.refresh(user)
 
-    response = SignUpResponse(
-        organization=OrganizationRead.model_validate(organization, from_attributes=True),
-        user=UserRead.model_validate(user, from_attributes=True),
-        otp_sent_to=EmailService.mask_email(user.email)
-    )
+    # 2️⃣ Generate OTP AFTER commit
+    try:
+        otp = await OtpService.request_otp(
+            purpose=OtpPurpose.SIGNUP,
+            identifier=user.email,
+        )
+    except Exception:
+        logging.exception("OTP generation failed after signup commit")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate OTP"
+        )
+
+    # 3️⃣ Send OTP
+    try:
+        await EmailService.send_otp_email(user.email, otp)
+    except Exception:
+        logging.exception("OTP email failed for %s", user.email)
+
+        # optional: retry queue instead of rollback (better in production)
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to send OTP email"
+        )
+    
+    if IS_DEV:
+        return {
+            "organization": OrganizationRead.model_validate(organization, from_attributes=True),
+            "user": UserRead.model_validate(user, from_attributes=True),
+            "otp_sent_to": EmailService.mask_email(user.email),
+            "otp": otp,
+        }
 
     return SignUpResponse(
         organization=OrganizationRead.model_validate(organization, from_attributes=True),
         user=UserRead.model_validate(user, from_attributes=True),
         otp_sent_to=EmailService.mask_email(user.email),
-        otp=otp if IS_DEV else None,
     )
 
-# @router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
-# async def signup(signup_data: SignUp, session: SessionDep):
 
-#     if signup_data.user.password != signup_data.user.confirm_password:
-#         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail={'message': 'Password and Confirm password mismatch'})
-
-#     # 1️⃣ Create user (super admin)
-#     organization = OrganizationModel.model_validate(signup_data.organization)
-
-#     session.add(organization)
-#     session.commit()
-#     session.refresh(organization)
-
-#     # 2️⃣ Create user (super admin)
-#     user = UserModel.model_validate(
-#         signup_data.user,
-#         update={
-#             'org_id': organization.id,
-#             'password': PasswordHasher.create(signup_data.user.password)
-#         },
-#     )
-#     session.add(user)
-#     session.commit()
-#     session.refresh(user)
-
-#     token_data = create_access_token(user.id)
-#     token = TokenData(access_token=token_data.access_token)
-
-#     return SignUpResponse(
-#         organization=OrganizationRead.model_validate(
-#             organization,
-#             from_attributes=True
-#         ),
-#         user=UserRead.model_validate(
-#             user,
-#             from_attributes=True
-#         ),
-#         token=token)
 
 
 ''' REQUEST OTP 📨 '''
@@ -275,7 +244,7 @@ async def signup(signup_data: SignUp, session: SessionDep):
 async def request_otp(payload: OTPRequestSchema, session: SessionDep):
 
     # For signup purpose, ensure the user actually exists before sending OTP
-    if payload.purpose == "signup":
+    if payload.purpose == OtpPurpose.SIGNUP:
         user = session.exec(
             select(UserModel).where(UserModel.email == payload.identifier)
         ).first()
@@ -317,40 +286,6 @@ async def request_otp(payload: OTPRequestSchema, session: SessionDep):
     return OTPResponse(message="OTP sent successfully")
 
 
-# @router.post(AuthRoutes.REQUEST_OTP.value, response_model=OTPResponse)
-# async def request_otp(payload: OTPRequestSchema, background_tasks: BackgroundTasks):
-
-    try:
-        otp = await OtpService.request_otp(
-            purpose=payload.purpose,
-            identifier=payload.identifier
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        logging.exception("OTP generation error")
-        raise HTTPException(status_code=500, detail="Internal error")
-
-    # Await directly — no background task
-    try:
-        await asyncio.wait_for(
-        EmailService.send_otp_email(payload.identifier, otp),
-        timeout=10.0  # seconds
-    )
-    except asyncio.TimeoutError:
-        logging.error("OTP email timed out for %s", payload.identifier)
-        await OtpService.invalidate_otp(payload.purpose, payload.identifier)
-        raise HTTPException(status_code=502, detail="Email service timed out. Please try again.")
-    except Exception:
-        logging.exception("OTP email failed for %s", payload.identifier)
-        # OTP was saved in Redis — roll it back so the user can retry cleanly
-        await OtpService.invalidate_otp(payload.purpose, payload.identifier)
-        raise HTTPException(status_code=502, detail="Failed to send OTP email. Please try again.")
-
-    if IS_DEV:
-        return OTPResponse(message="OTP sent successfully", otp=otp)
-
-    return OTPResponse(message="OTP sent successfully")
 
 
 ''' VERIFY OTP ✅ '''
@@ -358,6 +293,7 @@ async def request_otp(payload: OTPRequestSchema, session: SessionDep):
 async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
 
     try:
+        # ✅ Verify OTP first
         is_valid = await OtpService.verify_otp(
             purpose=payload.purpose,
             identifier=payload.identifier,
@@ -365,51 +301,67 @@ async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
         )
 
         if not is_valid:
-            raise HTTPException(status_code=400, detail="Invalid OTP.")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid OTP."
+            )
 
-        if payload.purpose == "signup":
-            user = session.exec(
-                select(UserModel).where(UserModel.email == payload.identifier)
-            ).first()
+        # ✅ Find user
+        user = session.exec(
+            select(UserModel).where(
+                UserModel.email == payload.identifier
+            )
+        ).first()
 
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found.")
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found."
+            )
 
-            if user.verified:
-                raise HTTPException(status_code=400, detail="Account already verified.")
-
-            # ✅ Activate account
+        # ✅ Activate account if not verified
+        if not user.verified:
             user.verified = True
+
             session.add(user)
             session.commit()
             session.refresh(user)
 
-            # 🎟️ Issue token now that account is verified
-            token_data = create_access_token(user.id, user.org_id, user.role)
+        # ✅ Issue tokens
+        access_token = create_access_token(
+            user.id,
+            user.org_id,
+            user.role,
+        )
 
-            return OTPVerifyResponse(
-                message="Account verified successfully.",
-                verified=True,
-                token=TokenData(access_token=token_data.access_token)
+        refresh_token = create_refresh_token(user.id)
+
+        return OTPVerifyResponse(
+            message="OTP verified successfully.",
+            verified=True,
+            token=TokenData(
+                access_token=access_token.access_token,
+                refresh_token=refresh_token,
             )
+        )
 
     except ValueError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(
+            status_code=429,
+            detail=str(e)
+        )
+
     except HTTPException:
         raise
+
     except Exception:
         logging.exception("OTP verification error")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
-    return OTPVerifyResponse(message="OTP verified successfully.", verified=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error"
+        )
 
-
-
-# @router.get("/users/me/", response_model=User)
-# async def read_users_me(
-#     current_user: Annotated[User, Depends(get_current_active_user)],
-# ):
-#     return current_user
 
 
 '''
@@ -418,47 +370,3 @@ Add resend OTP cooldown
 Implement OTP for login (passwordless login)
 Mock Redis for tests (important for CI)
 '''
-
-# @router.post("/heroes/", response_model=HeroModel)
-# async def create_hero(hero: Hero, session: SessionDep):
-    
-#     db_hero = HeroModel.model_validate(hero)
-#     session.add(db_hero)
-#     session.commit()
-#     session.refresh(db_hero)
-#     return db_hero
-
-# @router.put("/heroes/{hero_id}", response_model=HeroRead)
-# async def update_hero_put(
-#     hero_id: int,
-#     hero: Hero,
-#     session: SessionDep,
-# ):
-#     db_hero = session.get(HeroModel, hero_id)
-#     if not db_hero:
-#         raise HTTPException(status.HTTP_404_NOT_FOUND, detail={'message': 'Hero not Found'})
-
-#     for key, value in hero.model_dump().items():
-#         setattr(db_hero, key, value)
-
-#     session.commit()
-#     session.refresh(db_hero)
-#     return db_hero
-
-# @router.patch("/heroes/{hero_id}", response_model=HeroRead)
-# def update_hero_patch(
-#     hero_id: int,
-#     hero: Hero,
-#     session: SessionDep,
-# ):
-#     db_hero = session.get(HeroModel, hero_id)
-#     if not db_hero:
-#         raise HTTPException(404)
-
-#     hero_data = hero.model_dump(exclude_unset=True)
-#     for key, value in hero_data.items():
-#         setattr(db_hero, key, value)
-
-#     session.commit()
-#     session.refresh(db_hero)
-#     return db_hero

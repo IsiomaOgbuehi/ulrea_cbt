@@ -7,22 +7,53 @@ from sqlmodel import select
 from auth.database.schema.user.enums import UserRole
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
-from auth.database.schema.user.user_api_models import CreateStaffUser, CreateStudent
+from auth.api_models.user_api_models import CreateStaffUser, CreateStudent
 from auth.utility.password.password_harsher import PasswordHasher
 
 
 # Who can create whom
 CREATION_PERMISSIONS: dict[UserRole, list[UserRole]] = {
-    UserRole.SUPER_ADMIN: [UserRole.ADMIN, UserRole.TEACHER, UserRole.SUPERVISOR, UserRole.STUDENT],
+    UserRole.SUPER_ADMIN: [UserRole.ADMIN, UserRole.TEACHER, UserRole.SUPERVISOR, UserRole.STUDENT, UserRole.STAFF],
     UserRole.ADMIN: [UserRole.TEACHER, UserRole.SUPERVISOR, UserRole.STUDENT],
 }
 
 class UserManagementService:
 
+    @classmethod
+    def generate_unique_access_code(
+        cls,
+        session: SessionDep,
+    ) -> str:
+        while True:
+            code = cls._generate_access_code()
+
+            existing = session.exec(
+                select(UserModel).where(
+                    UserModel.access_code == code
+                )
+            ).first()
+
+            if not existing:
+                return code
+
     @staticmethod
-    def _generate_access_code(length: int = 6) -> str:
-        alphabet = string.ascii_uppercase + string.digits
-        return "".join(secrets.choice(alphabet) for _ in range(length))
+    def _generate_access_code(length: int = 7) -> str:
+        """
+        Generates student access codes like:
+        STU-8F4K2Q9
+
+        Excludes ambiguous characters:
+        O, 0, I, 1, S, 5
+        """
+
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ2346789"
+
+        code = "".join(
+            secrets.choice(alphabet)
+            for _ in range(length)
+        )
+
+        return f"STU-{code}"
     
     staticmethod
     def _generate_temp_password(length: int = 12) -> str:
@@ -92,7 +123,7 @@ class UserManagementService:
 
         # Ensure access code is unique
         while True:
-            access_code = cls._generate_access_code()
+            access_code = cls.generate_unique_access_code(session)
             existing = session.exec(
                 select(UserModel).where(UserModel.access_code == access_code)
             ).first()

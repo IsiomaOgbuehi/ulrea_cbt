@@ -93,3 +93,137 @@ class EmailService:
 
         fm = FastMail(conf)
         await fm.send_message(message)
+        
+
+    @staticmethod
+    async def send_staff_activation_email(
+        email: str,
+        firstname: str,
+        activation_link: str,
+    ):
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+
+                    <h2 style="color: #4A90E2; text-align: center;">
+                        Activate Your Account
+                    </h2>
+
+                    <p>Hello {firstname},</p>
+
+                    <p>
+                        Your staff account has been created successfully.
+                    </p>
+
+                    <p>
+                        Click the button below to activate your account and set your password:
+                    </p>
+
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a
+                            href="{activation_link}"
+                            style="
+                                background-color: #4A90E2;
+                                color: white;
+                                padding: 14px 24px;
+                                text-decoration: none;
+                                border-radius: 6px;
+                                font-weight: bold;
+                                display: inline-block;
+                            "
+                        >
+                            Activate Account
+                        </a>
+                    </div>
+
+                    <p>
+                        This activation link will expire in 24 hours.
+                    </p>
+
+                    <p>
+                        If you did not expect this email, please ignore it.
+                    </p>
+
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+
+                    <p style="font-size: 12px; color: #888; text-align: center;">
+                        This is an automated message, please do not reply.
+                    </p>
+
+                </div>
+            </body>
+        </html>
+        """
+
+        message = MessageSchema(
+            subject="Activate Your Account",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html
+        )
+
+        fm = FastMail(conf)
+        await fm.send_message(message)
+
+    @staticmethod
+    async def send_student_access_code_email(
+        email: str,
+        firstname: str,
+        access_code: str,
+    ):
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif;">
+                <div style="max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    
+                    <h2 style="color: #4A90E2;">
+                        Student Access Code
+                    </h2>
+
+                    <p>Hello {firstname},</p>
+
+                    <p>
+                        Your student account has been created.
+                    </p>
+
+                    <p>
+                        Use the access code below to complete your first login setup:
+                    </p>
+
+                    <div style="text-align:center; margin:30px 0;">
+                        <span style="
+                            font-size:28px;
+                            font-weight:bold;
+                            letter-spacing:4px;
+                            background:#f4f4f4;
+                            padding:12px 20px;
+                            border-radius:6px;
+                        ">
+                            {access_code}
+                        </span>
+                    </div>
+
+                    <p>
+                        You will be asked to set your security question during setup.
+                    </p>
+
+                    <hr>
+
+                    <p style="font-size:12px;color:#888;">
+                        This is an automated message.
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+
+        message = MessageSchema(
+            subject="Your Student Access Code",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html,
+        )
+
+        fm = FastMail(conf)
+        await fm.send_message(message)

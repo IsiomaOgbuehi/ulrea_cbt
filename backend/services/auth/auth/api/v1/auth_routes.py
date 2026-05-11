@@ -15,5 +15,7 @@ class AuthRoutes(Enum):
     CREATE_STAFF = '/create/staff'
     CREATE_STUDENT = '/create/students'
     INIT_STAFF = '/init/staff'
+    STAFF_ACTIVATE = '/staff/activate'
     INIT_STUDENT = '/init/student'
     STUDENT_LOGIN = '/login/student'
+    STUDENT_LOGIN_QUESTION = '/login/student/question'
