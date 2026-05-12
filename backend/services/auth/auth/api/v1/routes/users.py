@@ -60,7 +60,7 @@ async def create_staff_user(
             f"/activate-staff-account"
             f"?token={activation_token}"
         )
-        print(f"Activation Link: {activation_link}")
+        
         await asyncio.wait_for(
             # EmailService.send_staff_welcome_email(user.email, user.firstname, temp_password),
             EmailService.send_staff_activation_email(

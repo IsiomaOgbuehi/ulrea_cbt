@@ -68,9 +68,10 @@ class UserManagementService:
         payload: CreateStaffUser,
         org_id: UUID,
     ) -> tuple[UserModel, str]:
-        """Returns (user, temporary_password). Caller must send temp password to user via email."""
+        """Returns (user, temporary_password)."""
 
         allowed = CREATION_PERMISSIONS.get(creator.role, [])
+
         if payload.role not in allowed:
             raise HTTPException(
                 status_code=403,
@@ -78,25 +79,38 @@ class UserManagementService:
             )
 
         existing = session.exec(
-            select(UserModel).where(UserModel.email == payload.email)
+            select(UserModel).where(
+                UserModel.email == payload.email
+            )
         ).first()
+
         if existing:
-            raise HTTPException(status_code=409, detail="A user with this email already exists.")
+            raise HTTPException(
+                status_code=409,
+                detail="A user with this email already exists."
+            )
 
         temp_password = cls._generate_temp_password()
 
-        user = UserModel(
-            firstname=payload.firstname,
-            lastname=payload.lastname,
-            othername=payload.othername or "",
-            email=payload.email,
-            phone=payload.phone,
-            role=payload.role,
-            org_id=org_id,
-            password=PasswordHasher.create(temp_password),
-            verified=False,
-            is_first_login=True,
-        )
+        user_data = {
+            "firstname": payload.firstname,
+            "lastname": payload.lastname,
+            "othername": payload.othername or "",
+            "email": payload.email.lower().strip(),
+            "phone": payload.phone,
+            "role": payload.role,
+            "org_id": org_id,
+            "password": PasswordHasher.create(temp_password),
+            "verified": False,
+            "is_first_login": True,
+        }
+
+        # Optional institution ID
+        if payload.institution_id:
+            user_data["institution_id"] = payload.institution_id
+
+        user = UserModel(**user_data)
+
         session.add(user)
         session.commit()
         session.refresh(user)
@@ -112,7 +126,7 @@ class UserManagementService:
         payload: CreateStudent,
         org_id: UUID,
     ) -> tuple[UserModel, str]:
-        """Returns (user, access_code). Caller must share access_code with student."""
+        """Returns (user, access_code)."""
 
         allowed = CREATION_PERMISSIONS.get(creator.role, [])
         if UserRole.STUDENT not in allowed:
@@ -124,23 +138,38 @@ class UserManagementService:
         # Ensure access code is unique
         while True:
             access_code = cls.generate_unique_access_code(session)
+
             existing = session.exec(
-                select(UserModel).where(UserModel.access_code == access_code)
+                select(UserModel).where(
+                    UserModel.access_code == access_code
+                )
             ).first()
+
             if not existing:
                 break
 
-        user = UserModel(
-            firstname=payload.firstname,
-            lastname=payload.lastname,
-            othername=payload.othername or "",
-            phone=payload.phone,
-            role=UserRole.STUDENT,
-            org_id=org_id,
-            access_code=access_code,
-            verified=False,
-            is_first_login=True,
-        )
+        user_data = {
+            "firstname": payload.firstname,
+            "lastname": payload.lastname,
+            "othername": payload.othername or "",
+            "phone": payload.phone,
+            "role": UserRole.STUDENT,
+            "org_id": org_id,
+            "access_code": access_code,
+            "verified": False,
+            "is_first_login": True,
+        }
+
+        # Only add email if provided
+        if payload.email:
+            user_data["email"] = payload.email.lower().strip()
+
+        # Only add institution_id if provided
+        if payload.institution_id:
+            user_data["institution_id"] = payload.institution_id
+
+        user = UserModel(**user_data)
+
         session.add(user)
         session.commit()
         session.refresh(user)
