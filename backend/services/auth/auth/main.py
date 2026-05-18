@@ -25,15 +25,6 @@ def run_migrations():
 
     raise RuntimeError("Migration failed after retries")
 
-# def run_migrations():
-#     try:
-#         alembic_cfg = Config("alembic.ini")
-#         command.upgrade(alembic_cfg, "head")
-#         logging.info("Database migrations completed successfully")
-#     except Exception as e:
-#         logging.exception("Migration failed")
-#         raise RuntimeError(f"Migration failed: {e}")
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run migrations before accepting requests

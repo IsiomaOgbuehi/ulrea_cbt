@@ -38,7 +38,7 @@ async def get_user_internal(
     return UserSummaryResponse.model_validate(user, from_attributes=True)
 
 
-@router.get("/users/bulk", response_model=list[UserSummaryResponse])
+@router.post("/users/bulk", response_model=list[UserSummaryResponse])
 async def get_users_bulk_internal(
     payload: BulkUserRequest,
     session: SessionDep,

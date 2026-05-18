@@ -20,3 +20,7 @@ dependencies = [
     "sqlmodel>=0.0.38",
     "uvicorn>=0.45.0",
 ]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+[tool.fastapi]
+entrypoint = "item_bank_service.main:app"

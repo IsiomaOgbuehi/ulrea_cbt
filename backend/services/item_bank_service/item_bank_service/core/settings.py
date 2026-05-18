@@ -8,29 +8,29 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "dev"
 
     # Database
-    DATABASE_URL: str = "sqlite:///./item_bank.db"
+    DATABASE_URL: str = "" #  "postgresql://admin:admin@localhost:5432/item_bank" # 
 
-    POSTGRES_SERVER: str
-    POSTGRES_PORT: str
-    POSTGRES_DB: str
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str
+    POSTGRES_SERVER: str | None = None
+    POSTGRES_PORT: int | None = None
+    POSTGRES_DB: str | None = None
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
 
     # Auth Secret Key
     SECRET_KEY: str
     JWT_SECRET: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     JWT_ALGORITHM: str
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    AUTH_SERVICE_URL: str = "http://localhost:8000/api/v1"
-    INTERNAL_SECRET: str   # must match auth service
+    AUTH_SERVICE_URL: str = "http://localhost:9000/api/v1"
+    INTERNAL_SECRET: str | None = None  # must match auth service
 
 
     OTP_SECRET: str
     
     # Redis
-    REDIS_URL: str
+    REDIS_URL: str | None = None
     # REDIS_HOST: str = "localhost"
     # REDIS_PORT: int = 6379
     

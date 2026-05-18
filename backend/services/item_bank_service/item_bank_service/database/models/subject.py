@@ -2,6 +2,9 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from typing import Optional
 from sqlmodel import SQLModel, Field
+from sqlalchemy import Column, Enum as SQLAlchemyEnum
+
+from .enums import SubjectStatus
 
 
 class SubjectModel(SQLModel, table=True):
@@ -11,7 +14,16 @@ class SubjectModel(SQLModel, table=True):
     org_id: UUID = Field(index=True, nullable=False)            # tenant isolation
     name: str = Field(index=True)
     description: str | None = None
-    status: str = Field(default="active")                       # active | archived
+    status: SubjectStatus = Field(
+        default=SubjectStatus.ACTIVE,
+        sa_column=Column(
+            SQLAlchemyEnum(
+                SubjectStatus,
+                values_callable=lambda obj: [e.value for e in obj]
+            ),
+            nullable=False,
+        )
+    )                       # active | archived
     created_by: UUID = Field(nullable=False)                    # user id of creator
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

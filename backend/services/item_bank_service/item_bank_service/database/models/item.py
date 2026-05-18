@@ -2,7 +2,12 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 
+from .enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
+
+
+json_type = JSON().with_variant(JSONB, "postgresql")
 
 class ItemModel(SQLModel, table=True):
     """
@@ -17,30 +22,47 @@ class ItemModel(SQLModel, table=True):
     """
     __tablename__ = "items"
 
+    # ----------------------------------------------------------------
+    # Identity / Ownership
+    # ----------------------------------------------------------------
+
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     org_id: UUID = Field(index=True, nullable=False)
     subject_id: UUID = Field(foreign_key="subjects.id", index=True, nullable=False)
-    created_by: UUID = Field(nullable=False)
+    created_by: UUID = Field(nullable=False, index=True,)
 
-    # Question content
-    stem: str                                                    # the question text
-    type: str = Field(index=True)                                # ItemType enum value
-    options: list | None = Field(default=None, sa_column=Column(JSON))
-    correct_answer: list | None = Field(default=None, sa_column=Column(JSON))
+    # ----------------------------------------------------------------
+    # Question Content
+    # ----------------------------------------------------------------
+    question_text: str                                                    # the question text
+    item_type: ItemType = Field(index=True, nullable=False)                                # ItemType enum value
+    options: list[dict] | None = Field(default=None, sa_column=Column(json_type))
+    correct_answers: list[str] | None = Field(default=None, sa_column=Column(json_type))
     explanation: str | None = None                               # shown after exam
-    marks: float = Field(default=1.0)                           # points for correct answer
-    negative_marks: float = Field(default=0.0)                  # penalty for wrong answer
 
+    # ----------------------------------------------------------------
+    # Scoring
+    # ----------------------------------------------------------------
+    marks: float = Field(default=1.0, ge=0,)                           # points for correct answer
+    negative_marks: float = Field(default=0.0, ge=0,)                  # penalty for wrong answer
+
+    # ----------------------------------------------------------------
     # Metadata
-    tags: list | None = Field(default=None, sa_column=Column(JSON))  # e.g. ["algebra","chapter-3"]
-    difficulty: str | None = None                                # easy | medium | hard
-    status: str = Field(default="active")                        # ItemStatus
-    version: int = Field(default=1)
+    # ----------------------------------------------------------------
+    tags: list[str] = Field(default_factory=list, sa_column=Column(json_type))  # e.g. ["algebra","chapter-3"]
+    difficulty: ItemDifficulty = Field(default=ItemDifficulty.MEDIUM, index=True)                                # easy | medium | hard
+    status: ItemStatus = Field(default=ItemStatus.ACTIVE, index=True,)                        # ItemStatus
+    version: int = Field(default=1, ge=1)
 
-    # Bulk upload tracking
-    source: str | None = None                                    # "manual" | "excel_upload"
-    bulk_upload_id: UUID | None = None                           # groups items from same upload
+    # ----------------------------------------------------------------
+    # Import / Upload Tracking
+    # ----------------------------------------------------------------
+    source: ItemSource = Field(default=ItemSource.MANUAL, index=True,)                                    # "manual" | "excel_upload"
+    bulk_upload_id: UUID | None = Field(default=None, index=True,)                           # groups items from same upload
 
+    # ----------------------------------------------------------------
+    # Timestamps
+    # ----------------------------------------------------------------
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -59,5 +81,5 @@ class BulkUploadLog(SQLModel, table=True):
     total_rows: int = Field(default=0)
     successful_rows: int = Field(default=0)
     failed_rows: int = Field(default=0)
-    errors: list | None = Field(default=None, sa_column=Column(JSON))  # [{row: 3, error: "..."}]
+    errors: list | None = Field(default=None, sa_column=Column(json_type))  # [{row: 3, error: "..."}]
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

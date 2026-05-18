@@ -1,9 +1,9 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import select
 from item_bank_service.database.models.subject import SubjectModel
 from item_bank_service.clients.auth_client import AuthClient
-from item_bank_service.core.redis import redis_client
+from item_bank_service.core.redis.redis_client import redis_client
 from item_bank_service.database.database import SessionDep
 from item_bank_service.dependencies import get_current_user, require_roles
 from item_bank_service.schemas.schemas import (
@@ -17,7 +17,7 @@ from item_bank_service.core.routes import ItemBankRoutes
 router = APIRouter(prefix="/subjects", tags=["subjects"])
 
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
+TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
 
 
 ''' CREATE SUBJECT 📚 '''
@@ -88,7 +88,7 @@ async def assign_subject(
 
 
 ''' UNASSIGN STAFF FROM SUBJECT ❌ '''
-@router.delete("/{subject_id}/assign/{user_id}", status_code=204)
+@router.delete("/{subject_id}/assign/{user_id}", status_code=status.HTTP_204_NO_CONTENT,)
 async def unassign_subject(
     subject_id: UUID,
     user_id: UUID,
@@ -128,6 +128,7 @@ async def get_subject_assignments(
                 id=subject.id,
                 name=subject.name,
                 status=subject.status,
+                description=subject.description
             ),
             assigned_to=users.get(str(a.assigned_to)),
             assigned_by=users.get(str(a.assigned_by)),
@@ -135,11 +136,3 @@ async def get_subject_assignments(
         )
         for a in assignments
     ]
-# @router.get("/{subject_id}/assignments", response_model=list[SubjectAssignmentRead])
-# async def get_subject_assignments(
-#     subject_id: UUID,
-#     session: SessionDep,
-#     current_user: CurrentUser = Depends(AdminOrAbove),
-# ):
-#     assignments = SubjectService.get_assignments(session, subject_id, current_user)
-#     return [SubjectAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]

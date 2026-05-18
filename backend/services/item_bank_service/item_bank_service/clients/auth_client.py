@@ -60,13 +60,16 @@ class AuthClient:
                 uncached_ids.append(user_id)
 
         # Fetch uncached in one request
+        print(f"{self.base_url}/internal/users/bulk")
         if uncached_ids:
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
                         f"{self.base_url}/internal/users/bulk",
                         json={"user_ids": [str(i) for i in uncached_ids]},
-                        headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                        headers={
+                            "X-Internal-Secret": settings.INTERNAL_SECRET
+                        },
                         timeout=5.0,
                     )
                     if response.status_code == 200:

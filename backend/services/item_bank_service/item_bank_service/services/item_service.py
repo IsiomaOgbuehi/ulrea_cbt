@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from item_bank_service.database.models.item import ItemModel
 from item_bank_service.database.models.subject import SubjectModel, SubjectAssignment
 from item_bank_service.schemas.schemas import ItemCreate, ItemUpdate, CurrentUser
-from item_bank_service.database.models.enums import UserRole
+from item_bank_service.database.models.enums import ItemSource, UserRole
 
 
 class ItemService:
@@ -48,15 +48,16 @@ class ItemService:
             org_id=current_user.org_id,
             subject_id=subject_id,
             created_by=current_user.id,
-            source="manual",
-            stem=payload.stem,
-            type=payload.type,
-            options=payload.options,
-            correct_answer=payload.correct_answer,
+            source=ItemSource.MANUAL,
+            question_text=payload.question_text,
+            item_type=payload.item_type,
+            # Convert Pydantic objects to plain dicts for JSON storage
+            options=[opt.model_dump() for opt in payload.options] if payload.options else None,
+            correct_answers=payload.correct_answers,
             explanation=payload.explanation,
             marks=payload.marks,
             negative_marks=payload.negative_marks,
-            tags=payload.tags,
+            tags=payload.tags or [],
             difficulty=payload.difficulty,
         )
         session.add(item)
@@ -86,9 +87,9 @@ class ItemService:
         if difficulty:
             query = query.where(ItemModel.difficulty == difficulty)
         if item_type:
-            query = query.where(ItemModel.type == item_type)
+            query = query.where(ItemModel.item_type == item_type)
         if search:
-            query = query.where(ItemModel.stem.ilike(f"%{search}%"))
+            query = query.where(ItemModel.question_text.ilike(f"%{search}%"))
 
         return session.exec(query).all()
 

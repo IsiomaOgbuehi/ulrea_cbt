@@ -5,10 +5,15 @@ from .conftest import create_subject, assign_teacher, TEACHER_ID
 
 
 MCQ_ITEM = {
-    "stem": "What is 2 + 2?",
-    "type": "mcq_single",
-    "options": ["3", "4", "5", "6"],
-    "correct_answer": ["4"],
+    "question_text": "What is 2 + 2?",
+    "item_type": "mcq_single",
+    "options": [
+        {"key": "A", "text": "3"},
+        {"key": "B", "text": "4"},
+        {"key": "C", "text": "5"},
+        {"key": "D", "text": "6"},
+    ],
+    "correct_answers": ["B"],
     "explanation": "Basic arithmetic.",
     "marks": 1.0,
     "negative_marks": 0.0,
@@ -17,8 +22,8 @@ MCQ_ITEM = {
 }
 
 SHORT_ANSWER_ITEM = {
-    "stem": "Describe the water cycle.",
-    "type": "short_answer",
+    "question_text": "Describe the water cycle.",
+    "item_type": "short_answer",
     "marks": 5.0,
 }
 
@@ -38,8 +43,8 @@ def test_teacher_can_create_item(client, admin_headers, teacher_headers):
     )
     assert response.status_code == 200, response.json()
     data = response.json()
-    assert data["stem"] == MCQ_ITEM["stem"]
-    assert data["type"] == "mcq_single"
+    assert data["question_text"] == MCQ_ITEM["question_text"]
+    assert data["item_type"] == "mcq_single"
     assert data["status"] == "active"
     assert data["version"] == 1
     assert data["source"] == "manual"
@@ -74,7 +79,7 @@ def test_mcq_requires_correct_answer(client, admin_headers, teacher_headers):
     subject = create_subject(client, admin_headers, "Math")
     assign_teacher(client, admin_headers, subject["id"], TEACHER_ID)
 
-    bad_item = {**MCQ_ITEM, "correct_answer": None}
+    bad_item = {**MCQ_ITEM, "correct_answers": None}
     response = client.post(
         f"/api/v1/subjects/{subject['id']}/items",
         json=bad_item,
@@ -100,7 +105,7 @@ def test_list_items_filtered_by_difficulty(client, admin_headers, teacher_header
     assign_teacher(client, admin_headers, subject["id"], TEACHER_ID)
 
     client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "difficulty": "easy"}, headers=teacher_headers)
-    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "stem": "Hard Q", "difficulty": "hard"}, headers=teacher_headers)
+    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "question_text": "Hard Q", "difficulty": "hard"}, headers=teacher_headers)
 
     response = client.get(
         f"/api/v1/subjects/{subject['id']}/items?difficulty=easy",
@@ -114,8 +119,8 @@ def test_list_items_search(client, admin_headers, teacher_headers):
     subject = create_subject(client, admin_headers, "Math")
     assign_teacher(client, admin_headers, subject["id"], TEACHER_ID)
 
-    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "stem": "What is gravity?"}, headers=teacher_headers)
-    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "stem": "What is velocity?"}, headers=teacher_headers)
+    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "question_text": "What is gravity?"}, headers=teacher_headers)
+    client.post(f"/api/v1/subjects/{subject['id']}/items", json={**MCQ_ITEM, "question_text": "What is velocity?"}, headers=teacher_headers)
 
     response = client.get(
         f"/api/v1/subjects/{subject['id']}/items?search=gravity",
@@ -124,7 +129,7 @@ def test_list_items_search(client, admin_headers, teacher_headers):
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
-    assert "gravity" in data[0]["stem"]
+    assert "gravity" in data[0]["question_text"]
 
 
 def test_update_item_increments_version(client, admin_headers, teacher_headers):
@@ -139,12 +144,12 @@ def test_update_item_increments_version(client, admin_headers, teacher_headers):
 
     update_response = client.patch(
         f"/api/v1/subjects/{subject['id']}/items/{create_response['id']}",
-        json={"stem": "Updated stem"},
+        json={"question_text": "Updated question_text"},
         headers=teacher_headers,
     )
     assert update_response.status_code == 200
     assert update_response.json()["version"] == 2
-    assert update_response.json()["stem"] == "Updated stem"
+    assert update_response.json()["question_text"] == "Updated question_text"
 
 
 def test_delete_item_archives_it(client, admin_headers, teacher_headers):
@@ -181,8 +186,8 @@ def make_excel(rows: list[list]) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     headers = [
-        "stem", "type", "option_a", "option_b", "option_c", "option_d",
-        "correct_answer", "explanation", "marks", "negative_marks", "tags", "difficulty"
+        "question_text", "item_type", "option_a", "option_b", "option_c", "option_d",
+        "correct_answers", "explanation", "marks", "negative_marks", "tags", "difficulty"
     ]
     ws.append(headers)
     for row in rows:
@@ -224,7 +229,7 @@ def test_bulk_upload_partial_failure(client, admin_headers, teacher_headers):
 
     rows = [
         ["Valid question?", "mcq_single", "A", "B", "C", "D", "A", "", 1, 0, "", "easy"],
-        ["", "mcq_single", "A", "B", "", "", "A", "", 1, 0, "", ""],      # missing stem
+        ["", "mcq_single", "A", "B", "", "", "A", "", 1, 0, "", ""],      # missing question_text
         ["Bad type?", "invalid_type", "A", "B", "", "", "A", "", 1, 0, "", ""],  # bad type
     ]
     file_bytes = make_excel(rows)
@@ -248,7 +253,7 @@ def test_bulk_upload_wrong_file_type(client, admin_headers, teacher_headers):
     response = client.post(
         f"/api/v1/subjects/{subject['id']}/items/bulk",
         headers=teacher_headers,
-        files={"file": ("questions.csv", b"stem,type\nQ1,mcq_single", "text/csv")},
+        files={"file": ("questions.csv", b"question_text,item_type\nQ1,mcq_single", "text/csv")},
     )
     assert response.status_code == 400
     assert "xlsx" in response.json()["detail"].lower()

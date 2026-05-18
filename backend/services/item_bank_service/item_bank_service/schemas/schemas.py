@@ -1,13 +1,14 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Any
-from item_bank_service.database.models.enums import ItemType, ItemStatus, SubjectStatus
+from item_bank_service.database.models.enums import ItemDifficulty, ItemSource, ItemType, ItemStatus, SubjectStatus
 
 
 # ============================================================
 # SUBJECT SCHEMAS
 # ============================================================
+
 
 class SubjectCreate(BaseModel):
     name: str
@@ -25,7 +26,7 @@ class SubjectRead(BaseModel):
     org_id: UUID
     name: str
     description: str | None
-    status: str
+    status: SubjectStatus | None = None
     created_by: UUID
     created_at: datetime
     updated_at: datetime
@@ -39,7 +40,7 @@ class SubjectAssignmentRead(BaseModel):
     id: UUID
     subject_id: UUID
     assigned_to: UUID
-    assigned_by: UUID
+    assigned_by: UUID 
     created_at: datetime
 
 
@@ -47,45 +48,106 @@ class SubjectAssignmentRead(BaseModel):
 # ITEM SCHEMAS
 # ============================================================
 
+class ItemOption(BaseModel):
+    key: str
+    text: str
+
+
 class ItemCreate(BaseModel):
-    stem: str
-    type: ItemType
-    options: list[str] | None = None
-    correct_answer: list[str] | None = None
+    question_text: str
+    item_type: ItemType
+    options: list[ItemOption] | None = None
+    correct_answers: list[str] | None = None
     explanation: str | None = None
-    marks: float = 1.0
-    negative_marks: float = 0.0
-    tags: list[str] | None = None
-    difficulty: str | None = None   # easy | medium | hard
+    marks: float = Field(default=1.0, ge=0)     # This is the score awarded when the question is answered correctly.
+    negative_marks: float = Field(default=0.0, ge=0)     # This is the penalty deducted for a wrong answer.
+    tags: list[str] = Field(default_factory=list)   # Used for: filtering, analytics, exam generation, topic grouping... Give me 20 questions tagged "calculus"... tags=["math", "arithmetic", "basic"],
+    difficulty: ItemDifficulty = ItemDifficulty.MEDIUM   # easy | medium | hard
 
-    @field_validator('correct_answer')
-    @classmethod
-    def validate_correct_answer(cls, v, info):
-        item_type = info.data.get('type')
-        if item_type in (ItemType.MCQ_SINGLE, ItemType.MCQ_MULTI, ItemType.TRUE_FALSE, ItemType.NUMERIC):
-            if not v:
-                raise ValueError(f"correct_answer is required for type {item_type}")
-        return v
-
-    @field_validator('options')
+    @field_validator("options")
     @classmethod
     def validate_options(cls, v, info):
-        item_type = info.data.get('type')
-        if item_type in (ItemType.MCQ_SINGLE, ItemType.MCQ_MULTI):
+        item = info.data.get("item_type")
+
+        if item in (ItemType.MCQ_SINGLE, ItemType.MCQ_MULTI):
             if not v or len(v) < 2:
-                raise ValueError("MCQ questions require at least 2 options")
+                raise ValueError("MCQ items require at least 2 options.")
+
+            # validate structured objects
+            for opt in v:
+                if not isinstance(opt, ItemOption):
+                    raise ValueError("Each option must be an ItemOption")
+
+                if not opt.key or not opt.text:
+                    raise ValueError("Option key and text are required")
+
+            keys = [opt.key for opt in v]
+            if len(set(keys)) != len(keys):
+                raise ValueError("Duplicate option keys not allowed")
+
+            return v
+
         return v
+    
+    @field_validator("correct_answers")
+    @classmethod
+    def validate_correct_answer(cls, v, info):
+
+        item = info.data.get("item_type")
+
+        if item in (
+            ItemType.MCQ_SINGLE,
+            ItemType.MCQ_MULTI,
+            ItemType.TRUE_FALSE,
+            ItemType.NUMERIC,
+        ):
+            if not v:
+                raise ValueError(
+                    f"correct_answer is required for {item}"
+                )
+
+        return v
+    
+    @model_validator(mode="after")
+    def validate_item(self):
+        if self.item_type in (
+            ItemType.MCQ_SINGLE,
+            ItemType.MCQ_MULTI,
+        ):
+            if not self.options or len(self.options) < 2:
+                raise ValueError(
+                    "MCQ questions require at least 2 options"
+                )
+
+            option_keys = {o.key for o in self.options}
+
+            if not self.correct_answers:
+                raise ValueError(
+                    "Correct answers required"
+                )
+
+            invalid = [
+                ans for ans in self.correct_answers
+                if ans not in option_keys
+            ]
+
+            if invalid:
+                raise ValueError(
+                    f"Invalid correct answers: {invalid}"
+                )
+
+        return self
 
 
 class ItemUpdate(BaseModel):
-    stem: str | None = None
-    options: list[str] | None = None
-    correct_answer: list[str] | None = None
+    question_text: str | None = None
+    options: list[ItemOption] | None = None
+    correct_answers: list[str] | None = None
     explanation: str | None = None
     marks: float | None = None
     negative_marks: float | None = None
     tags: list[str] | None = None
-    difficulty: str | None = None
+    difficulty: ItemDifficulty | None = None
     status: ItemStatus | None = None
 
 
@@ -94,18 +156,18 @@ class ItemRead(BaseModel):
     org_id: UUID
     subject_id: UUID
     created_by: UUID
-    stem: str
-    type: str
+    question_text: str
+    item_type: ItemType
     options: list | None
-    correct_answer: list | None
+    correct_answers: list | None
     explanation: str | None
     marks: float
     negative_marks: float
     tags: list | None
-    difficulty: str | None
-    status: str
+    difficulty: ItemDifficulty | None
+    status: ItemStatus
     version: int
-    source: str | None
+    source: ItemSource | None
     created_at: datetime
     updated_at: datetime
 
@@ -118,7 +180,7 @@ class BulkUploadResult(BaseModel):
     total_rows: int
     successful_rows: int
     failed_rows: int
-    errors: list[dict]          # [{row: 3, error: "missing stem"}]
+    errors: list[dict]          # [{row: 3, error: "missing question_text"}]
     upload_id: UUID             # reference to BulkUploadLog
 
 

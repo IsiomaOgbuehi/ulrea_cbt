@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from item_bank_service.database.models.subject import SubjectModel, SubjectAssignment
 from item_bank_service.schemas.schemas import SubjectCreate, SubjectUpdate, CurrentUser
-from item_bank_service.database.models.enums import UserRole
+from item_bank_service.database.models.enums import SubjectStatus, UserRole
 
 
 class SubjectService:
@@ -31,7 +31,7 @@ class SubjectService:
         """
         query = select(SubjectModel).where(
             SubjectModel.org_id == current_user.org_id,
-            SubjectModel.status == "active",
+            SubjectModel.status == SubjectStatus.ACTIVE,
         )
 
         if current_user.role == UserRole.TEACHER:
@@ -91,7 +91,7 @@ class SubjectService:
     @staticmethod
     def archive(session: Session, subject_id: UUID, current_user: CurrentUser) -> SubjectModel:
         subject = SubjectService.get_by_id(session, subject_id, current_user)
-        subject.status = "archived"
+        subject.status = SubjectStatus.ARCHIVED
         subject.updated_at = datetime.now(timezone.utc)
         session.add(subject)
         session.commit()

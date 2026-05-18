@@ -26,3 +26,16 @@ class UserRole(str, Enum):
     TEACHER = "teacher"
     STUDENT = "student"
     SUPERVISOR = "supervisor"
+    STAFF = "staff"
+
+class ItemDifficulty(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+
+class ItemSource(str, Enum):
+    MANUAL = "manual"
+    EXCEL_UPLOAD = "excel_upload"
+    AI_GENERATED = "ai_generated"
+    IMPORTED = "imported"
