@@ -14,6 +14,8 @@ class AuthRoutes(Enum):
     # lives in users.py router
     CREATE_STAFF = '/create/staff'
     CREATE_STUDENT = '/create/students'
+    CREATE_STUDENTS_BULK = '/create/students/bulk'
+    STUDENT_BULK_TEMPLATE = '/create/students/bulk/template'
     INIT_STAFF = '/init/staff'
     STAFF_ACTIVATE = '/staff/activate'
     INIT_STUDENT = '/init/student'

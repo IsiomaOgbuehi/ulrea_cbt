@@ -62,7 +62,7 @@ class CreateStudent(BaseModel):
     email: EmailStr | None = None
     phone: str | None = None
     institution_id: str | None = None  # e.g. student reg number
-    # No email required, no password — access_code is generated
+    access_code: str | None = None     # if provided, use it; else auto-generate
 
 class StaffCreatedResponse(BaseModel):
     id: UUID
@@ -84,6 +84,14 @@ class StudentCreatedResponse(BaseModel):
     org_id: UUID
     is_first_login: bool
     access_code: str              # shown once only, share with student
+
+
+class BulkStudentResult(BaseModel):
+    total_rows: int
+    successful_rows: int
+    failed_rows: int
+    errors: list[dict]
+    students: list[StudentCreatedResponse]  # successful ones with their access codes
 
 
 # First login flows

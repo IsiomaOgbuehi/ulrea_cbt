@@ -2,14 +2,14 @@ import asyncio
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlmodel import select
 
 from auth.database.schema.user.enums import UserRole
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_current_user
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import CreateStaffUser, CreateStudent, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UserRead, StudentAccessCodeRequest
+from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UserRead, StudentAccessCodeRequest
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -19,6 +19,7 @@ from auth.api.v1.auth_routes import AuthRoutes
 from auth.utility.jwt.token_activation import create_staff_activation_token, verify_staff_activation_token
 from auth.core.settings import settings
 from auth.api_models.login_response import StudentFirstLoginResponse, StaffActivateResponse, StaffFirstLoginResponse
+from auth.services.student_bulk_upload_service import generate_student_template, parse_student_excel
 
 
 router = APIRouter()
@@ -106,6 +107,63 @@ async def create_student(
         **UserRead.model_validate(user, from_attributes=True).model_dump(exclude={'access_code'}),
         access_code=access_code,  # caller shares this with student
     )
+
+
+''' BULK STUDENT TEMPLATE ⬇️ '''
+@router.get(AuthRoutes.STUDENT_BULK_TEMPLATE.value)
+async def download_student_template(
+    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+):
+    """Download Excel template for bulk student creation."""
+    file_bytes = generate_student_template()
+    return Response(
+        content=file_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=students_template.xlsx"},
+    )
+
+
+''' BULK CREATE STUDENTS 📤 '''
+@router.post(AuthRoutes.CREATE_STUDENTS_BULK.value, response_model=BulkStudentResult)
+async def create_students_bulk(
+    session: SessionDep,
+    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    file: UploadFile = File(...),
+):
+    """
+    Upload an Excel file to create multiple students at once.
+    Download the template from GET /users/students/bulk/template first.
+    Partial success supported — valid rows are created even if some fail.
+    """
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
+
+    file_bytes = await file.read()
+    rows = parse_student_excel(file_bytes, file.filename)
+
+    result = UserManagementService.create_students_bulk(
+        session=session,
+        creator=creator,
+        rows=rows,
+        org_id=creator.org_id,
+    )
+
+    # Send access code emails for students who have email addresses
+    for student in result.students:
+        student_user = session.exec(
+            select(UserModel).where(UserModel.id == student.id)
+        ).first()
+        if student_user and student_user.email:
+            try:
+                await EmailService.send_student_access_code_email(
+                    email=student_user.email,
+                    firstname=student_user.firstname,
+                    access_code=student.access_code,
+                )
+            except Exception:
+                logging.warning("Failed to send access code email to %s", student_user.email)
+
+    return result
 
 
 ''' STAFF FIRST LOGIN SETUP 🔑 '''
