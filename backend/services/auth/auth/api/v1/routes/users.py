@@ -730,7 +730,7 @@ async def forgot_password(
             except Exception:
                 logging.exception("Failed to resend activation to %s", user.email)
 
-        return {"detail": "If that email exists, a reset link has been sent."}
+        return {"detail": "A reset link has been sent to the provided email."}
 
     # Verified user — issue password reset link
     reset_token = create_password_reset_token(str(user.id))

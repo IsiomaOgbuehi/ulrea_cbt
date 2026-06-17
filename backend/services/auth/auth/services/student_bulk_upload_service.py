@@ -37,7 +37,7 @@ def generate_student_template() -> bytes:
         ["othername", "No", "Middle name or other name"],
         ["email", "No", "Student email — if provided, access code will be emailed"],
         ["phone", "No", "Phone number with country code e.g. +2348012345678"],
-        ["institution_id", "No", "Student registration/admission number — must be unique per organization"],
+        ["institution_id", "Yes", "Student registration/admission number — must be unique per organization"],
         ["access_code", "No", "Custom access code — leave blank to auto-generate a unique one"],
     ]
     for row in instructions:
