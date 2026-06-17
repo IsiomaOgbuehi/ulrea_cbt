@@ -346,3 +346,55 @@ class ExamService:
                 ExamAuditLog.exam_id == exam_id
             ).order_by(ExamAuditLog.created_at)
         ).all()
+    
+
+
+@staticmethod
+def assign_cohort(
+    session: Session,
+    exam_id: UUID,
+    cohort_id: UUID,
+    scheduled_at: datetime | None,
+    current_user: CurrentUser,
+    student_ids: list[UUID],    # fetched from auth service
+) -> list[ExamAssignment]:
+    """
+    Assign all students in a cohort to an exam.
+    student_ids are fetched from auth service before calling this.
+    """
+    exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+
+    if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
+        raise HTTPException(
+            status_code=400,
+            detail="Students can only be assigned to approved or active exams."
+        )
+
+    assignments = []
+    for student_id in student_ids:
+        existing = session.exec(
+            select(ExamAssignment).where(
+                ExamAssignment.exam_id == exam_id,
+                ExamAssignment.student_id == student_id,
+            )
+        ).first()
+        if existing:
+            assignments.append(existing)
+            continue
+
+        assignment = ExamAssignment(
+            exam_id=exam_id,
+            student_id=student_id,
+            cohort_id=cohort_id,            # track which cohort this came from
+            org_id=current_user.org_id,
+            assigned_by=UUID(str(current_user.id)),
+            scheduled_at=scheduled_at,
+        )
+        session.add(assignment)
+        assignments.append(assignment)
+
+    session.commit()
+    _log(session, exam_id, current_user.org_id, UUID(str(current_user.id)),
+         "cohort_assigned", {"cohort_id": str(cohort_id), "count": len(student_ids)})
+    session.commit()
+    return assignments

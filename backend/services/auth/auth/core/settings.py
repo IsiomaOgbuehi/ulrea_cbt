@@ -36,5 +36,8 @@ class Settings(BaseSettings):
     MAIL_PORT: int = 587
 
     FRONTEND_URL: str | None = "http://localhost:3000"
+    PAYSTACK_SECRET_KEY: str = ""
+    PAYSTACK_PUBLIC_KEY: str  = ""      # used by frontend
+    FRONTEND_URL: str
 
 settings = Settings()  # raises immediately if any required field is missing

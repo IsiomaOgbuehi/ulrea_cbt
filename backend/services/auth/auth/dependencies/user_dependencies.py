@@ -1,7 +1,7 @@
-
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
+from pydantic import ValidationError
 
 # from auth.api_models.user import User, UserInDB
 from auth.database.schema import UserModel
@@ -17,24 +17,21 @@ def get_user(db: Session, email: str) -> UserModel:
         select(UserModel).where(UserModel.email == email)
     ).first()  # returns None if not found, never raises
 
-def authenticate_user(db:Session, email: str, password: str) -> UserRead:
+def authenticate_user(db:Session, email: str, password: str) -> UserRead | None | bool:
     user = get_user(db, email)
+    
     if not user:
         return None
+    
     if not user.password:
         return None  # student has no password
+    
     if not PasswordHasher.verify(password, user.password):
         return False
-    return UserRead.model_validate(user)
+    try:
+        return UserRead.model_validate(user)
+    except ValidationError as e:
+        raise
 
 async def get_current_user(token: str):
     return await current_user(token=token)
-
-
-
-async def get_current_active_user(
-    current_user: Annotated[UserRead, Depends(get_current_user)],
-):
-    if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return current_user

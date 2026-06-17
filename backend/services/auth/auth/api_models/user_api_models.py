@@ -1,6 +1,6 @@
 from sqlmodel import Field
 from auth.database.schema.user.enums import UserRole
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 from .token import TokenBase
 
@@ -22,26 +22,44 @@ class UserSignupCreate(BaseModel):
     password: str
     confirm_password: str
 
+class UserReadResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    firstname: str
+    lastname: str
+    othername: str | None
+    email: EmailStr | None
+    phone: str | None = None
+    verified: bool | None = False
+    verification_method: str | None
+    is_first_login: bool | None = False
+    access_code: str | None = None  # only returned to creator, not on subsequent reads
+
 class UserRead(UserBase):
     id: UUID
-    org_id: UUID
-    verified: bool
-    role: UserRole
-    is_first_login: bool
-    access_code: str | None = None  # only returned to creator, not on subsequent reads
 
 class UserBaseResponse(BaseModel):
     id: UUID
-    org_id: UUID
+    # org_id: UUID
     verified: bool
-    role: UserRole
+    # role: UserRole
 
 class StaffUserResponse(UserBaseResponse):
     email: EmailStr
     firstname: str
     lastname: str
 
-class UserUpdate(UserBase):
+
+class ProfileUpdate(BaseModel):
+    """What any user can update on their own profile."""
+    firstname: str | None = None
+    lastname: str | None = None
+    othername: str | None = None
+    phone: str | None = None
+    # email deliberately excluded — requires separate verification flow
+
+class UserUpdate(ProfileUpdate):
     pass
 
 class CreateStaffUser(BaseModel):
@@ -61,7 +79,8 @@ class CreateStudent(BaseModel):
     othername: str | None = None
     email: EmailStr | None = None
     phone: str | None = None
-    institution_id: str | None = None  # e.g. student reg number
+    institution_id: str  # e.g. student reg number
+    cohort_id: UUID | None = None
     access_code: str | None = None     # if provided, use it; else auto-generate
 
 class StaffCreatedResponse(BaseModel):
@@ -73,6 +92,7 @@ class StaffCreatedResponse(BaseModel):
     org_id: UUID
     is_first_login: bool
     temporary_password: str       # shown once only
+    is_existing_user: bool = False
 
 
 class StudentCreatedResponse(BaseModel):
@@ -80,7 +100,7 @@ class StudentCreatedResponse(BaseModel):
     firstname: str
     lastname: str
     phone: str | None
-    role: UserRole
+    role: UserRole | None
     org_id: UUID
     is_first_login: bool
     access_code: str              # shown once only, share with student
@@ -126,9 +146,31 @@ class StudentLoginUserResponse(BaseModel):
     othername: str | None = None
     institution_id: str | None = None
     id: UUID
-    org_id: UUID
+    org_id: UUID | None = None
     verified: bool
-    role: UserRole
+    role: UserRole | None = None
 
 class StudentLoginResponse(TokenBase):
     user: StudentLoginUserResponse
+
+
+class ResendActivationRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+    confirm_password: str
+
+class StudentForgotPasswordRequest(BaseModel):
+    access_code: str
+
+class StudentResetPasswordRequest(BaseModel):
+    access_code: str
+    favorite_answer: str
+    new_favorite_question: str
+    new_favorite_answer: str

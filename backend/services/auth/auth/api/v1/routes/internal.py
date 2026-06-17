@@ -5,6 +5,9 @@ from sqlmodel import select
 from auth.database.schema.user.user_db import UserModel
 from auth.database.database import SessionDep
 from auth.core.settings import settings
+from auth.services.cohort_service import CohortService
+from auth.database.schema.membership.membership_db import OrgMembership
+from auth.database.schema.user.enums import UserRole
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -17,7 +20,7 @@ class UserSummaryResponse(BaseModel):
     firstname: str
     lastname: str
     email: str | None
-    role: str
+    role: UserRole | None
 
 
 class BulkUserRequest(BaseModel):
@@ -30,12 +33,29 @@ async def get_user_internal(
     session: SessionDep,
     _: str = Depends(verify_internal_secret),
 ):
-    user = session.exec(
-        select(UserModel).where(UserModel.id == user_id)
+    # user = session.exec(
+    #     select(UserModel).where(UserModel.id == user_id)
+    # ).first()
+    user, membership = session.exec(
+        select(UserModel, OrgMembership)
+        .join(
+            OrgMembership,
+            OrgMembership.user_id == UserModel.id,
+            isouter=True,
+        )
+        .where(UserModel.id == user_id)
     ).first()
+    
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
-    return UserSummaryResponse.model_validate(user, from_attributes=True)
+
+    return UserSummaryResponse(
+        id=user.id,
+        firstname=user.firstname,
+        lastname=user.lastname,
+        email=user.email,
+        role=membership.role if membership else None,
+    )
 
 
 @router.post("/users/bulk", response_model=list[UserSummaryResponse])
@@ -44,7 +64,42 @@ async def get_users_bulk_internal(
     session: SessionDep,
     _: str = Depends(verify_internal_secret),
 ):
-    users = session.exec(
-        select(UserModel).where(UserModel.id.in_(payload.user_ids))
+    # users = session.exec(
+    #     select(UserModel).where(UserModel.id.in_(payload.user_ids))
+    # ).all()
+
+    results = session.exec(
+        select(UserModel, OrgMembership)
+        .join(
+            OrgMembership,
+            OrgMembership.user_id == UserModel.id,
+            isouter=True,
+        )
+        .where(UserModel.id.in_(payload.user_ids))
     ).all()
-    return [UserSummaryResponse.model_validate(u, from_attributes=True) for u in users]
+
+    return [
+        UserSummaryResponse(
+            id=u.id,
+            firstname=u.firstname,
+            lastname=u.lastname,
+            email=u.email,
+            role=m.role.value if m else None,
+        )
+        for u, m in results
+    ]
+    # return [UserSummaryResponse.model_validate(u, from_attributes=True) for u in users]
+
+
+
+
+@router.get("/cohorts/{cohort_id}/student_ids")
+async def get_cohort_student_ids_internal(
+    cohort_id: UUID,
+    session: SessionDep,
+    x_org_id: UUID = Header(...),
+    _: str = Depends(verify_internal_secret),
+):
+    """Called by exam service to get student IDs for cohort assignment."""
+    student_ids = CohortService.get_active_student_ids(session, cohort_id, x_org_id)
+    return [str(i) for i in student_ids]

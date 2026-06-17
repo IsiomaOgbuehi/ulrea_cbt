@@ -1,9 +1,10 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from exam_service.core.redis.redis_client import redis_client
 from exam_service.database.database import SessionDep
 from exam_service.dependencies import get_current_user, require_roles
 from exam_service.schemas.schemas import (
-    ExamCreate, ExamUpdate, ExamRead,
+    AssignCohortRequest, ExamCreate, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
@@ -11,6 +12,7 @@ from exam_service.schemas.schemas import (
 )
 from exam_service.services.exam_service import ExamService
 from exam_service.database.models.enums import UserRole
+from exam_service.clients.auth_client import AuthClient
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -204,3 +206,50 @@ async def get_audit_log(
 ):
     logs = ExamService.get_audit_log(session, exam_id, current_user)
     return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
+
+
+# --------------------------------------------------------
+# ASSIGN COHORT TO EXAM
+# --------------------------------------------------------
+
+''' ASSIGN COHORT TO EXAM 🎓 '''
+@router.post("/{exam_id}/assign_cohort", response_model=list[ExamAssignmentRead])
+async def assign_cohort(
+    exam_id: UUID,
+    payload: AssignCohortRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+):
+    """
+    Assign all active students in a cohort to this exam.
+    Fetches student list from auth service.
+    Graduated cohorts cannot be assigned new exams.
+    """
+    # Fetch student IDs from auth service
+    auth_client = AuthClient(redis_client)
+    try:
+        student_ids = await auth_client.get_cohort_student_ids(
+            cohort_id=payload.cohort_id,
+            org_id=current_user.org_id,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not fetch cohort members from auth service."
+        )
+
+    if not student_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Cohort has no active students."
+        )
+
+    assignments = ExamService.assign_cohort(
+        session=session,
+        exam_id=exam_id,
+        cohort_id=payload.cohort_id,
+        scheduled_at=payload.scheduled_at,
+        current_user=current_user,
+        student_ids=student_ids,
+    )
+    return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]

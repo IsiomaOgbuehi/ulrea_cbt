@@ -88,6 +88,7 @@ class ExamAssignment(SQLModel, table=True):
     org_id: UUID = Field(index=True, nullable=False)
     assigned_by: UUID = Field(nullable=False)
     status: str = Field(default="assigned")                     # AssignmentStatus
+    cohort_id: UUID | None = Field(default=None, index=True)  # ← add this
     scheduled_at: datetime | None = None                        # override global exam time
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

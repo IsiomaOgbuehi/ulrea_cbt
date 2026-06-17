@@ -7,3 +7,14 @@ class UserRole(str, Enum):
     STUDENT = 'student'
     SUPERVISOR = 'supervisor'
     STAFF = 'staff'
+
+
+class MembershipStatus(str, Enum):
+    PENDING = 'pending'
+    ACTIVE = 'active'
+    ARCHIVED = 'archived'   # email-verified users — preserved, just inactive
+    REMOVED = 'removed'     # non-email users — effectively deleted from org
+
+class VerificationMethod(str, Enum):
+    EMAIL_OTP = "email_otp"    # standard signup/staff flow
+    ACCESS_CODE = "access_code"  # student flow — no email needed

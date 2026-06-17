@@ -5,7 +5,7 @@ from sqlmodel import SQLModel
 
 from alembic import context
 
-from auth.database.schema import OrganizationModel, UserModel, OrganizationSettingsModel
+from auth.database.schema import * # OrganizationModel, UserModel, OrganizationSettingsModel, CohortMember, CohortModel
 from auth.core.settings import settings
 
 # Alembic Config object

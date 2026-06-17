@@ -143,3 +143,16 @@ class CurrentUser(BaseModel):
     role: str
     email: str | None = None
     verified: bool = False
+
+
+class AssignCohortRequest(BaseModel):
+    cohort_id: UUID
+    scheduled_at: datetime | None = None
+
+
+class UserSummary(BaseModel):
+    id: UUID
+    firstname: str
+    lastname: str
+    email: str | None
+    role: str

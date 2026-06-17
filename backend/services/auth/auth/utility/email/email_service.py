@@ -227,3 +227,89 @@ class EmailService:
 
         fm = FastMail(conf)
         await fm.send_message(message)
+
+    
+
+    @staticmethod
+    async def send_password_reset_email(email: str, firstname: str, reset_link: str):
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+
+                    <h2 style="color: #4A90E2; text-align: center;">Reset Your Password</h2>
+
+                    <p>Hello {firstname},</p>
+
+                    <p>We received a request to reset your password. Click the button below to set a new one:</p>
+
+                    <div style="text-align: center; margin: 30px 0;">
+                        
+                            href="{reset_link}"
+                            style="
+                                background-color: #4A90E2;
+                                color: white;
+                                padding: 14px 24px;
+                                text-decoration: none;
+                                border-radius: 6px;
+                                font-weight: bold;
+                                display: inline-block;
+                            "
+                        >
+                            Reset Password
+                        </a>
+                    </div>
+
+                    <p>This link will expire in <strong>1 hour</strong>.</p>
+
+                    <p>If you did not request a password reset, you can safely ignore this email.</p>
+
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    <p style="font-size: 12px; color: #888; text-align: center;">
+                        This is an automated message, please do not reply.
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+        message = MessageSchema(
+            subject="Reset Your Password",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html,
+        )
+        fm = FastMail(conf)
+        await fm.send_message(message)
+
+
+    @staticmethod
+    async def send_added_to_org_email(email: str, firstname: str, org_name: str, role: str):
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+
+                    <h2 style="color: #4A90E2; text-align: center;">You've Been Added to an Organization</h2>
+
+                    <p>Hello {firstname},</p>
+
+                    <p>You have been added to <strong>{org_name}</strong> as <strong>{role}</strong>.</p>
+
+                    <p>Log in to your existing account to access your new organization.</p>
+
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    <p style="font-size: 12px; color: #888; text-align: center;">
+                        This is an automated message, please do not reply.
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+        message = MessageSchema(
+            subject=f"You've been added to {org_name}",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html,
+        )
+        fm = FastMail(conf)
+        await fm.send_message(message)

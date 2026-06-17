@@ -5,11 +5,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlmodel import select
 
-from auth.database.schema.user.enums import UserRole
+from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
 from auth.database.schema.user.user_db import UserModel
-from auth.dependencies.auth_dependencies import get_current_user
+from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UserRead, StudentAccessCodeRequest
+from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -20,6 +20,22 @@ from auth.utility.jwt.token_activation import create_staff_activation_token, ver
 from auth.core.settings import settings
 from auth.api_models.login_response import StudentFirstLoginResponse, StaffActivateResponse, StaffFirstLoginResponse
 from auth.services.student_bulk_upload_service import generate_student_template, parse_student_excel
+from auth.services.membership_service import MembershipService
+from auth.database.schema.cohort.cohort_api_models import AddMembersRequest
+from auth.services.cohort_service import CohortService
+from auth.database.schema.organization.organization_db import OrganizationModel
+from auth.services.platform_subscription_service import PlatformSubscriptionService
+from auth.database.schema.membership.membership_db import OrgMembership
+from auth.services.user.user_context import UserContext
+from auth.api_models.user_api_models import ResendActivationRequest
+from auth.api_models.user_api_models import (
+    ForgotPasswordRequest, ResetPasswordRequest,
+    StudentForgotPasswordRequest, StudentResetPasswordRequest,
+)
+from auth.utility.jwt.token_activation import (
+    create_password_reset_token,
+    verify_password_reset_token,
+)
 
 
 router = APIRouter()
@@ -31,13 +47,44 @@ router = APIRouter(
 )
 
 
+# ============================================================
+# HELPERS
+# ============================================================
+
+
 def require_roles(*roles: UserRole):
-    """Dependency that enforces role-based access."""
-    def _check(current_user: UserModel = Depends(get_current_user)):
-        if current_user.role not in roles:
-            raise HTTPException(status_code=403, detail="Insufficient permissions.")
-        return current_user
+    def _check(
+        ctx: UserContext = Depends(get_user_context),
+    ):
+        if ctx.membership.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions."
+            )
+
+        return ctx
+
     return _check
+
+
+def _get_active_membership(session: SessionDep, user_id: UUID) -> OrgMembership:
+    """
+    Fetch the user's active OrgMembership.
+    Raises 403 if not found — used after activation/setup to issue tokens.
+    """
+    membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user_id,
+            OrgMembership.status == MembershipStatus.ACTIVE,
+        )
+    ).first()
+
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="No active organization membership found.",
+        )
+    return membership
 
 
 ''' CREATE STAFF USER 👤 '''
@@ -45,14 +92,41 @@ def require_roles(*roles: UserRole):
 async def create_staff_user(
     payload: CreateStaffUser,
     session: SessionDep,
-    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
 ):
-    user, temp_password = UserManagementService.create_staff(
+    PlatformSubscriptionService.assert_can_add_staff(session, ctx.membership.org_id)
+    
+    user, temp_password, is_existing = UserManagementService.create_staff(
         session=session,
-        creator=creator,
+        ctx=ctx,
         payload=payload,
-        org_id=creator.org_id,
+        org_id=ctx.membership.org_id,
     )
+
+    org = session.exec(
+        select(OrganizationModel).where(OrganizationModel.id == ctx.membership.org_id)
+    ).first()
+
+    if is_existing:
+        # User already has an account — just notify them
+        try:
+            await asyncio.wait_for(
+                EmailService.send_added_to_org_email(
+                    email=user.email,
+                    firstname=user.firstname,
+                    org_name=org.name if org else "an organization",
+                    role=payload.role,
+                ),
+                timeout=10.0,
+            )
+        except Exception:
+            logging.warning("Failed to send org-added notification to %s", user.email)
+
+        return StaffCreatedResponse(
+            **UserReadResponse.model_validate(user, from_attributes=True).model_dump(),
+            temporary_password="",  # signal to frontend
+            is_existing_user=True,
+        )
 
     try:
         activation_token = create_staff_activation_token(str(user.id))
@@ -71,14 +145,19 @@ async def create_staff_user(
             ),
             timeout=10.0
         )
+        if IS_DEV:
+            print(f'ACTIVATION TOKEN LINK: {activation_link}')
     except (asyncio.TimeoutError, Exception):
-        logging.exception("Welcome email failed for %s", user.email)
+        logging.exception("Activation email failed for %s", user.email)
         # Don't block staff creation if email fails — account is already created
         # Log it and move on, admin can resend manually
 
     return StaffCreatedResponse(
-        **UserRead.model_validate(user, from_attributes=True).model_dump(),
+        **UserReadResponse.model_validate(user, from_attributes=True).model_dump(),
+        org_id=org.id,
+        role=payload.role,
         temporary_password=temp_password if IS_DEV else "sent via email",
+        is_existing_user=False,
     )
 
 
@@ -87,14 +166,34 @@ async def create_staff_user(
 async def create_student(
     payload: CreateStudent,
     session: SessionDep,
-    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(
+        require_roles(
+            UserRole.SUPER_ADMIN,
+            UserRole.ADMIN,
+        )
+    ),
 ):
+    # ← ADD THIS: check plan limits before creating
+    PlatformSubscriptionService.assert_can_add_student(session, ctx.membership.org_id)
+    
     user, access_code = UserManagementService.create_student(
         session=session,
-        creator=creator,
+        ctx=ctx,
         payload=payload,
-        org_id=creator.org_id,
+        org_id=ctx.membership.org_id,
     )
+
+    # Auto-assign to cohort if provided
+    if payload.cohort_id:
+        try:
+            CohortService.add_members(
+                session=session,
+                cohort_id=payload.cohort_id,
+                payload=AddMembersRequest(student_ids=[user.id]),
+                actor=ctx.user,
+            )
+        except HTTPException as e:
+            logging.warning("Could not assign student to cohort: %s", e.detail)
 
     if user.email:
         await EmailService.send_student_access_code_email(
@@ -102,9 +201,13 @@ async def create_student(
             firstname=user.firstname,
             access_code=access_code,
         )
+    
+    memebership = MembershipService.get_pending_membership(session=session, user_id=user.id)
 
     return StudentCreatedResponse(
         **UserRead.model_validate(user, from_attributes=True).model_dump(exclude={'access_code'}),
+        org_id=ctx.membership.org_id,
+        role=memebership.role if memebership else None,
         access_code=access_code,  # caller shares this with student
     )
 
@@ -127,7 +230,7 @@ async def download_student_template(
 @router.post(AuthRoutes.CREATE_STUDENTS_BULK.value, response_model=BulkStudentResult)
 async def create_students_bulk(
     session: SessionDep,
-    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
     file: UploadFile = File(...),
 ):
     """
@@ -143,9 +246,9 @@ async def create_students_bulk(
 
     result = UserManagementService.create_students_bulk(
         session=session,
-        creator=creator,
+        ctx=ctx,
         rows=rows,
-        org_id=creator.org_id,
+        org_id=ctx.membership.org_id,
     )
 
     # Send access code emails for students who have email addresses
@@ -176,10 +279,19 @@ async def staff_first_login_setup(
         select(UserModel).where(UserModel.email == payload.email)
     ).first()
 
+    if not user:                                # ← early return
+        raise HTTPException(status_code=404, detail="User Not Found.")
+
+    membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id
+        )
+    ).first()
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    if user.role == UserRole.STUDENT.value:
+    if membership.role == UserRole.STUDENT.value:
         raise HTTPException(status_code=400, detail="Invalid user type.")
 
     if not user.is_first_login:
@@ -202,7 +314,7 @@ async def staff_first_login_setup(
     session.commit()
     session.refresh(user)
 
-    token = create_access_token(user.id, user.org_id, user.role)
+    token = create_access_token(user.id, membership.org_id, membership.role)
     refresh = create_refresh_token(user.id)
 
     return StaffFirstLoginResponse(
@@ -217,38 +329,72 @@ async def activate_staff_account(
     payload: StaffActivationPayload,
     session: SessionDep,
 ):
-    if payload.password != payload.confirm_password:
-        raise HTTPException(status_code=400, detail="Passwords do not match.")
+    try:
+        if payload.password != payload.confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match.")
 
-    user_id = verify_staff_activation_token(payload.token)
+        user_id = verify_staff_activation_token(payload.token)
 
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Invalid or expired token.")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Invalid or expired token.")
 
-    user = session.get(UserModel, UUID(user_id))
+        user = session.get(UserModel, UUID(user_id))
 
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
 
-    if not user.is_first_login:
-        raise HTTPException(status_code=400, detail="Account already activated.")
+        if not user.is_first_login:
+            raise HTTPException(status_code=400, detail="Account already activated.")
 
-    user.password = PasswordHasher.create(payload.password)
-    user.is_first_login = False
-    user.verified = True
+        user.password = PasswordHasher.create(payload.password)
+        user.is_first_login = False
+        user.verified = True
+        user.verification_method = VerificationMethod.EMAIL_OTP
 
-    session.add(user)
-    session.commit()
-    session.refresh(user)
+        session.add(user)
+        session.flush()
 
-    access_token = create_access_token(user.id, user.org_id, user.role)
-    refresh_token = create_refresh_token(user.id)
+        # Activate the pending membership created when admin created this user
+        membership = MembershipService.get_pending_membership(session=session, user_id=user.id)
 
-    return StaffActivateResponse(
-        detail="Account activated successfully.",
-        access_token=access_token.access_token,
-        refresh_token=refresh_token
-    )
+        if membership:
+            membership.status = MembershipStatus.ACTIVE
+            membership.verification_method = VerificationMethod.EMAIL_OTP
+            session.add(membership)
+        else:
+            # Fallback — should not happen but guard anyway
+            logging.warning("No pending membership found for user %s", user.id)
+
+        session.commit()
+        session.refresh(user)
+
+        # Get org from now-active membership
+        active_membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user.id,
+                OrgMembership.status == MembershipStatus.ACTIVE,
+            )
+        ).first()
+
+        org_id = active_membership.org_id if active_membership else user.id  # fallback
+        role = active_membership.role if active_membership else None
+
+        access_token = create_access_token(user.id, org_id, role)
+        refresh_token = create_refresh_token(user.id)
+
+        return StaffActivateResponse(
+            detail="Account activated successfully.",
+            access_token=access_token.access_token,
+            refresh_token=refresh_token
+        )
+    except Exception as e:
+        logging.warning("Error: %s", str(e))
+        session.rollback()
+        raise HTTPException(
+            status_code=409, 
+            detail={"message": "Error", "error": str(e)}
+        )
+        
 
 
 ''' STUDENT FIRST LOGIN SETUP 🎓 '''
@@ -261,7 +407,18 @@ async def student_first_login_setup(
         select(UserModel).where(UserModel.access_code == payload.access_code)
     ).first()
 
-    if not user or user.role != UserRole.STUDENT:
+    if not user:                                # ← early return
+        raise HTTPException(status_code=404, detail="User Not Found.")
+
+    membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id,
+            OrgMembership.status == MembershipStatus.PENDING,
+            # OrgMembership.role == UserRole.STUDENT
+        )
+    ).first()
+
+    if not user or membership.role != UserRole.STUDENT:
         raise HTTPException(status_code=404, detail="Invalid access code.")
 
     if not user.is_first_login:
@@ -272,11 +429,24 @@ async def student_first_login_setup(
     user.is_first_login = False
     user.verified = True
     session.add(user)
+    session.flush()                                 # flush so user.id is available
+
+    # ← ADD THIS: auto-add to org on student setup completion
+    MembershipService.auto_add_on_verification(
+        session=session,
+        user=user,
+        org_id=membership.org_id,
+        role=UserRole.STUDENT,
+        created_by=user.id,
+        verification_method=VerificationMethod.ACCESS_CODE,
+        institution_id=membership.institution_id,
+    )
+
     session.commit()
     session.refresh(user)
 
     # Issue tokens immediately after setup
-    token = create_access_token(user.id, user.org_id, user.role)
+    token = create_access_token(user.id, membership.org_id, membership.role)
     refresh = create_refresh_token(user.id)
 
     return StudentFirstLoginResponse(
@@ -298,10 +468,20 @@ async def get_student_security_question(
         )
     ).first()
 
-    if not user or user.role != UserRole.STUDENT:
+    if not user:                                # ← early return
+        raise HTTPException(status_code=404, detail="Invalid access code.")
+
+    membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id,
+            OrgMembership.status == MembershipStatus.ACTIVE,
+        )
+    ).first()
+
+    if not membership or membership.role != UserRole.STUDENT:
         raise HTTPException(
-            status_code=404,
-            detail="Invalid access code."
+            status_code=403,
+            detail="Please complete first-time setup first."
         )
 
     if user.is_first_login:
@@ -331,7 +511,17 @@ async def student_login(
         select(UserModel).where(UserModel.access_code == payload.access_code)
     ).first()
 
-    if not user or user.role != UserRole.STUDENT:
+    membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id,
+            OrgMembership.status == MembershipStatus.ACTIVE,
+        )
+    ).first()
+
+    if not membership:
+        raise HTTPException(status_code=401, detail='No active membership found. Initialize your account first before login')
+
+    if not user or membership.role != UserRole.STUDENT:
         raise HTTPException(status_code=401, detail="Invalid access code or answer.")
 
     if user.is_first_login:
@@ -345,11 +535,341 @@ async def student_login(
     ):
         raise HTTPException(status_code=401, detail="Invalid access code or answer.")
 
-    token = create_access_token(user.id, user.org_id, user.role)
+    
+    token = create_access_token(user.id, membership.org_id, membership.role)
     refresh = create_refresh_token(user.id)
+
+        
+    user_data = StudentLoginUserResponse.model_validate(user, from_attributes=True)
+    user_data.role = membership.role if membership else None
+    user_data.org_id = membership.org_id if membership else None
+    user_data.institution_id = membership.institution_id if membership.institution_id else None
 
     return StudentLoginResponse(
         access_token=token.access_token,
         refresh_token=refresh,
-        user=StudentLoginUserResponse.model_validate(user, from_attributes=True),
+        user=user_data
+    )
+    
+
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
+''' RESEND STAFF ACTIVATION 🔁 '''
+@router.post(AuthRoutes.STAFF_ACTIVATE_RESEND.value)
+async def resend_staff_activation(
+    payload: ResendActivationRequest,
+    session: SessionDep,
+):
+    """
+    Two callers:
+    - Staff member themselves: hits this after seeing RESEND_ACTIVATION on login
+    - Admin: calls on behalf of a stuck staff member
+    Both paths just need the email — no auth required since user isn't activated yet.
+    """
+    user = session.exec(
+        select(UserModel).where(UserModel.email == payload.email.lower().strip())
+    ).first()
+
+    # Always return 200 — don't leak whether email exists
+    if not user:
+        return {"detail": "If that email exists, a new activation link has been sent."}
+
+    # Only resend for unverified, non-student staff with a pending membership
+    pending_membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id,
+            OrgMembership.status == MembershipStatus.PENDING,
+            OrgMembership.role != UserRole.STUDENT,
+        )
+    ).first()
+
+    if not pending_membership:
+        return {"detail": "If that email exists, a new activation link has been sent."}
+
+    if not user.is_first_login:
+        # Already activated — no need to resend
+        return {"detail": "If that email exists, a new activation link has been sent."}
+
+    # Issue a fresh 24hr token
+    activation_token = create_staff_activation_token(str(user.id))
+    activation_link = (
+        f"{settings.FRONTEND_URL}"
+        f"/activate-staff-account"
+        f"?token={activation_token}"
+    )
+
+    try:
+        await asyncio.wait_for(
+            EmailService.send_staff_activation_email(
+                email=user.email,
+                firstname=user.firstname,
+                activation_link=activation_link,
+            ),
+            timeout=10.0,
+        )
+        logging.info("Resent activation link to %s", user.email)
+        if IS_DEV:
+            print(f"RESENT ACTIVATION LINK: {activation_link}")
+    except Exception:
+        logging.exception("Failed to resend activation email to %s", user.email)
+        # Still return 200 — don't expose email delivery failures
+
+    return {"detail": "If that email exists, a new activation link has been sent."}
+
+
+
+''' ADMIN RESEND STAFF ACTIVATION 🔁 '''
+@router.post("/staff/{user_id}/activate/resend")
+async def admin_resend_staff_activation(
+    user_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+):
+    """Admin resends activation to a specific staff member by user_id."""
+    user = session.get(UserModel, user_id)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Confirm they belong to the admin's org and are still pending
+    pending_membership = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user_id,
+            OrgMembership.org_id == ctx.membership.org_id,
+            OrgMembership.status == MembershipStatus.PENDING,
+            OrgMembership.role != UserRole.STUDENT,
+        )
+    ).first()
+
+    if not pending_membership:
+        raise HTTPException(
+            status_code=400,
+            detail="No pending activation found for this user in your organization.",
+        )
+
+    if not user.is_first_login:
+        raise HTTPException(status_code=400, detail="Account is already activated.")
+
+    activation_token = create_staff_activation_token(str(user.id))
+    activation_link = (
+        f"{settings.FRONTEND_URL}"
+        f"/activate-staff-account"
+        f"?token={activation_token}"
+    )
+
+    try:
+        await asyncio.wait_for(
+            EmailService.send_staff_activation_email(
+                email=user.email,
+                firstname=user.firstname,
+                activation_link=activation_link,
+            ),
+            timeout=10.0,
+        )
+        if IS_DEV:
+            print(f"ADMIN RESENT ACTIVATION LINK: {activation_link}")
+    except Exception:
+        logging.exception("Failed to resend activation to %s", user.email)
+        raise HTTPException(status_code=502, detail="Failed to send activation email.")
+
+    return {
+        "detail": f"Activation link resent to {EmailService.mask_email(user.email)}."
+    }
+
+
+''' FORGOT PASSWORD 📧 '''
+@router.post(AuthRoutes.FORGOT_PASSWORD.value)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    session: SessionDep,
+):
+    user = session.exec(
+        select(UserModel).where(
+            UserModel.email == payload.email.lower().strip()
+        )
+    ).first()
+
+    # Silent return for missing accounts or students (no password field)
+    if not user or not user.password:
+        return {"detail": "If that email exists, a reset link has been sent."}
+
+    # Unverified staff — their password exists but account was never activated
+    # Send activation link instead of reset link since they haven't set a real password yet
+    if not user.verified:
+        pending_membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user.id,
+                OrgMembership.status == MembershipStatus.PENDING,
+                OrgMembership.role != UserRole.STUDENT,
+            )
+        ).first()
+
+        if pending_membership:
+            activation_token = create_staff_activation_token(str(user.id))
+            activation_link = (
+                f"{settings.FRONTEND_URL}"
+                f"/activate-staff-account"
+                f"?token={activation_token}"
+            )
+            try:
+                await asyncio.wait_for(
+                    EmailService.send_staff_activation_email(
+                        email=user.email,
+                        firstname=user.firstname,
+                        activation_link=activation_link,
+                    ),
+                    timeout=10.0,
+                )
+                if IS_DEV:
+                    print(f"RESENT ACTIVATION LINK: {activation_link}")
+            except Exception:
+                logging.exception("Failed to resend activation to %s", user.email)
+
+        return {"detail": "If that email exists, a reset link has been sent."}
+
+    # Verified user — issue password reset link
+    reset_token = create_password_reset_token(str(user.id))
+    reset_link = (
+        f"{settings.FRONTEND_URL}"
+        f"/reset-password"
+        f"?token={reset_token}"
+    )
+
+    try:
+        await asyncio.wait_for(
+            EmailService.send_password_reset_email(
+                email=user.email,
+                firstname=user.firstname,
+                reset_link=reset_link,
+            ),
+            timeout=10.0,
+        )
+        if IS_DEV:
+            print(f"RESET LINK: {reset_link}")
+    except Exception:
+        logging.exception("Password reset email failed for %s", user.email)
+
+    return {"detail": "If that email exists, a reset link has been sent."}
+
+
+
+''' RESET PASSWORD 🔑 '''
+@router.post(AuthRoutes.RESET_PASSWORD.value)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    session: SessionDep,
+):
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+    try:
+        user_id = verify_password_reset_token(payload.token)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link.")
+
+    user = session.get(UserModel, UUID(user_id))
+
+    if not user or not user.password:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.password = PasswordHasher.create(payload.new_password)
+    session.add(user)
+    session.commit()
+
+    return {"detail": "Password reset successfully. You can now log in."}
+
+
+
+''' STUDENT FORGOT PASSWORD — STEP 1: VERIFY ACCESS CODE 🎓 '''
+@router.post(AuthRoutes.STUDENT_VERIFY_FORGOT_PASSWORD.value)
+async def student_forgot_password_verify(
+    payload: StudentForgotPasswordRequest,
+    session: SessionDep,
+):
+    """Returns the security question for the student to answer in step 2."""
+    user = session.exec(
+        select(UserModel).where(UserModel.access_code == payload.access_code)
+    ).first()
+
+    membership = None
+    if user:
+        membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user.id,
+                OrgMembership.status == MembershipStatus.ACTIVE,
+                OrgMembership.role == UserRole.STUDENT,
+            )
+        ).first()
+
+    if not user or not membership:
+        raise HTTPException(status_code=404, detail="Invalid access code.")
+
+    if user.is_first_login:
+        raise HTTPException(
+            status_code=403,
+            detail="Please complete first-time setup first.",
+        )
+
+    if not user.favorite_question or not user.favorite_answer_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Security question not configured. Contact your administrator.",
+        )
+
+    return {"favorite_question": user.favorite_question}
+
+
+
+''' STUDENT FORGOT PASSWORD — STEP 2: RESET SECURITY Q&A 🎓 '''
+@router.post(AuthRoutes.STUDENT_RESET_PASSWORD_QA.value)
+async def student_reset_password(
+    payload: StudentResetPasswordRequest,
+    session: SessionDep,
+):
+    """
+    Verifies current security answer, then replaces Q&A with new one.
+    Issues tokens on success so the student is logged in immediately.
+    """
+    user = session.exec(
+        select(UserModel).where(UserModel.access_code == payload.access_code)
+    ).first()
+
+    membership = None
+    if user:
+        membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user.id,
+                OrgMembership.status == MembershipStatus.ACTIVE,
+                OrgMembership.role == UserRole.STUDENT,
+            )
+        ).first()
+
+    # Same generic error for both bad access code and wrong answer
+    # — don't reveal which one failed
+    if not user or not membership:
+        raise HTTPException(status_code=401, detail="Invalid access code or answer.")
+
+    if not user.favorite_answer_hash or not PasswordHasher.verify(
+        payload.favorite_answer, user.favorite_answer_hash
+    ):
+        raise HTTPException(status_code=401, detail="Invalid access code or answer.")
+
+    user.favorite_question = payload.new_favorite_question
+    user.favorite_answer_hash = PasswordHasher.create(payload.new_favorite_answer)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    token = create_access_token(user.id, membership.org_id, membership.role)
+    refresh = create_refresh_token(user.id)
+
+    return StudentFirstLoginResponse(
+        access_token=token.access_token,
+        refresh_token=refresh,
+        detail="Security question reset successfully.",
     )

@@ -12,6 +12,7 @@ class LoginResponse(BaseModel):
     user: object
     organization: OrganizationRead | None = None
     requires_setup: bool = False  # frontend redirects to /setup if True
+    is_provisional: bool = False
 
 
 class StudentFirstLoginResponse(TokenBase):

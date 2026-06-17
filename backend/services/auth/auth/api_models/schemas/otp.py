@@ -5,7 +5,7 @@ from auth.api_models.token import TokenData
 
 class OTPRequestSchema(BaseModel):
     identifier: EmailStr | str = Field(description="Email or phone")
-    purpose: str # OtpPurpose # = Field(examples=["login", "forgot_password"])
+    purpose: OtpPurpose
 
 
 class OTPVerifySchema(BaseModel):
@@ -23,3 +23,4 @@ class OTPVerifyResponse(BaseModel):
     message: str
     verified: bool
     token: TokenData | None = None
+    is_provisional: bool = False

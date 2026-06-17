@@ -23,6 +23,7 @@ engine = create_engine(
 SIGNUP_PAYLOAD = {
     'organization': {
         'name': 'Test Org',
+        'slug': 'test-org',
         'verified': False,
         'address': 'Test Address',
         'email': 'amycole@gmail.com',

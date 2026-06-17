@@ -47,6 +47,15 @@ def create_refresh_token(subject: UUID) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def decode_access_token(token: str) -> dict:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+    if payload.get('type') != 'access':
+        raise ValueError("Not an access token")
+
+    return payload
+
+
 def decode_refresh_token(token: str) -> dict:
     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 
@@ -55,3 +64,37 @@ def decode_refresh_token(token: str) -> dict:
 
     return payload
     
+
+
+
+def create_student_provisional_token(subject: UUID) -> Token:
+    """
+    Issued after email verification for students with no org yet.
+    Encodes no org_id or role — only used to reach /student/organizations/subscribe.
+    """
+    jti = str(uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    payload = {
+        'sub': str(subject),
+        'jti': jti,
+        'type': 'provisional',   # ← distinct type, not 'access'
+        'exp': expires_at,
+    }
+
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    return Token(
+        access_token=token,
+        jti=jti,
+        expires_at=expires_at,
+    )
+
+
+def decode_provisional_token(token: str) -> dict:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+    if payload.get('type') != 'provisional':
+        raise ValueError("Not a provisional token")
+    
+    return payload
