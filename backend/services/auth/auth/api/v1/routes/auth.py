@@ -24,6 +24,7 @@ from auth.core.settings import settings
 from auth.api_models.token import RefreshResponse, RefreshRequest
 from uuid import UUID
 from sqlalchemy.exc import IntegrityError
+import re
 
 from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
 from auth.utility.otp.otp_enums import OtpPurpose
@@ -257,7 +258,8 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
     return {"detail": "Successfully logged out"}
 
 
-
+def _slugify(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
 
 ''' SIGN UP 🧑‍💻 '''
 @router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
@@ -308,6 +310,7 @@ async def signup(signup_data: SignUp, session: SessionDep):
             signup_data.organization,
             update={
                 "owner_user_id": user.id,
+                "slug": signup_data.organization.slug or _slugify(signup_data.organization.name),
             },
         )
         session.add(organization)
