@@ -10,7 +10,7 @@ from item_bank_service.services.item_service import ItemService
 from item_bank_service.services.bulk_upload_service import BulkUploadService
 from item_bank_service.database.models.enums import UserRole
 
-router = APIRouter(prefix="/subjects/{subject_id}/items", tags=["items"])
+router = APIRouter(prefix="/subjects/{subject_id}/items", tags=["questions items"])
 
 TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)

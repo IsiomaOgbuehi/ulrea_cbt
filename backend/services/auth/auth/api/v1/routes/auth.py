@@ -53,6 +53,8 @@ async def handle_unverified_user(user: UserModel):
         )
 
         await EmailService.send_otp_email(user.email, otp)
+        if IS_DEV:
+            print(f"OTP: {otp}")
 
         return {
             "message": "Account not verified. OTP has been sent.",
