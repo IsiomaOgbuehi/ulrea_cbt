@@ -155,7 +155,7 @@ class ExamService:
         if exam.status != ExamStatus.PENDING_APPROVAL:
             raise HTTPException(status_code=400, detail="Only pending exams can be approved or rejected.")
 
-        if payload.action == "approve":
+        if payload.action == ExamStatus.APPROVED:
             exam.status = ExamStatus.APPROVED
             exam.approved_by = current_user.id
             exam.rejection_reason = None

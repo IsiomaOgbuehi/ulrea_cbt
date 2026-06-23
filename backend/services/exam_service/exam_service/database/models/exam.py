@@ -3,6 +3,8 @@ from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, JSON
 
+from exam_service.database.models.enums import AssignmentStatus, ExamAction, ExamStatus
+
 
 class ExamModel(SQLModel, table=True):
     """
@@ -25,7 +27,7 @@ class ExamModel(SQLModel, table=True):
     pass_mark: float | None = None                              # optional pass/fail threshold
     total_marks: float = Field(default=0.0)                     # computed from items
 
-    status: str = Field(default="draft", index=True)           # ExamStatus
+    status: ExamStatus = Field(default=ExamStatus.DRAFT, index=True)          # ExamStatus
     rejection_reason: str | None = None
 
     # Scheduling
@@ -87,7 +89,7 @@ class ExamAssignment(SQLModel, table=True):
     student_id: UUID = Field(index=True, nullable=False)
     org_id: UUID = Field(index=True, nullable=False)
     assigned_by: UUID = Field(nullable=False)
-    status: str = Field(default="assigned")                     # AssignmentStatus
+    status: AssignmentStatus = Field(default=AssignmentStatus.ASSIGNED)                     # AssignmentStatus
     cohort_id: UUID | None = Field(default=None, index=True)  # ← add this
     scheduled_at: datetime | None = None                        # override global exam time
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -103,6 +105,6 @@ class ExamAuditLog(SQLModel, table=True):
     exam_id: UUID = Field(foreign_key="exams.id", index=True, nullable=False)
     org_id: UUID = Field(index=True, nullable=False)
     actor_id: UUID = Field(nullable=False)
-    action: str                                                 # e.g. "submitted_for_approval"
+    action: ExamAction                                                 # e.g. "submitted_for_approval"
     extra_data: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

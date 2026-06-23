@@ -9,13 +9,16 @@ DATABASE_PORT = settings.POSTGRES_PORT
 DATABASE_NAME = settings.POSTGRES_DB
 DATABASE_USER = settings.POSTGRES_USER
 DATABASE_PASSWORD = settings.POSTGRES_PASSWORD
+DB_URL = settings.DATABASE_URL
 
 connect_args = {} #{"check_same_thread": False}
 
-DATABASE_URL = (
+DB_URL_PATH = (
     f"postgresql://{DATABASE_USER}:{DATABASE_PASSWORD}"
     f"@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
 )
+
+DATABASE_URL = DB_URL if DB_URL is not None else DB_URL_PATH
 
 
 class PostgresDatabase(IDatabase):

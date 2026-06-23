@@ -18,3 +18,7 @@ dependencies = [
     "sqlmodel>=0.0.38",
     "uvicorn>=0.46.0",
 ]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+[tool.fastapi]
+entrypoint = "exam_service.main:app"

@@ -93,7 +93,7 @@ def test_full_approval_flow(client, teacher_headers, admin_headers):
     # Admin approves
     response = client.post(
         f"/api/v1/exams/{exam['id']}/approval",
-        json={"action": "approve"},
+        json={"action": "approved"},
         headers=admin_headers,
     )
     assert response.status_code == 200
@@ -120,7 +120,7 @@ def test_rejected_exam_can_be_resubmitted(client, teacher_headers, admin_headers
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     client.post(
         f"/api/v1/exams/{exam['id']}/approval",
-        json={"action": "reject", "rejection_reason": "Needs more questions"},
+        json={"action": "rejected", "rejection_reason": "Needs more questions"},
         headers=admin_headers,
     )
 
@@ -191,7 +191,7 @@ def test_assign_students_to_approved_exam(client, teacher_headers, admin_headers
     exam = create_exam(client, teacher_headers)
     add_items(client, teacher_headers, exam["id"], [uuid4()])
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
-    client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approve"}, headers=admin_headers)
+    client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approved"}, headers=admin_headers)
 
     students = [str(uuid4()), str(uuid4()), str(uuid4())]
     response = client.post(
@@ -211,7 +211,7 @@ def test_audit_log_records_lifecycle(client, teacher_headers, admin_headers):
     exam = create_exam(client, teacher_headers)
     add_items(client, teacher_headers, exam["id"], [uuid4()])
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
-    client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approve"}, headers=admin_headers)
+    client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approved"}, headers=admin_headers)
 
     response = client.get(f"/api/v1/exams/{exam['id']}/audit", headers=admin_headers)
     assert response.status_code == 200

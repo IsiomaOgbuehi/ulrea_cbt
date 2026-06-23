@@ -2,7 +2,7 @@ from pydantic import BaseModel, model_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Any
-from exam_service.database.models.enums import ExamStatus, AssignmentStatus
+from exam_service.database.models.enums import ExamAction, ExamStatus, AssignmentStatus, UserRole
 
 
 class ExamCreate(BaseModel):
@@ -55,7 +55,7 @@ class ExamRead(BaseModel):
     duration_minutes: int
     pass_mark: float | None
     total_marks: float
-    status: str
+    status: ExamStatus
     rejection_reason: str | None
     start_time: datetime | None
     end_time: datetime | None
@@ -100,14 +100,14 @@ class ExamItemRead(BaseModel):
 
 
 class ApprovalAction(BaseModel):
-    action: str                         # "approve" | "reject"
+    action: ExamStatus                         # "approve" | "reject"
     rejection_reason: str | None = None
 
     @model_validator(mode="after")
     def validate_rejection(self):
-        if self.action == "reject" and not self.rejection_reason:
+        if self.action == ExamStatus.REJECTED and not self.rejection_reason:
             raise ValueError("rejection_reason is required when rejecting an exam")
-        if self.action not in ("approve", "reject"):
+        if self.action not in (ExamStatus.APPROVED, ExamStatus.REJECTED):
             raise ValueError("action must be 'approve' or 'reject'")
         return self
 
@@ -123,7 +123,7 @@ class ExamAssignmentRead(BaseModel):
     student_id: UUID
     org_id: UUID
     assigned_by: UUID
-    status: str
+    status: AssignmentStatus
     scheduled_at: datetime | None
     created_at: datetime
 
@@ -132,7 +132,7 @@ class ExamAuditLogRead(BaseModel):
     id: UUID
     exam_id: UUID
     actor_id: UUID
-    action: str
+    action: ExamAction
     extra_data: dict | None
     created_at: datetime
 
@@ -140,7 +140,7 @@ class ExamAuditLogRead(BaseModel):
 class CurrentUser(BaseModel):
     id: UUID
     org_id: UUID
-    role: str
+    role: UserRole
     email: str | None = None
     verified: bool = False
 
@@ -155,4 +155,4 @@ class UserSummary(BaseModel):
     firstname: str
     lastname: str
     email: str | None
-    role: str
+    role: UserRole
