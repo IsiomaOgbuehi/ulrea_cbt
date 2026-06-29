@@ -3,6 +3,8 @@ from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, JSON
 
+from attempt_service.database.models.enums import AttemptStatus
+
 
 class AttemptModel(SQLModel, table=True):
     """
@@ -17,7 +19,7 @@ class AttemptModel(SQLModel, table=True):
     org_id: UUID = Field(index=True, nullable=False)
     assignment_id: UUID = Field(index=True, nullable=False)     # links to ExamAssignment
 
-    status: str = Field(default="started", index=True)         # started | submitted | scored
+    status: AttemptStatus = Field(default=AttemptStatus.STARTED, index=True)         # started | submitted | scored
     attempt_number: int = Field(default=1)
 
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

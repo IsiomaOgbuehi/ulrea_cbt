@@ -11,10 +11,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./item_bank.db"
 
     POSTGRES_SERVER: str
-    POSTGRES_PORT: str
-    POSTGRES_DB: str
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str
+    POSTGRES_SERVER: str | None = None
+    POSTGRES_PORT: int | None = None
+    POSTGRES_DB: str | None = None
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
 
     # Auth Secret Key
     SECRET_KEY: str

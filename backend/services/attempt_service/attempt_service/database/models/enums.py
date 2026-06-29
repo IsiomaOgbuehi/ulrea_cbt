@@ -7,3 +7,9 @@ class UserRole(str, Enum):
     TEACHER = "teacher"
     STUDENT = "student"
     SUPERVISOR = "supervisor"
+    STAFF = "staff"
+
+class AttemptStatus(str, Enum):
+    STARTED = 'started'
+    SUBMITTED = 'submitted'
+    SCORED = 'scored'

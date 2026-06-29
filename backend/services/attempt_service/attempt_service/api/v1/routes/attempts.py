@@ -17,7 +17,7 @@ from attempt_service.services.attempt_service import AttemptService
 router = APIRouter(prefix="/attempts", tags=["attempts"])
 
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
+TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
 
 
 ''' START ATTEMPT 🚀 '''

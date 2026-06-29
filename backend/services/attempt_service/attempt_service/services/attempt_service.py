@@ -15,6 +15,7 @@ from attempt_service.schemas.schemas import (
     ResponseRead,
     CurrentUser,
 )
+from attempt_service.database.models.enums import AttemptStatus
 
 
 # ============================================================
@@ -35,7 +36,7 @@ class AttemptService:
 
         # NOTE: max_attempts check would call exam service or read from a local
         # cache/snapshot. For now we track attempt_number.
-        in_progress = [a for a in existing if a.status == "started"]
+        in_progress = [a for a in existing if a.status == AttemptStatus.STARTED]
         if in_progress:
             raise HTTPException(status_code=400, detail="You already have an attempt in progress.")
 
@@ -65,7 +66,7 @@ class AttemptService:
         if not attempt or attempt.student_id != student_id:
             raise HTTPException(status_code=404, detail="Attempt not found.")
 
-        if attempt.status != "started":
+        if attempt.status != AttemptStatus.STARTED:
             raise HTTPException(status_code=400, detail="Cannot save response — attempt is not active.")
 
         # Upsert — update existing response or create new
@@ -115,7 +116,7 @@ class AttemptService:
         if not attempt or attempt.student_id != student_id:
             raise HTTPException(status_code=404, detail="Attempt not found.")
 
-        if attempt.status != "started":
+        if attempt.status != AttemptStatus.STARTED:
             raise HTTPException(status_code=400, detail="Attempt already submitted.")
 
         responses = session.exec(
@@ -160,7 +161,7 @@ class AttemptService:
 
             session.add(resp)
 
-        attempt.status = "submitted"
+        attempt.status = AttemptStatus.SUBMITTED
         attempt.submitted_at = datetime.now(timezone.utc)
         attempt.raw_score = raw_score
         attempt.final_score = max(0.0, final_score)         # floor at 0
