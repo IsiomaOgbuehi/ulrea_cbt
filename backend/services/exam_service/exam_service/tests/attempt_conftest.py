@@ -25,11 +25,12 @@ engine = create_engine(
 # SHARED TEST DATA
 # ============================================================
 
-SUPER_ADMIN_ID = uuid4()
-ADMIN_ID = uuid4()
-TEACHER_ID = uuid4()
-ORG_ID = uuid4()
 STUDENT_ID = uuid4()
+TEACHER_ID = uuid4()
+ADMIN_ID = uuid4()
+ORG_ID = uuid4()
+EXAM_ID = uuid4()
+ASSIGNMENT_ID = uuid4()
 
 TEST_SECRET = "test-secret-key-that-is-long-enough-for-hmac-sha256"
 
@@ -46,10 +47,9 @@ def make_token_payload(user_id, org_id, role, verified=True):
     }
 
 
-SUPER_ADMIN_PAYLOAD = make_token_payload(SUPER_ADMIN_ID, ORG_ID, "super_admin")
-ADMIN_PAYLOAD = make_token_payload(ADMIN_ID, ORG_ID, "admin")
-TEACHER_PAYLOAD = make_token_payload(TEACHER_ID, ORG_ID, "teacher")
 STUDENT_PAYLOAD = make_token_payload(STUDENT_ID, ORG_ID, "student")
+TEACHER_PAYLOAD = make_token_payload(TEACHER_ID, ORG_ID, "teacher")
+ADMIN_PAYLOAD = make_token_payload(ADMIN_ID, ORG_ID, "admin")
 
 
 # ============================================================
@@ -78,13 +78,8 @@ def make_auth_header(payload: dict) -> dict:
 
 
 @pytest.fixture
-def super_admin_headers():
-    return make_auth_header(SUPER_ADMIN_PAYLOAD)
-
-
-@pytest.fixture
-def admin_headers():
-    return make_auth_header(ADMIN_PAYLOAD)
+def student_headers():
+    return make_auth_header(STUDENT_PAYLOAD)
 
 
 @pytest.fixture
@@ -93,8 +88,8 @@ def teacher_headers():
 
 
 @pytest.fixture
-def student_headers():
-    return make_auth_header(STUDENT_PAYLOAD)
+def admin_headers():
+    return make_auth_header(ADMIN_PAYLOAD)
 
 
 @pytest.fixture(autouse=True)
@@ -105,47 +100,37 @@ def mock_jwt(monkeypatch):
     def fake_decode(token, key, algorithms, **kwargs):
         return original_decode(token, TEST_SECRET, algorithms=algorithms)
 
-    monkeypatch.setattr("exam_service.dependencies.jwt.decode", fake_decode)
-
-
-@pytest.fixture(autouse=True)
-def mock_redis(monkeypatch):
-    store = {}
-
-    async def fake_set(key, value, ex=None): store[key] = value
-    async def fake_get(key): return store.get(key)
-    async def fake_delete(key): store.pop(key, None)
-
-    mock = MagicMock()
-    mock.set = fake_set
-    mock.get = fake_get
-    mock.delete = fake_delete
-
-    monkeypatch.setattr("exam_service.api.v1.routes.exams.redis_client", mock, raising=False)
-    yield store
+    monkeypatch.setattr("attempt_service.dependencies.jwt.decode", fake_decode)
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def create_exam(client, headers, subject_id=None, **kwargs):
-    from uuid import uuid4
-    payload = {
-        "title": kwargs.pop("title", "Math Final Exam"),
-        "subject_id": str(subject_id or uuid4()),
-        "duration_minutes": 60,
-        **kwargs,
-    }
-    response = client.post("/api/v1/exams", json=payload, headers=headers)
+def start_attempt(client, headers, exam_id=None, assignment_id=None):
+    response = client.post(
+        "/api/v1/attempts",
+        json={
+            "exam_id": str(exam_id or EXAM_ID),
+            "assignment_id": str(assignment_id or ASSIGNMENT_ID),
+        },
+        headers=headers,
+    )
     assert response.status_code == 200, response.json()
     return response.json()
 
 
-def add_items(client, headers, exam_id, item_ids):
+def save_response(client, headers, attempt_id, item_id=None, answer=None):
+    iid = str(item_id or uuid4())
     response = client.post(
-        f"/api/v1/exams/{exam_id}/items",
-        json={"item_ids": [str(i) for i in item_ids]},
+        f"/api/v1/attempts/{attempt_id}/responses",
+        json={
+            "item_id": iid,
+            "exam_item_id": iid,
+            "answer": answer or ["A"],
+            "time_spent_seconds": 30,
+            "is_flagged": False,
+        },
         headers=headers,
     )
     assert response.status_code == 200, response.json()

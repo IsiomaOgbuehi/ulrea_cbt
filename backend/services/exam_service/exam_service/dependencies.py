@@ -58,4 +58,4 @@ def require_roles(*roles: UserRole):
 
 # Convenience dependencies
 AdminOrAbove = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN))
-TeacherOrAbove = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER))
+TeacherOrAbove = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF))

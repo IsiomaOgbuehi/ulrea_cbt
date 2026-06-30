@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from sqlmodel import SQLModel
 from exam_service.database.database import database_engine as engine
 from exam_service.database.models import exam  # noqa: F401
-from exam_service.api.v1.routes import exams
+from exam_service.api.v1.routes import exams, attempts
 
 
 @asynccontextmanager
@@ -15,3 +15,4 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Exam Service", lifespan=lifespan)
 app.include_router(exams.router, prefix="/api/v1")
+app.include_router(attempts.router, prefix="/api/v1")
