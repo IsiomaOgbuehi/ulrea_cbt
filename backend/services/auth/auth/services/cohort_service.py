@@ -6,9 +6,9 @@ from sqlmodel import Session, select, func
 from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.membership.membership_db import OrgMembership
-from auth.database.schema.user.enums import UserRole
+from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.database.schema.cohort.cohort_api_models import (
-    CohortCreate, CohortUpdate, CohortRead,
+    AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
     CohortMemberRead, AddMembersRequest, GraduateCohortRequest
 )
 
@@ -194,7 +194,7 @@ class CohortService:
         payload: AddMembersRequest,
         actor: UserModel,
         org_id: UUID,           # ← explicit, was actor.org_id
-    ) -> dict:
+    ) -> AddMembersResponse:
         cohort = CohortService._get_cohort(session, cohort_id, org_id)
         CohortService._assert_active(cohort)
 
@@ -209,7 +209,7 @@ class CohortService:
                     OrgMembership.user_id == student_id,
                     OrgMembership.org_id == org_id,
                     OrgMembership.role == UserRole.STUDENT,
-                    OrgMembership.status == "active",
+                    OrgMembership.status == MembershipStatus.ACTIVE,
                 )
             ).first()
 
@@ -239,12 +239,12 @@ class CohortService:
 
         session.commit()
 
-        return {
-            "added": len(added),
-            "already_members": len(already_in),
-            "not_found": len(not_found),
-            "cohort_id": str(cohort_id),
-        }
+        return AddMembersResponse(
+            added=len(added),
+            already_members=len(already_in),
+            not_found=len(not_found),
+            cohort_id=cohort_id
+        )
 
     @staticmethod
     def remove_member(
@@ -328,3 +328,55 @@ class CohortService:
         ).all()
 
         return list(members)
+    
+    @staticmethod
+    def count_members(session: Session, cohort_id: UUID) -> int:
+        return len(
+            session.exec(
+                select(CohortMember).where(
+                    CohortMember.cohort_id == cohort_id
+                )
+            ).all()
+        )
+    
+
+    @staticmethod
+    def change_student_cohort(
+        session: Session,
+        student_id: UUID,
+        new_cohort_id: UUID,
+        actor: UserModel,
+        org_id: UUID,
+    ) -> AddMembersResponse:
+        # Validate the student actually exists as an active student in this org first
+        student_membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == student_id,
+                OrgMembership.org_id == org_id,
+                OrgMembership.role == UserRole.STUDENT,
+                OrgMembership.status == MembershipStatus.ACTIVE,
+            )
+        ).first()
+        if not student_membership:
+            raise HTTPException(status_code=404, detail="Student not found in this organization.")
+
+        existing = session.exec(
+            select(CohortMember)
+            .join(CohortModel, CohortModel.id == CohortMember.cohort_id)
+            .where(
+                CohortMember.student_id == student_id,
+                CohortModel.org_id == org_id,
+            )
+        ).all()
+
+        for member in existing:
+            session.delete(member)
+        session.commit()
+
+        return CohortService.add_members(
+            session=session,
+            cohort_id=new_cohort_id,
+            payload=AddMembersRequest(student_ids=[student_id]),
+            actor=actor,
+            org_id=org_id,
+        )

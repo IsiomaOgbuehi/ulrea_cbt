@@ -4,13 +4,14 @@ from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.user.enums import UserRole
 from auth.database.schema.cohort.cohort_api_models import (
-    CohortCreate, CohortUpdate, CohortRead,
-    AddMembersRequest, CohortMemberRead, GraduateCohortRequest
+    AddMembersResponse, AssignTeacherRequest, CohortCreate, CohortUpdate, CohortRead,
+    AddMembersRequest, CohortMemberRead, GraduateCohortRequest, MyCohortRead, TeacherCohortAssignmentRead
 )
 from auth.services.cohort_service import CohortService
 from auth.utility.redis.redis_client import redis_client
-from auth.dependencies.auth_dependencies import get_user_context
+from auth.dependencies.auth_dependencies import get_user_context, require_cohort_access
 from auth.services.user.user_context import UserContext
+from auth.services.teacher_cohort_service import TeacherCohortService
 from .users import require_roles
 
 router = APIRouter(prefix="/cohorts", tags=["cohorts"])
@@ -25,7 +26,7 @@ TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 async def create_cohort(
     payload: CohortCreate,
     session: SessionDep,
-    ctx: UserContext = Depends(get_user_context),
+    ctx: UserContext = Depends(AdminOrAbove),
 ):
     return CohortService.create(session=session, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
 
@@ -38,6 +39,30 @@ async def list_cohorts(
     status: str | None = Query(default=None, description="Filter by status: active, graduated, archived"),
 ):
     return CohortService.get_all(session, ctx.membership.org_id, status)
+
+
+''' MY COHORTS (TEACHER) 🧑‍🏫 '''
+@router.get("/my-cohorts", response_model=list[MyCohortRead])
+async def list_my_cohorts(
+    session: SessionDep,
+    ctx: UserContext = Depends(TeacherOrAbove),
+):
+    """
+    Cohorts the current teacher is assigned to.
+    Used to populate the cohort picker when creating an exam.
+    """
+    cohorts = TeacherCohortService.list_cohorts_for_teacher(
+        session=session, teacher_id=ctx.user.id, org_id=ctx.membership.org_id
+    )
+    return [
+        MyCohortRead(
+            id=c.id,
+            name=c.name,
+            status=c.status,
+            student_count=CohortService.count_members(session, c.id),
+        )
+        for c in cohorts
+    ]
 
 
 ''' GET COHORT 🔍 '''
@@ -90,7 +115,7 @@ async def graduate_cohort(
 
 
 ''' ADD MEMBERS TO COHORT 👥 '''
-@router.post("/{cohort_id}/members", response_model=dict)
+@router.post("/{cohort_id}/members", response_model=AddMembersResponse)
 async def add_members(
     cohort_id: UUID,
     payload: AddMembersRequest,
@@ -124,6 +149,68 @@ async def remove_member(
 async def get_members(
     cohort_id: UUID,
     session: SessionDep,
+    ctx: UserContext = Depends(require_cohort_access),
+):
+    """
+    Admins can view members of any cohort in their org.
+    Teachers/staff can only view members of cohorts they're assigned to.
+    """
+    return CohortService.get_members(session=session, cohort_id=cohort_id, org_id=ctx.membership.org_id)
+
+
+''' ASSIGN TEACHER TO COHORT 🧑‍🏫➕ '''
+@router.post("/{cohort_id}/teachers", response_model=TeacherCohortAssignmentRead)
+async def assign_teacher(
+    cohort_id: UUID,
+    payload: AssignTeacherRequest,
+    session: SessionDep,
     ctx: UserContext = Depends(AdminOrAbove),
 ):
-    return CohortService.get_members(session=session, cohort_id=cohort_id, org_id=ctx.membership.org_id)
+    assignment = TeacherCohortService.assign(
+        session=session,
+        cohort_id=cohort_id,
+        teacher_id=payload.teacher_id,
+        org_id=ctx.membership.org_id,
+        actor_id=ctx.user.id,
+    )
+    return TeacherCohortAssignmentRead.model_validate(assignment, from_attributes=True)
+
+
+''' UNASSIGN TEACHER FROM COHORT 🧑‍🏫➖ '''
+@router.delete("/{cohort_id}/teachers/{teacher_id}", status_code=204)
+async def unassign_teacher(
+    cohort_id: UUID,
+    teacher_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(AdminOrAbove),
+):
+    TeacherCohortService.unassign(
+        session=session, cohort_id=cohort_id, teacher_id=teacher_id, org_id=ctx.membership.org_id
+    )
+
+
+''' LIST TEACHERS ASSIGNED TO COHORT 📋 '''
+@router.get("/{cohort_id}/teachers", response_model=list[TeacherCohortAssignmentRead])
+async def list_cohort_teachers(
+    cohort_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_cohort_access),
+):
+    """
+    Admins see this for any cohort; assigned teachers can see their
+    co-teachers on cohorts they're part of.
+    """
+    rows = TeacherCohortService.list_teachers_for_cohort(
+        session=session, cohort_id=cohort_id, org_id=ctx.membership.org_id
+    )
+    return [
+        TeacherCohortAssignmentRead(
+            id=assignment.id,
+            teacher_id=assignment.teacher_id,
+            teacher_name=f"{teacher.firstname} {teacher.lastname}".strip(),
+            cohort_id=assignment.cohort_id,
+            assigned_by=assignment.assigned_by,
+            assigned_at=assignment.assigned_at,
+        )
+        for assignment, teacher in rows
+    ]

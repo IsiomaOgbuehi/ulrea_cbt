@@ -41,6 +41,11 @@ class GraduateCohortRequest(BaseModel):
 class AddMembersRequest(BaseModel):
     student_ids: list[UUID]
 
+class AddMembersResponse(BaseModel):
+    added: int
+    already_members: int = 0
+    not_found: int = 0
+    cohort_id: UUID
 
 class RemoveMemberRequest(BaseModel):
     student_id: UUID
@@ -58,3 +63,26 @@ class CohortMemberRead(BaseModel):
     email: str | None = None
     access_code: str | None = None
     institution_id: str | None = None
+
+
+
+
+class AssignTeacherRequest(BaseModel):
+    teacher_id: UUID
+ 
+ 
+class TeacherCohortAssignmentRead(BaseModel):
+    id: UUID
+    teacher_id: UUID
+    teacher_name: str | None = None   # joined from UserModel for display
+    cohort_id: UUID
+    assigned_by: UUID
+    assigned_at: datetime
+ 
+ 
+class MyCohortRead(BaseModel):
+    """Used to populate the cohort picker when a teacher creates an exam."""
+    id: UUID
+    name: str
+    status: str
+    student_count: int

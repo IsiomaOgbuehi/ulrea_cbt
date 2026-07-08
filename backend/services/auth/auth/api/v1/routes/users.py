@@ -2,14 +2,14 @@ import asyncio
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlmodel import select
 
 from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -65,6 +65,9 @@ def require_roles(*roles: UserRole):
         return ctx
 
     return _check
+
+AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+
 
 
 def _get_active_membership(session: SessionDep, user_id: UUID) -> OrgMembership:
@@ -175,6 +178,9 @@ async def create_student(
 ):
     # ← ADD THIS: check plan limits before creating
     PlatformSubscriptionService.assert_can_add_student(session, ctx.membership.org_id)
+    
+    # if not payload.cohort_id:
+    #     raise HTTPException(status_code=422, detail="Cohort Id is required to create student")    HANDLE FOR ADMIN/SUPER ADMIN CREATTION
     
     user, access_code = UserManagementService.create_student(
         session=session,
@@ -550,10 +556,6 @@ async def student_login(
         refresh_token=refresh,
         user=user_data
     )
-    
-
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -872,4 +874,87 @@ async def student_reset_password(
         access_token=token.access_token,
         refresh_token=refresh,
         detail="Security question reset successfully.",
+    )
+
+
+
+
+''' LIST STAFF 👥 '''
+@router.get("/staff", response_model=PaginatedStaffResponse)
+async def list_staff(
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    cohort_id: UUID | None = Query(default=None),
+    subject_id: UUID | None = Query(default=None),
+    name: str | None = Query(default=None, description="Search by staff first/last name"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
+):
+    rows, total = UserManagementService.list_staff(
+        session=session, org_id=ctx.membership.org_id,
+        cohort_id=cohort_id, 
+        # subject_id=subject_id, 
+        name=name,
+        page=page, per_page=per_page,
+    )
+    return PaginatedStaffResponse(
+        total=total, page=page, per_page=per_page,
+        staff=UserManagementService.to_read_list(session, rows, ctx.membership.org_id),
+    )
+
+
+''' LIST STUDENTS 🎓 '''
+@router.get("/students", response_model=PaginatedStudentResponse)
+async def list_students(
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    status: MembershipStatus | None = Query(default=None),
+    cohort_id: UUID | None = Query(default=None),
+    name: str | None = Query(default=None, description="Search by student first/last name"),
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
+):
+    rows, total = UserManagementService.list_students(
+        session=session, org_id=ctx.membership.org_id,
+        status=status, cohort_id=cohort_id, name=name, 
+        page=page, per_page=per_page,
+    )
+    return PaginatedStudentResponse(
+        total=total, page=page, per_page=per_page,
+        students=[
+            StudentListItem(
+                id=user.id, firstname=user.firstname, lastname=user.lastname,
+                email=user.email, access_code=user.access_code,
+                status=membership.status, created_at=membership.created_at,
+            )
+            for user, membership in rows
+        ],
+    )
+
+
+''' UPDATE STUDENT ✏️ '''
+@router.patch("/{student_id}", response_model=UserRead)
+async def update_student(
+    student_id: UUID,
+    payload: UpdateStudentRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(AdminOrAbove),
+):
+    user = UserManagementService.update_student(
+        session=session, student_id=student_id, payload=payload, org_id=ctx.membership.org_id,
+    )
+    return UserRead.model_validate(user, from_attributes=True)
+
+
+''' MOVE STUDENT TO NEW COHORT 🔀 '''
+@router.put("/{student_id}/cohort")
+async def move_student_cohort(
+    student_id: UUID,
+    payload: MoveCohortRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(AdminOrAbove),
+):
+    return CohortService.change_student_cohort(
+        session=session, student_id=student_id, new_cohort_id=payload.cohort_id,
+        actor=ctx.user, org_id=ctx.membership.org_id,
     )

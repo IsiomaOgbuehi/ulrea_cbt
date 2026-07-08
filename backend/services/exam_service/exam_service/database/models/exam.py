@@ -108,3 +108,18 @@ class ExamAuditLog(SQLModel, table=True):
     action: ExamAction                                                 # e.g. "submitted_for_approval"
     extra_data: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ExamReviewCheck(SQLModel, table=True):
+    """
+    One row per (exam, assigned teacher). 'checked=True' means that
+    teacher consents to submission as-is — NOT that they reviewed
+    content. Resets to False for everyone whenever any item is added.
+    """
+    __tablename__ = "exam_review_checks"
+ 
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    exam_id: UUID = Field(index=True, nullable=False)
+    teacher_id: UUID = Field(index=True, nullable=False)
+    checked: bool = Field(default=False)
+    checked_at: datetime | None = None

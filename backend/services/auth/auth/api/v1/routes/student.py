@@ -4,8 +4,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from auth.database.database import SessionDep
-from auth.dependencies.auth_dependencies import get_provisional_or_authenticated_user, get_user_context, get_provisional_user
-from auth.database.schema.user.enums import UserRole
+from auth.dependencies.auth_dependencies import get_provisional_or_authenticated_user, get_user_context
+from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.services.subscription_service import SubscriptionService
 from auth.utility.otp.otp_service import OtpService
 from auth.utility.email.email_service import EmailService
@@ -16,7 +16,6 @@ from auth.utility.otp.otp_enums import OtpPurpose
 from auth.core.settings import settings
 from auth.services.user.user_context import UserContext
 from auth.database.schema.user.user_db import UserModel
-
 router = APIRouter(prefix="/student", tags=["student"])
 
 IS_DEV = settings.ENVIRONMENT == "dev"

@@ -1,5 +1,5 @@
 from sqlmodel import Field
-from auth.database.schema.user.enums import UserRole
+from auth.database.schema.user.enums import MembershipStatus, UserRole
 from pydantic import BaseModel, ConfigDict, EmailStr
 
 from .token import TokenBase
@@ -82,6 +82,13 @@ class CreateStudent(BaseModel):
     institution_id: str  # e.g. student reg number
     cohort_id: UUID | None = None
     access_code: str | None = None     # if provided, use it; else auto-generate
+
+class UpdateStudentRequest(BaseModel):
+    firstname: str | None = None
+    lastname: str | None = None
+    othername: str | None = None
+    email: EmailStr | None = None
+    institution_id: str | None = None
 
 class StaffCreatedResponse(BaseModel):
     id: UUID
@@ -174,3 +181,43 @@ class StudentResetPasswordRequest(BaseModel):
     favorite_answer: str
     new_favorite_question: str
     new_favorite_answer: str
+
+
+
+class StaffListItem(BaseModel):
+    id: UUID
+    firstname: str
+    lastname: str
+    email: str | None
+    role: UserRole
+    status: MembershipStatus
+    cohort_ids: list[UUID]
+    # subject_ids: list[UUID]
+
+
+class PaginatedStaffResponse(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    staff: list[StaffListItem]
+
+
+class MoveCohortRequest(BaseModel):
+    cohort_id: UUID
+
+
+class StudentListItem(BaseModel):
+    id: UUID
+    firstname: str
+    lastname: str
+    email: str | None
+    status: MembershipStatus
+    access_code: str | None = None
+    created_at: datetime
+
+
+class PaginatedStudentResponse(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    students: list[StudentListItem]
