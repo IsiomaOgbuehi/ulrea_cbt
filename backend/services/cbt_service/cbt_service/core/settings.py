@@ -1,0 +1,38 @@
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    ENVIRONMENT: str = "dev"
+
+    # Database
+    DATABASE_URL: str = "" #  "postgresql://admin:admin@localhost:5432/item_bank" # 
+
+    POSTGRES_SERVER: str | None = None
+    POSTGRES_PORT: int | None = None
+    POSTGRES_DB: str | None = None
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
+
+    # Auth Secret Key
+    SECRET_KEY: str
+    JWT_SECRET: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    JWT_ALGORITHM: str
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    AUTH_SERVICE_URL: str = "http://localhost:9000/api/v1"
+    INTERNAL_SECRET: str | None = None  # must match auth service
+
+
+    OTP_SECRET: str
+    
+    # Redis
+    REDIS_URL: str | None = None
+    # REDIS_HOST: str = "localhost"
+    # REDIS_PORT: int = 6379
+
+
+settings = Settings()

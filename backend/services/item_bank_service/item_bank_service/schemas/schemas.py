@@ -1,8 +1,9 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
 from datetime import datetime
-from typing import Any
-from item_bank_service.database.models.enums import ItemDifficulty, ItemSource, ItemType, ItemStatus, SubjectStatus
+from typing import Generic, TypeVar
+
+from item_bank_service.database.models.enums import ItemDifficulty, ItemSource, ItemType, ItemStatus, SubjectStatus, UserRole
 
 
 # ============================================================
@@ -172,6 +173,16 @@ class ItemRead(BaseModel):
     updated_at: datetime
 
 
+T = TypeVar("T")
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
 # ============================================================
 # BULK UPLOAD SCHEMAS
 # ============================================================
@@ -203,7 +214,7 @@ class BulkUploadLogRead(BaseModel):
 class CurrentUser(BaseModel):
     id: UUID
     org_id: UUID
-    role: str
+    role: UserRole
     email: str | None = None
     verified: bool = False
 
@@ -216,7 +227,7 @@ class UserSummary(BaseModel):
     firstname: str
     lastname: str
     email: str | None
-    role: str
+    role: UserRole
 
 
 class SubjectSummary(BaseModel):
@@ -232,3 +243,30 @@ class SubjectAssignmentEnriched(BaseModel):
     assigned_to: UserSummary | None
     assigned_by: UserSummary | None
     created_at: datetime
+
+
+class ItemStatusUpdate(BaseModel):
+    status: ItemStatus
+
+
+
+class ItemIdsRequest(BaseModel):
+    item_ids: list[UUID]
+
+
+class ItemForScoringRead(BaseModel):
+    """Internal-only — includes answer keys. Never expose outside service-to-service calls."""
+    id: UUID
+    item_type: ItemType
+    correct_answers: list[str] | None = None
+    marks: float
+    negative_marks: float
+
+
+class ItemForDisplayRead(BaseModel):
+    """Student-facing — no correct_answers field, ever."""
+    id: UUID
+    question_text: str
+    item_type: ItemType
+    options: list[dict] | None = None
+    marks: float

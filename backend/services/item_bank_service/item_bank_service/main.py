@@ -7,7 +7,7 @@ import time
 from item_bank_service.core.redis.redis_client import redis_client
 
 from item_bank_service.database.database import database_engine as engine
-from item_bank_service.api.v1.routes import subjects, items
+from item_bank_service.api.v1.routes import subjects, items, internal
 
 def run_migrations():
     alembic_cfg = Config("alembic.ini")
@@ -62,3 +62,4 @@ app = FastAPI(
 
 app.include_router(subjects.router, prefix="/api/v1")
 app.include_router(items.router, prefix="/api/v1")
+app.include_router(internal.router)

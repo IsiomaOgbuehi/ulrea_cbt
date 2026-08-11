@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     AUTH_SERVICE_URL: str = "http://localhost:8000/api/v1"
+    ITEM_BANK_SERVICE_URL: str = ""
     INTERNAL_SECRET: str   # must match auth service
 
 

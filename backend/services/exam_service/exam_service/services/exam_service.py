@@ -1,6 +1,6 @@
 from uuid import UUID
 from datetime import datetime, timezone
-from fastapi import HTTPException
+from fastapi import HTTPException, logger
 from sqlmodel import Session, select
 
 from exam_service.database.models.exam import (
@@ -8,8 +8,8 @@ from exam_service.database.models.exam import (
 )
 from exam_service.database.models.enums import ExamStatus, AssignmentStatus, UserRole
 from exam_service.schemas.schemas import (
-    ExamCreate, ExamUpdate, ExamSectionCreate,
-    ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser
+    ExamCreate, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
+    ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser, MyAssignmentRead
 )
 
 
@@ -83,10 +83,25 @@ class ExamService:
 
     @staticmethod
     def get_by_id(session: Session, exam_id: UUID, current_user: CurrentUser) -> ExamModel:
-        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        exam = session.exec(
+            select(ExamModel).where(
+                ExamModel.id == exam_id,
+                ExamModel.org_id == current_user.org_id,
+            )
+        ).first()
 
-        if current_user.role == UserRole.TEACHER and exam.created_by != current_user.id:
-            raise HTTPException(status_code=403, detail="You can only view your own exams.")
+        if not exam:
+            raise HTTPException(status_code=404, detail="Exam not found.")
+
+        if current_user.role == UserRole.STUDENT:
+            assignment = session.exec(
+                select(ExamAssignment).where(
+                    ExamAssignment.exam_id == exam_id,
+                    ExamAssignment.student_id == current_user.id,
+                )
+            ).first()
+            if not assignment:
+                raise HTTPException(status_code=404, detail="Exam not found.")  # 404, not 403 — don't confirm existence
 
         return exam
 
@@ -349,52 +364,124 @@ class ExamService:
     
 
 
-@staticmethod
-def assign_cohort(
-    session: Session,
-    exam_id: UUID,
-    cohort_id: UUID,
-    scheduled_at: datetime | None,
-    current_user: CurrentUser,
-    student_ids: list[UUID],    # fetched from auth service
-) -> list[ExamAssignment]:
-    """
-    Assign all students in a cohort to an exam.
-    student_ids are fetched from auth service before calling this.
-    """
-    exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+    @staticmethod
+    def assign_cohort(
+        session: Session,
+        exam_id: UUID,
+        cohort_id: UUID,
+        scheduled_at: datetime | None,
+        current_user: CurrentUser,
+        student_ids: list[UUID],    # fetched from auth service
+    ) -> list[ExamAssignment]:
+        """
+        Assign all students in a cohort to an exam.
+        student_ids are fetched from auth service before calling this.
+        """
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
 
-    if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
-        raise HTTPException(
-            status_code=400,
-            detail="Students can only be assigned to approved or active exams."
-        )
-
-    assignments = []
-    for student_id in student_ids:
-        existing = session.exec(
-            select(ExamAssignment).where(
-                ExamAssignment.exam_id == exam_id,
-                ExamAssignment.student_id == student_id,
+        if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
+            raise HTTPException(
+                status_code=400,
+                detail="Students can only be assigned to approved or active exams."
             )
-        ).first()
-        if existing:
-            assignments.append(existing)
-            continue
 
-        assignment = ExamAssignment(
-            exam_id=exam_id,
-            student_id=student_id,
-            cohort_id=cohort_id,            # track which cohort this came from
-            org_id=current_user.org_id,
-            assigned_by=UUID(str(current_user.id)),
-            scheduled_at=scheduled_at,
-        )
-        session.add(assignment)
-        assignments.append(assignment)
+        assignments = []
+        for student_id in student_ids:
+            existing = session.exec(
+                select(ExamAssignment).where(
+                    ExamAssignment.exam_id == exam_id,
+                    ExamAssignment.student_id == student_id,
+                )
+            ).first()
+            if existing:
+                assignments.append(existing)
+                continue
 
-    session.commit()
-    _log(session, exam_id, current_user.org_id, UUID(str(current_user.id)),
-         "cohort_assigned", {"cohort_id": str(cohort_id), "count": len(student_ids)})
-    session.commit()
-    return assignments
+            assignment = ExamAssignment(
+                exam_id=exam_id,
+                student_id=student_id,
+                cohort_id=cohort_id,            # track which cohort this came from
+                org_id=current_user.org_id,
+                assigned_by=UUID(str(current_user.id)),
+                scheduled_at=scheduled_at,
+            )
+            session.add(assignment)
+            assignments.append(assignment)
+
+        session.commit()
+        try:
+            _log(session, exam_id, current_user.org_id, UUID(str(current_user.id)),
+                "assigned_to_cohort", {"cohort_id": str(cohort_id), "count": len(student_ids)})
+            session.commit()
+         
+        except Exception:
+            session.rollback()
+            logger.exception(
+                "Failed to write audit log for cohort_assigned on exam_id=%s cohort_id=%s",
+                exam_id, cohort_id,
+            )
+
+        return assignments
+
+
+
+
+
+    @staticmethod
+    def get_sections_with_items_internal(session: Session, exam_id: UUID) -> list[ExamSectionInternalRead]:
+        """
+        Internal only — no org/role scoping needed here since the caller
+        (attempt_service) already verified the student's attempt ownership.
+        """
+        sections = session.exec(
+            select(ExamSection)
+            .where(ExamSection.exam_id == exam_id)
+            .order_by(ExamSection.order)
+        ).all()
+
+        result = []
+        for section in sections:
+            exam_items = session.exec(
+                select(ExamItem)
+                .where(ExamItem.section_id == section.id)
+                .order_by(ExamItem.order)
+            ).all()
+            result.append(ExamSectionInternalRead(
+                id=section.id,
+                title=section.title,
+                order=section.order,
+                items=[
+                    ExamItemInternalRead(item_id=ei.item_id, order=ei.order, marks=ei.marks)
+                    for ei in exam_items
+                ],
+            ))
+        return result
+
+
+
+    @staticmethod
+    def get_my_assignments(session: Session, current_user: CurrentUser) -> list[MyAssignmentRead]:
+        assignments = session.exec(
+            select(ExamAssignment, ExamModel)
+            .join(ExamModel, ExamAssignment.exam_id == ExamModel.id)
+            .where(
+                ExamAssignment.student_id == current_user.id,
+                ExamAssignment.org_id == current_user.org_id,
+            )
+            .order_by(ExamModel.start_time.desc().nulls_last())
+        ).all()
+
+        return [
+            MyAssignmentRead(
+                assignment_id=assignment.id,
+                exam_id=exam.id,
+                exam_title=exam.title,
+                status=assignment.status,
+                scheduled_at=assignment.scheduled_at,
+                duration_minutes=exam.duration_minutes,
+                start_time=exam.start_time,
+                end_time=exam.end_time,
+                has_attempted=assignment.status == AssignmentStatus.ASSIGNED,  # adjust to your actual status values
+            )
+            for assignment, exam in assignments
+        ]

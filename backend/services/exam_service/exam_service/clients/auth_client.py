@@ -107,7 +107,7 @@ class AuthClient:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/internal/cohorts/{cohort_id}/student-ids",
+                    f"{self.base_url}/api/v1/internal/cohorts/{cohort_id}/student_ids",
                     headers={
                         "X-Internal-Secret": settings.INTERNAL_SECRET,
                         "X-Org-Id": str(org_id),

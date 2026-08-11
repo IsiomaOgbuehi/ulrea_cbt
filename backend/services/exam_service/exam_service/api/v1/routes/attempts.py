@@ -3,6 +3,10 @@ from fastapi import APIRouter, Depends
 from exam_service.database.database import SessionDep
 from exam_service.dependencies import get_current_user
 from exam_service.schemas.attempt_schemas import (
+    AttemptDetailRead,
+    AttemptExamRead,
+    CohortAttemptSummary,
+    ResetAttemptRequest,
     StartAttemptRequest,
     SaveResponseRequest,
     ManualReviewRequest,
@@ -44,7 +48,7 @@ async def get_attempt(
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    attempt = AttemptService.get_attempt(session, attempt_id, current_user.id)
+    attempt = await AttemptService.get_attempt(session, attempt_id, current_user.id)
     return AttemptRead.model_validate(attempt, from_attributes=True)
 
 
@@ -57,7 +61,7 @@ async def save_response(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Autosave a student's answer. Call on every answer change."""
-    response = AttemptService.save_response(
+    response = await AttemptService.save_response(
         session=session,
         attempt_id=attempt_id,
         payload=payload,
@@ -73,7 +77,7 @@ async def get_responses(
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    responses = AttemptService.get_responses(session, attempt_id, current_user.id)
+    responses = await AttemptService.get_responses(session, attempt_id, current_user.id)
     return [ResponseRead.model_validate(r, from_attributes=True) for r in responses]
 
 
@@ -90,11 +94,11 @@ async def submit_attempt(
     item_bank dict would be fetched from item bank service in production.
     For now accepts it as empty — extend with AuthClient pattern.
     """
-    attempt = AttemptService.submit(
+    
+    attempt = await AttemptService.submit(
         session=session,
         attempt_id=attempt_id,
         student_id=current_user.id,
-        item_bank={},       # TODO: fetch from item bank service
         pass_mark=pass_mark,
     )
     return AttemptRead.model_validate(attempt, from_attributes=True)
@@ -116,3 +120,52 @@ async def manual_review(
         reviewer_id=current_user.id,
     )
     return ResponseRead.model_validate(response, from_attributes=True)
+
+
+
+
+''' GET EXAM CONTENT FOR ATTEMPT 📄 '''
+@router.get("/{attempt_id}/exam", response_model=AttemptExamRead)
+async def get_attempt_exam(
+    attempt_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Returns exam structure for an in-progress attempt. No answer keys."""
+    return await AttemptService.get_exam_content(session, attempt_id, current_user.id)
+
+
+
+
+''' COHORT ATTEMPTS 📊 '''
+@router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
+async def get_cohort_attempts(
+    exam_id: UUID,
+    cohort_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+):
+    return AttemptService.get_cohort_attempts(session, exam_id, cohort_id, current_user)
+
+
+''' ATTEMPT DETAIL (STAFF VIEW) 🔍 '''
+@router.get("/{attempt_id}/detail", response_model=AttemptDetailRead)
+async def get_attempt_detail(
+    attempt_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+):
+    return await AttemptService.get_attempt_detail_for_staff(session, attempt_id, current_user)
+
+
+
+''' RESET/RESCHEDULE ATTEMPT 🔄 '''
+@router.post("/{attempt_id}/reset", response_model=AttemptRead)
+async def reset_attempt(
+    attempt_id: UUID,
+    payload: ResetAttemptRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+):
+    attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
+    return AttemptRead.model_validate(attempt, from_attributes=True)

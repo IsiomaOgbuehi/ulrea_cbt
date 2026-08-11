@@ -8,7 +8,7 @@ from exam_service.schemas.schemas import (
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
-    ExamAssignmentRead, ExamAuditLogRead, CurrentUser,
+    ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead,
 )
 from exam_service.services.exam_service import ExamService
 from exam_service.database.models.enums import UserRole
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/exams", tags=["exams"])
 
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
+StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STUDENT)
 
 
 ''' CREATE EXAM 📝 '''
@@ -41,12 +42,21 @@ async def list_exams(
     return [ExamRead.model_validate(e, from_attributes=True) for e in exams]
 
 
+''' MY ASSIGNED EXAMS 🎓 '''
+@router.get("/my-assignments", response_model=list[MyAssignmentRead])
+async def get_my_assignments(
+    session: SessionDep,
+    current_user: CurrentUser = Depends(StudentOrAbove),
+):
+    return ExamService.get_my_assignments(session, current_user)
+
+
 ''' GET EXAM 🔍 '''
 @router.get("/{exam_id}", response_model=ExamRead)
 async def get_exam(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(StudentOrAbove),
 ):
     exam = ExamService.get_by_id(session, exam_id, current_user)
     return ExamRead.model_validate(exam, from_attributes=True)

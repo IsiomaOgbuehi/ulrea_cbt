@@ -1,6 +1,6 @@
 from typing import Annotated
 from uuid import UUID
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 
@@ -54,6 +54,11 @@ def require_roles(*roles: UserRole):
             raise HTTPException(status_code=403, detail="Insufficient permissions.")
         return current_user
     return _check
+
+
+async def verify_internal_secret(x_internal_secret: str = Header(...)):
+    if x_internal_secret != settings.INTERNAL_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid internal secret.")
 
 
 # Convenience dependencies

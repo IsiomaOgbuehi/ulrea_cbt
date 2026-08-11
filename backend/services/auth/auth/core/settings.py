@@ -29,11 +29,13 @@ class Settings(BaseSettings):
     # REDIS_PORT: int = 6379
     
     # Mail
-    MAIL_USERNAME: str
-    MAIL_PASSWORD: str
+    MAIL_USERNAME: str | None = ""
+    MAIL_PASSWORD: str | None = ""
     MAIL_FROM: str
-    MAIL_SERVER: str = "smtp.gmail.com"
+    MAIL_SERVER: str | None = ""
     MAIL_PORT: int = 587
+    RESEND_API_KEY: str
+
 
     FRONTEND_URL: str | None = "http://localhost:3000"
     PAYSTACK_SECRET_KEY: str = ""

@@ -1,23 +1,33 @@
 import os
-from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
-from pydantic import EmailStr
+# from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
+# from pydantic import EmailStr
+import resend
 from auth.core.settings import settings
 
-# SMTP Configuration (Load these from your .env)
-conf = ConnectionConfig(
-    MAIL_USERNAME = settings.MAIL_USERNAME,
-    MAIL_PASSWORD = settings.MAIL_PASSWORD,
-    MAIL_FROM = settings.MAIL_FROM,
-    MAIL_PORT = settings.MAIL_PORT,
-    MAIL_SERVER = settings.MAIL_SERVER,
-    MAIL_STARTTLS = True,
-    MAIL_SSL_TLS = False,
-    USE_CREDENTIALS = True,
-    VALIDATE_CERTS = True,
-    SUPPRESS_SEND= settings.ENVIRONMENT in ("test", "dev"),
-)
+resend.api_key = settings.RESEND_API_KEY
+
+SUPPRESS_SEND = settings.ENVIRONMENT in ("test", "dev")
 
 class EmailService:
+
+    @staticmethod
+    async def _send_email(
+        *,
+        email_to: str,
+        subject: str,
+        html: str,
+    ):
+        if SUPPRESS_SEND:
+            return
+        
+        params: resend.Emails.SendParams = {
+            "from": settings.MAIL_FROM,
+            "to": [email_to],
+            "subject": subject,
+            "html": html,
+        }
+
+        return await resend.Emails.send_async(params)
 
     @staticmethod
     async def send_otp_email(email_to: str, otp: str):
@@ -44,15 +54,11 @@ class EmailService:
         </html>
         """
 
-        message = MessageSchema(
+        await EmailService._send_email(
+            email_to=email_to,
             subject="OTP Verification Code",
-            recipients=[email_to],
-            body=html_content,
-            subtype=MessageType.html
+            html=html_content,
         )
-
-        fm = FastMail(conf)
-        await fm.send_message(message)
 
     @staticmethod
     def mask_email(email: str) -> str:
@@ -84,15 +90,11 @@ class EmailService:
         </html>
         """
 
-        message = MessageSchema(
+        await EmailService._send_email(
+            email_to=email,
             subject="Your Account Has Been Created",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html
+            html=html_content,
         )
-
-        fm = FastMail(conf)
-        await fm.send_message(message)
         
 
     @staticmethod
@@ -156,15 +158,11 @@ class EmailService:
         </html>
         """
 
-        message = MessageSchema(
+        await EmailService._send_email(
+            email_to=email,
             subject="Activate Your Account",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html
+            html=html_content,
         )
-
-        fm = FastMail(conf)
-        await fm.send_message(message)
 
     @staticmethod
     async def send_student_access_code_email(
@@ -218,15 +216,11 @@ class EmailService:
         </html>
         """
 
-        message = MessageSchema(
+        await EmailService._send_email(
+            email_to=email,
             subject="Your Student Access Code",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html,
+            html=html_content,
         )
-
-        fm = FastMail(conf)
-        await fm.send_message(message)
 
     
 
@@ -272,14 +266,11 @@ class EmailService:
             </body>
         </html>
         """
-        message = MessageSchema(
+        await EmailService._send_email(
+            email_to=email,
             subject="Reset Your Password",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html,
+            html=html_content,
         )
-        fm = FastMail(conf)
-        await fm.send_message(message)
 
 
     @staticmethod
@@ -305,11 +296,9 @@ class EmailService:
             </body>
         </html>
         """
-        message = MessageSchema(
+        
+        await EmailService._send_email(
+            email_to=email,
             subject=f"You've been added to {org_name}",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html,
+            html=html_content,
         )
-        fm = FastMail(conf)
-        await fm.send_message(message)

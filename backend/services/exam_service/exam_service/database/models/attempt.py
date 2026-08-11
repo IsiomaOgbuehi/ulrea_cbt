@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, DateTime
 
 from .attempt_enum import AttemptStatus
 
+
+from sqlalchemy import Column, DateTime
 
 class AttemptModel(SQLModel, table=True):
     """
@@ -17,22 +19,30 @@ class AttemptModel(SQLModel, table=True):
     exam_id: UUID = Field(index=True, nullable=False)
     student_id: UUID = Field(index=True, nullable=False)
     org_id: UUID = Field(index=True, nullable=False)
-    assignment_id: UUID = Field(index=True, nullable=False)     # links to ExamAssignment
+    assignment_id: UUID = Field(index=True, nullable=False)
 
-    status: AttemptStatus = Field(default=AttemptStatus.STARTED, index=True)         # started | submitted | scored
+    status: AttemptStatus = Field(default=AttemptStatus.STARTED, index=True)
     attempt_number: int = Field(default=1)
 
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    submitted_at: datetime | None = None
-    time_remaining_seconds: int | None = None                   # for resuming
+    started_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    submitted_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    time_remaining_seconds: int | None = None
 
-    # Scoring
     raw_score: float | None = None
-    final_score: float | None = None                            # after negative marks applied
+    final_score: float | None = None
     percentage: float | None = None
-    passed: bool | None = None                                  # null if no pass_mark set
-    scored_at: datetime | None = None
-    scored_by: str | None = None                                # "auto" | user_id for manual
+    passed: bool | None = None
+    scored_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    scored_by: str | None = None
 
 
 class ResponseModel(SQLModel, table=True):

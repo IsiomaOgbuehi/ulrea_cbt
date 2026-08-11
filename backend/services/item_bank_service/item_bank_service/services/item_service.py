@@ -1,12 +1,12 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 
 from item_bank_service.database.models.item import ItemModel
 from item_bank_service.database.models.subject import SubjectModel, SubjectAssignment
 from item_bank_service.schemas.schemas import ItemCreate, ItemUpdate, CurrentUser
-from item_bank_service.database.models.enums import ItemSource, UserRole
+from item_bank_service.database.models.enums import ItemDifficulty, ItemSource, ItemStatus, ItemType, UserRole
 
 
 class ItemService:
@@ -70,11 +70,13 @@ class ItemService:
         session: Session,
         subject_id: UUID,
         current_user: CurrentUser,
-        status: str | None = None,
-        difficulty: str | None = None,
-        item_type: str | None = None,
+        status: ItemStatus | None = None,
+        difficulty: ItemDifficulty | None = None,
+        item_type: ItemType | None = None,
         search: str | None = None,
-    ) -> list[ItemModel]:
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[ItemModel], int]:
         ItemService._assert_subject_access(session, subject_id, current_user)
 
         query = select(ItemModel).where(
@@ -82,8 +84,14 @@ class ItemService:
             ItemModel.org_id == current_user.org_id,
         )
 
+        # Teachers only see their own items; admins and above see everything
+        if current_user.role == UserRole.TEACHER:
+            query = query.where(ItemModel.created_by == current_user.id)
+
         if status:
             query = query.where(ItemModel.status == status)
+        else:
+            query = query.where(ItemModel.status == ItemStatus.ACTIVE)
         if difficulty:
             query = query.where(ItemModel.difficulty == difficulty)
         if item_type:
@@ -91,7 +99,20 @@ class ItemService:
         if search:
             query = query.where(ItemModel.question_text.ilike(f"%{search}%"))
 
-        return session.exec(query).all()
+        # Count total matching rows BEFORE applying limit/offset
+        total = session.exec(
+            select(func.count()).select_from(query.subquery())
+        ).one()
+
+        paginated_query = (
+            query
+            .order_by(ItemModel.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+
+        items = session.exec(paginated_query).all()
+        return items, total
 
     @staticmethod
     def get_by_id(
@@ -133,15 +154,86 @@ class ItemService:
         session.refresh(item)
         return item
 
+
+    @staticmethod
+    def update_status(
+        session: Session,
+        item_id: UUID,
+        new_status: ItemStatus,
+        current_user: CurrentUser,
+    ) -> ItemModel:
+        item = ItemService.get_by_id(session, item_id, current_user)
+
+        if item.status == new_status:
+            return item  # no-op, avoid a pointless write + updated_at churn
+
+        ItemService._assert_valid_transition(item.status, new_status, current_user)
+
+        item.status = new_status
+        item.updated_at = datetime.now(timezone.utc)
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        return item
+
+    @staticmethod
+    def _assert_valid_transition(
+        current_status: ItemStatus,
+        new_status: ItemStatus,
+        current_user: CurrentUser,
+    ) -> None:
+        # Adjust to match your actual ItemStatus members and workflow
+        ALLOWED_TRANSITIONS: dict[ItemStatus, set[ItemStatus]] = {
+            ItemStatus.DRAFT: {ItemStatus.ACTIVE, ItemStatus.ARCHIVED},
+            ItemStatus.ACTIVE: {ItemStatus.ARCHIVED, ItemStatus.DRAFT},
+            ItemStatus.ARCHIVED: {ItemStatus.DRAFT},  # restoring from archive
+        }
+
+        if new_status not in ALLOWED_TRANSITIONS.get(current_status, set()):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot change status from {current_status} to {new_status}",
+            )
+
+        # Example role gate: only admins can restore archived items
+        # if current_status == ItemStatus.ARCHIVED and current_user.role == UserRole.TEACHER:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only admins can restore archived items",
+        #     )
+
+
+
     @staticmethod
     def delete(
         session: Session,
         item_id: UUID,
         current_user: CurrentUser,
     ) -> None:
-        item = ItemService.get_by_id(session, item_id, current_user)
         # Soft delete — archive instead of hard delete for audit trail
-        item.status = "archived"
-        item.updated_at = datetime.now(timezone.utc)
-        session.add(item)
-        session.commit()
+        ItemService.update_status(session, item_id, ItemStatus.ARCHIVED, current_user)
+
+
+
+    @staticmethod
+    def get_by_ids_for_scoring(session: Session, item_ids: list[UUID]) -> list[ItemModel]:
+        """Internal only — includes correct_answers. Caller must be a trusted service."""
+        if not item_ids:
+            return []
+        return session.exec(
+            select(ItemModel).where(ItemModel.id.in_(item_ids))
+        ).all()
+
+    @staticmethod
+    def get_by_ids_for_display(session: Session, item_ids: list[UUID]) -> list[ItemModel]:
+        """
+        Student-facing content. Answer-key exclusion happens at the schema layer
+        (ItemForDisplayRead has no correct_answers field), but this method exists
+        as a separate entry point so scoring and display never accidentally share
+        a response model.
+        """
+        if not item_ids:
+            return []
+        return session.exec(
+            select(ItemModel).where(ItemModel.id.in_(item_ids))
+        ).all()

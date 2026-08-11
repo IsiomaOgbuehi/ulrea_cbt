@@ -4,11 +4,11 @@ from fastapi.responses import Response
 from item_bank_service.database.database import SessionDep
 from item_bank_service.dependencies import get_current_user, require_roles
 from item_bank_service.schemas.schemas import (
-    ItemCreate, ItemUpdate, ItemRead, BulkUploadResult, CurrentUser
+    ItemCreate, ItemStatusUpdate, ItemUpdate, ItemRead, BulkUploadResult, CurrentUser, PaginatedResponse
 )
 from item_bank_service.services.item_service import ItemService
 from item_bank_service.services.bulk_upload_service import BulkUploadService
-from item_bank_service.database.models.enums import UserRole
+from item_bank_service.database.models.enums import ItemDifficulty, ItemStatus, ItemType, UserRole
 
 router = APIRouter(prefix="/subjects/{subject_id}/items", tags=["questions items"])
 
@@ -29,22 +29,31 @@ async def create_item(
 
 
 ''' LIST ITEMS 📋 '''
-@router.get("", response_model=list[ItemRead])
+@router.get("", response_model=PaginatedResponse[ItemRead])
 async def list_items(
     subject_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
-    status: str | None = Query(default=None),
-    difficulty: str | None = Query(default=None),
-    type: str | None = Query(default=None),
+    status: ItemStatus | None = Query(default=None),
+    difficulty: ItemDifficulty | None = Query(default=None),
+    type: ItemType | None = Query(default=None),
     search: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
 ):
-    items = ItemService.get_all(
+    items, total = ItemService.get_all(
         session, subject_id, current_user,
         status=status, difficulty=difficulty,
         item_type=type, search=search,
+        page=page, page_size=page_size,
     )
-    return [ItemRead.model_validate(i, from_attributes=True) for i in items]
+    return PaginatedResponse(
+        items=[ItemRead.model_validate(i, from_attributes=True) for i in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+    )
 
 
 ''' GET ITEM BY ID 🔍 '''
@@ -69,6 +78,19 @@ async def update_item(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     item = ItemService.update(session, item_id, payload, current_user)
+    return ItemRead.model_validate(item, from_attributes=True)
+
+
+''' UPDATE ITEM STATUS 🔄 '''
+@router.patch("/{item_id}/status", response_model=ItemRead)
+async def update_item_status(
+    subject_id: UUID,
+    item_id: UUID,
+    payload: ItemStatusUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+):
+    item = ItemService.update_status(session, item_id, payload.status, current_user)
     return ItemRead.model_validate(item, from_attributes=True)
 
 

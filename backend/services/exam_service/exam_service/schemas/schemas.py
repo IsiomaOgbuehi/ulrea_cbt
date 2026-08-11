@@ -156,3 +156,29 @@ class UserSummary(BaseModel):
     lastname: str
     email: str | None
     role: UserRole
+
+
+
+
+class ExamItemInternalRead(BaseModel):
+    item_id: UUID
+    order: int
+    marks: float  # exam-level override, if you support per-exam marks overrides
+
+class ExamSectionInternalRead(BaseModel):
+    id: UUID
+    title: str
+    order: int
+    items: list[ExamItemInternalRead]
+
+
+class MyAssignmentRead(BaseModel):
+    assignment_id: UUID
+    exam_id: UUID
+    exam_title: str
+    status: AssignmentStatus            # assignment status: pending / scheduled / etc.
+    scheduled_at: datetime | None
+    duration_minutes: int
+    start_time: datetime | None
+    end_time: datetime | None
+    has_attempted: bool     # so the frontend can show "resume" vs "start"

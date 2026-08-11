@@ -24,6 +24,7 @@ class ExamAction(str, Enum):
     CREATED = "created"                           # exam was created
     UPDATED = "updated"                           # exam details/settings were modified
     DELETED = "deleted"                           # exam was deleted
+    RESET = "reset"
 
     # review flow
     SUBMITTED_FOR_APPROVAL = "submitted_for_approval"  # teacher submitted exam for admin review
