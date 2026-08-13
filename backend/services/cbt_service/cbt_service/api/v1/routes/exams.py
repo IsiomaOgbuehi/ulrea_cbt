@@ -4,11 +4,11 @@ from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import get_current_user, require_roles
 from cbt_service.schemas.exam_schemas import (
-    AssignCohortRequest, ExamCreate, ExamUpdate, ExamRead,
+    AssignCohortRequest, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
-    ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead,
+    ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate
 )
 from cbt_service.services.exam_service import ExamService
 from cbt_service.database.models.enums.enums import UserRole
@@ -75,13 +75,13 @@ async def update_exam(
 
 
 ''' DELETE EXAM 🗑️ '''
-@router.delete("/{exam_id}", status_code=204)
+@router.delete("/{exam_id}", response_model=ExamDeleteResponse)
 async def delete_exam(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(AdminOrAbove),   # ← tightened from TeacherOrAbove
 ):
-    ExamService.delete(session, exam_id, current_user)
+    return ExamService.delete(session, exam_id, current_user)
 
 
 # --------------------------------------------------------
@@ -263,3 +263,25 @@ async def assign_cohort(
         student_ids=student_ids,
     )
     return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
+
+
+''' SUPER ADMIN: OVERRIDE EXAM STATUS 🔧 '''
+@router.patch("/{exam_id}/status-override", response_model=ExamRead)
+async def override_exam_status(
+    exam_id: UUID,
+    payload: ExamStatusUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(AdminOrAbove),
+):
+    """
+    Manually force an exam's status. Super admin only — bypasses the normal
+    submit/approve/reject workflow, intended for correcting mistakes.
+    """
+    exam = ExamService.update_status(
+        session=session,
+        exam_id=exam_id,
+        new_status=payload.status,
+        reason=payload.reason,
+        current_user=current_user,
+    )
+    return ExamRead.model_validate(exam, from_attributes=True)

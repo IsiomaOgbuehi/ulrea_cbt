@@ -18,3 +18,10 @@ class MembershipStatus(str, Enum):
 class VerificationMethod(str, Enum):
     EMAIL_OTP = "email_otp"    # standard signup/staff flow
     ACCESS_CODE = "access_code"  # student flow — no email needed
+
+
+
+# NOT USED IN DB
+class DeleteAction(str, Enum):
+    DELETED = 'deleted'
+    MEMBERSHIP_REMOVED = 'membership_removed'

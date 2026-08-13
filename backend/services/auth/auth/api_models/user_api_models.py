@@ -1,5 +1,5 @@
 from sqlmodel import Field
-from auth.database.schema.user.enums import MembershipStatus, UserRole
+from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole
 from pydantic import BaseModel, ConfigDict, EmailStr
 
 from .token import TokenBase
@@ -221,3 +221,21 @@ class PaginatedStudentResponse(BaseModel):
     page: int
     per_page: int
     students: list[StudentListItem]
+
+
+# auth/api_models/user_api_models.py — add
+
+from pydantic import EmailStr
+
+class AdminUpdateUserRequest(BaseModel):
+    firstname: str | None = None
+    lastname: str | None = None
+    othername: str | None = None
+    email: EmailStr | None = None
+    phone: str | None = None
+    institution_id: str | None = None  # lives on OrgMembership, handled separately in service
+
+class DeleteUserResponse(BaseModel):
+    detail: str
+    user_id: UUID
+    action: DeleteAction  # "deleted" | "membership_removed"

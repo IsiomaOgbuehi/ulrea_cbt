@@ -58,6 +58,7 @@ class ExamAction(str, Enum):
     UNASSIGNED_FROM_COHORT = "unassigned_from_cohort"# cohort assignment removed
     REOPENED = "reopened"                            # closed exam reopened
     SETTINGS_UPDATED = "settings_updated"            # exam settings changed
+    EXAM_STATUS_OVERRIDE = "exam_status_override"   # change exam status from approved to draft etc for editing
 
 
 class UserRole(str, Enum):

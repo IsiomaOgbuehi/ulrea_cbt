@@ -8,6 +8,7 @@ class ExamStatus(str, Enum):
     ACTIVE = "active"                 # currently running
     CLOSED = "closed"                 # exam window ended (end_time passed or manually closed)
     REJECTED = "rejected"             # admin rejected, back to teacher
+    ARCHIVED = "archived"
 
 
 class AssignmentStatus(str, Enum):
@@ -58,3 +59,5 @@ class ExamAction(str, Enum):
     UNASSIGNED_FROM_COHORT = "unassigned_from_cohort"# cohort assignment removed
     REOPENED = "reopened"                            # closed exam reopened
     SETTINGS_UPDATED = "settings_updated"            # exam settings changed
+    EXAM_STATUS_OVERRIDE = 'exam_status_override'
+    EXAM_ARCHIVED = 'exam_archived'

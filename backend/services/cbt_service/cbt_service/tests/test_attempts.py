@@ -252,3 +252,37 @@ def test_student_cannot_manually_review(client, student_headers):
         headers=student_headers,     # student trying to review
     )
     assert response.status_code == 403
+
+
+
+def test_restarting_after_reset_reactivates_same_attempt(client, admin_headers, student_headers, super_admin_headers):
+    attempt = start_attempt(client, student_headers)
+    original_id = attempt["id"]
+
+    client.post(
+        f"/api/v1/attempts/{original_id}/reset",
+        json={"reason": "Technical issue during exam"},
+        headers=admin_headers,
+    )
+
+    resumed = start_attempt(client, student_headers)
+    assert resumed["id"] == original_id  # same row, not a new one
+    assert resumed["status"] == "started"
+
+    submit_response = client.post(f"/api/v1/attempts/{original_id}/submit", headers=student_headers)
+    assert submit_response.status_code == 200
+    assert submit_response.json()["id"] == original_id
+
+    # Only one attempt record should exist for this student+exam
+    from sqlmodel import Session, select
+    from cbt_service.database.models.attempt import AttemptModel
+    from .conftest import engine, STUDENT_ID, EXAM_ID
+
+    with Session(engine) as session:
+        count = len(session.exec(
+            select(AttemptModel).where(
+                AttemptModel.exam_id == EXAM_ID,
+                AttemptModel.student_id == STUDENT_ID,
+            )
+        ).all())
+    assert count == 1

@@ -5,16 +5,16 @@ from sqlmodel import Session, select, func, or_
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
-from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
+from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole, VerificationMethod
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
-from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, StudentCreatedResponse, UpdateStudentRequest
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, StudentCreatedResponse, UpdateStudentRequest
 from auth.utility.password.password_harsher import PasswordHasher
 from auth.services.subscription_service import SubscriptionService
 from auth.services.membership_service import MembershipService
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
-from auth.database.schema.cohort.cohort_db import CohortMember, TeacherCohortAssignment
+from auth.database.schema.cohort.cohort_db import CohortMember, CohortModel, TeacherCohortAssignment
 from auth.services.teacher_cohort_service import TeacherCohortService
 
 
@@ -259,43 +259,338 @@ class UserManagementService:
     # --------------------------------------------------------
 
     @classmethod
+    def validate_cohort(
+        cls,
+        session: Session,
+        cohort_id: UUID,
+        org_id: UUID,
+    ) -> CohortModel:
+        cohort = session.exec(
+            select(CohortModel).where(
+                CohortModel.id == cohort_id,
+                CohortModel.org_id == org_id,
+            )
+        ).first()
+
+        if not cohort:
+            raise HTTPException(
+                status_code=404,
+                detail="Cohort not found.",
+            )
+
+        return cohort
+
+
+    @classmethod
+    def assign_student_to_cohort(
+        cls,
+        session: Session,
+        student_id: UUID,
+        cohort_id: UUID,
+        org_id: UUID,
+        added_by: UUID,
+    ) -> CohortMember:
+
+        # Validate that the cohort exists and belongs to this organization
+        cls.validate_cohort(
+            session=session,
+            cohort_id=cohort_id,
+            org_id=org_id,
+        )
+
+        # Prevent duplicate membership
+        existing = session.exec(
+            select(CohortMember).where(
+                CohortMember.cohort_id == cohort_id,
+                CohortMember.student_id == student_id,
+                CohortMember.org_id == org_id,
+            )
+        ).first()
+
+        if existing:
+            return existing
+
+        cohort_member = CohortMember(
+            cohort_id=cohort_id,
+            student_id=student_id,
+            org_id=org_id,
+            added_by=added_by,
+        )
+
+        session.add(cohort_member)
+        session.flush()
+
+        return cohort_member
+
+
+
+    @classmethod
+    def create_new_bulk_student(
+        cls,
+        session: Session,
+        ctx: UserContext,
+        payload: CreateStudent,
+        org_id: UUID,
+    ) -> tuple[UserModel, str]:
+        """
+        Create a single student as part of a bulk upload.
+
+        Unlike create_student(), this method does NOT commit the session.
+        The bulk operation controls the transaction.
+
+        Returns:
+            tuple[UserModel, str]: Created user and access code.
+        """
+
+        creator_role = ctx.membership.role
+
+        allowed = CREATION_PERMISSIONS.get(creator_role, [])
+
+        if UserRole.STUDENT not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your role ({creator_role}) cannot create students.",
+            )
+
+        # institution_id is mandatory for students
+        if not payload.institution_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Please provide institutionId/Reg No/StudentId",
+            )
+
+        # ------------------------------------------------------------
+        # Check duplicate institution ID within the organization
+        # ------------------------------------------------------------
+        existing_inst = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.org_id == org_id,
+                OrgMembership.institution_id == payload.institution_id,
+                OrgMembership.role == UserRole.STUDENT,
+            )
+        ).first()
+
+        if existing_inst:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"A student with institution ID "
+                    f"'{payload.institution_id}' already exists "
+                    f"in this organization."
+                ),
+            )
+
+        # ------------------------------------------------------------
+        # Check duplicate email globally
+        # ------------------------------------------------------------
+        if payload.email:
+            existing_email = session.exec(
+                select(UserModel).where(
+                    UserModel.email == payload.email.lower().strip()
+                )
+            ).first()
+
+            if existing_email:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"A user with email "
+                        f"'{payload.email}' already exists."
+                    ),
+                )
+
+        # ------------------------------------------------------------
+        # Generate / validate access code
+        # ------------------------------------------------------------
+        if payload.access_code:
+            existing_code = session.exec(
+                select(UserModel).where(
+                    UserModel.access_code == payload.access_code
+                )
+            ).first()
+
+            if existing_code:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Access code '{payload.access_code}' "
+                        "is already in use."
+                    ),
+                )
+
+            access_code = payload.access_code
+
+        else:
+            access_code = cls.generate_unique_access_code(session)
+
+        # ------------------------------------------------------------
+        # Create User
+        # ------------------------------------------------------------
+        user = UserModel(
+            firstname=payload.firstname,
+            lastname=payload.lastname,
+            othername=payload.othername or "",
+            phone=payload.phone,
+            access_code=access_code,
+            verified=False,
+            is_first_login=True,
+            verification_method=VerificationMethod.ACCESS_CODE,
+            **(
+                {"email": payload.email.lower().strip()}
+                if payload.email
+                else {}
+            ),
+        )
+
+        session.add(user)
+
+        # Flush so user.id becomes available
+        session.flush()
+
+        # ------------------------------------------------------------
+        # Create pending organization membership
+        # ------------------------------------------------------------
+        MembershipService.create_pending_membership(
+            session=session,
+            user_id=user.id,
+            org_id=org_id,
+            role=UserRole.STUDENT,
+            created_by=ctx.user.id,
+            institution_id=payload.institution_id,
+        )
+
+        # IMPORTANT:
+        # Do NOT commit here.
+        #
+        # create_students_bulk() owns the transaction.
+        #
+        # The caller can now add CohortMember and eventually commit.
+        session.flush()
+
+        return user, access_code
+
+
+    @classmethod
     def create_students_bulk(
         cls,
         session: Session,
-        ctx: UserContext,           # ← UserContext
+        ctx: UserContext,
         rows: list[dict],
         org_id: UUID,
+        cohort_id: UUID | None = None,
     ) -> BulkStudentResult:
+
         successful = []
         errors = []
 
+        # Track IDs appearing in this Excel file.
+        # Prevents duplicate institution IDs within the same upload.
+        uploaded_institution_ids: set[str] = set()
+
+        # ------------------------------------------------------------
+        # Validate cohort once
+        # ------------------------------------------------------------
+        if cohort_id:
+            cls.validate_cohort(
+                session=session,
+                cohort_id=cohort_id,
+                org_id=org_id,
+            )
+
+        # ------------------------------------------------------------
+        # Process rows
+        # ------------------------------------------------------------
         for row_num, row in enumerate(rows, start=2):
             try:
-                payload = CreateStudent(
-                    firstname=row.get("firstname", "").strip(),
-                    lastname=row.get("lastname", "").strip(),
-                    othername=row.get("othername") or None,
-                    email=row.get("email") or None,
-                    phone=row.get("phone") or None,
-                    institution_id=row.get("institution_id") or None,
-                    access_code=row.get("access_code") or None,
-                )
+                firstname = (row.get("firstname") or "").strip()
+                lastname = (row.get("lastname") or "").strip()
 
-                if not payload.firstname or not payload.lastname:
+                institution_id = str(
+                    row.get("institution_id") or ""
+                ).strip()
+
+                # ----------------------------------------------------
+                # Required fields
+                # ----------------------------------------------------
+                if not firstname or not lastname:
                     errors.append({
                         "row": row_num,
                         "error": "firstname and lastname are required.",
                     })
                     continue
 
-                user, access_code = cls.create_student(
+                if not institution_id:
+                    errors.append({
+                        "row": row_num,
+                        "error": "institution_id is required.",
+                    })
+                    continue
+
+                # ----------------------------------------------------
+                # Duplicate institution ID in current Excel file
+                # ----------------------------------------------------
+                if institution_id in uploaded_institution_ids:
+                    errors.append({
+                        "row": row_num,
+                        "error": (
+                            f"Institution ID '{institution_id}' "
+                            "appears more than once in this upload."
+                        ),
+                    })
+                    continue
+
+                uploaded_institution_ids.add(institution_id)
+
+                # ----------------------------------------------------
+                # Build payload
+                # ----------------------------------------------------
+                payload = CreateStudent(
+                    firstname=firstname,
+                    lastname=lastname,
+                    othername=(
+                        (row.get("othername") or "").strip()
+                        or None
+                    ),
+                    email=(
+                        (row.get("email") or "").strip()
+                        or None
+                    ),
+                    phone=(
+                        (row.get("phone") or "").strip()
+                        or None
+                    ),
+                    institution_id=institution_id,
+                    access_code=(
+                        (row.get("access_code") or "").strip()
+                        or None
+                    ),
+                )
+
+                # ----------------------------------------------------
+                # Create student WITHOUT committing
+                # ----------------------------------------------------
+                user, access_code = cls.create_new_bulk_student(
                     session=session,
                     ctx=ctx,
                     payload=payload,
                     org_id=org_id,
                 )
 
-                # Read role from membership — not from user
+                # ----------------------------------------------------
+                # Assign to cohort if supplied
+                # ----------------------------------------------------
+                if cohort_id:
+                    cls.assign_student_to_cohort(
+                        session=session,
+                        student_id=user.id,
+                        cohort_id=cohort_id,
+                        org_id=org_id,
+                        added_by=ctx.user.id,
+                    )
+
+                # ----------------------------------------------------
+                # Get organization membership
+                # ----------------------------------------------------
                 membership = session.exec(
                     select(OrgMembership).where(
                         OrgMembership.user_id == user.id,
@@ -303,21 +598,42 @@ class UserManagementService:
                     )
                 ).first()
 
-                successful.append(StudentCreatedResponse(
-                    id=user.id,
-                    firstname=user.firstname,
-                    lastname=user.lastname,
-                    phone=user.phone,
-                    role=membership.role if membership else UserRole.STUDENT,
-                    org_id=org_id,
-                    is_first_login=user.is_first_login,
-                    access_code=access_code,
-                ))
+                # ----------------------------------------------------
+                # Add successful student
+                # ----------------------------------------------------
+                successful.append(
+                    StudentCreatedResponse(
+                        id=user.id,
+                        firstname=user.firstname,
+                        lastname=user.lastname,
+                        phone=user.phone,
+                        role=(
+                            membership.role
+                            if membership
+                            else UserRole.STUDENT
+                        ),
+                        org_id=org_id,
+                        is_first_login=user.is_first_login,
+                        access_code=access_code,
+                    )
+                )
 
             except HTTPException as e:
-                errors.append({"row": row_num, "error": e.detail})
+                errors.append({
+                    "row": row_num,
+                    "error": e.detail,
+                })
+
             except Exception as e:
-                errors.append({"row": row_num, "error": str(e)})
+                errors.append({
+                    "row": row_num,
+                    "error": str(e),
+                })
+
+        # ------------------------------------------------------------
+        # Commit all successful records
+        # ------------------------------------------------------------
+        session.commit()
 
         return BulkStudentResult(
             total_rows=len(rows),
@@ -326,6 +642,76 @@ class UserManagementService:
             errors=errors,
             students=successful,
         )
+
+    
+    # @classmethod
+    # def create_students_bulk(
+    #     cls,
+    #     session: Session,
+    #     ctx: UserContext,           # ← UserContext
+    #     rows: list[dict],
+    #     org_id: UUID,
+    # ) -> BulkStudentResult:
+    #     successful = []
+    #     errors = []
+
+    #     for row_num, row in enumerate(rows, start=2):
+    #         try:
+    #             payload = CreateStudent(
+    #                 firstname=row.get("firstname", "").strip(),
+    #                 lastname=row.get("lastname", "").strip(),
+    #                 othername=row.get("othername") or None,
+    #                 email=row.get("email") or None,
+    #                 phone=row.get("phone") or None,
+    #                 institution_id=row.get("institution_id") or None,
+    #                 access_code=row.get("access_code") or None,
+    #             )
+
+    #             if not payload.firstname or not payload.lastname:
+    #                 errors.append({
+    #                     "row": row_num,
+    #                     "error": "firstname and lastname are required.",
+    #                 })
+    #                 continue
+
+    #             user, access_code = cls.create_student(
+    #                 session=session,
+    #                 ctx=ctx,
+    #                 payload=payload,
+    #                 org_id=org_id,
+    #             )
+
+    #             # Read role from membership — not from user
+    #             membership = session.exec(
+    #                 select(OrgMembership).where(
+    #                     OrgMembership.user_id == user.id,
+    #                     OrgMembership.org_id == org_id,
+    #                 )
+    #             ).first()
+
+    #             successful.append(StudentCreatedResponse(
+    #                 id=user.id,
+    #                 firstname=user.firstname,
+    #                 lastname=user.lastname,
+    #                 phone=user.phone,
+    #                 role=membership.role if membership else UserRole.STUDENT,
+    #                 org_id=org_id,
+    #                 is_first_login=user.is_first_login,
+    #                 access_code=access_code,
+    #             ))
+
+    #         except HTTPException as e:
+    #             errors.append({"row": row_num, "error": e.detail})
+    #         except Exception as e:
+    #             errors.append({"row": row_num, "error": str(e)})
+
+    #     return BulkStudentResult(
+    #         total_rows=len(rows),
+    #         successful_rows=len(successful),
+    #         failed_rows=len(errors),
+    #         errors=errors,
+    #         students=successful,
+    #     )
     
 
 
@@ -458,3 +844,158 @@ class UserManagementService:
                 # "subject_ids": TeacherSubjectService.list_subjects_for_teacher(session, user.id, org_id),
             })
         return results
+
+
+
+    @staticmethod
+    def admin_update_user(
+        session: Session,
+        user_id: UUID,
+        org_id: UUID,
+        payload: AdminUpdateUserRequest,
+    ) -> UserModel:
+        """
+        General-purpose correction endpoint for admins — fixing a wrong email,
+        typo'd name, etc. on a user who belongs to their org. Works for both
+        staff and students since these fields live on UserModel.
+        """
+        membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user_id,
+                OrgMembership.org_id == org_id,
+            )
+        ).first()
+        if not membership:
+            raise HTTPException(status_code=404, detail="User not found in this organization.")
+
+        user = session.exec(select(UserModel).where(UserModel.id == user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        data = payload.model_dump(exclude_unset=True)
+        institution_id = data.pop("institution_id", None)
+
+        if "email" in data and data["email"]:
+            new_email = data["email"].lower().strip()
+            if new_email != user.email:
+                existing = session.exec(
+                    select(UserModel).where(
+                        UserModel.email == new_email,
+                        UserModel.id != user_id,
+                    )
+                ).first()
+                if existing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Email '{new_email}' is already in use by another account.",
+                    )
+            data["email"] = new_email
+
+        for key, value in data.items():
+            setattr(user, key, value)
+        session.add(user)
+
+        if institution_id is not None:
+            if membership.role == UserRole.STUDENT:
+                existing_inst = session.exec(
+                    select(OrgMembership).where(
+                        OrgMembership.org_id == org_id,
+                        OrgMembership.institution_id == institution_id,
+                        OrgMembership.role == UserRole.STUDENT,
+                        OrgMembership.user_id != user_id,
+                    )
+                ).first()
+                if existing_inst:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Institution ID '{institution_id}' is already in use in this organization.",
+                    )
+            membership.institution_id = institution_id
+            session.add(membership)
+
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+
+    @staticmethod
+    def delete_user(
+        session: Session,
+        user_id: UUID,
+        org_id: UUID,
+        actor: UserModel,
+        actor_role: UserRole,
+        force: bool = False,
+    ) -> DeleteUserResponse:
+        """
+        Hard-deletes a user + their OrgMembership row for this org, but only
+        when it's safe to do so:
+
+        - Never-activated accounts (is_first_login=True, membership still PENDING)
+        are always safe — nothing in cbt_service could reference them yet.
+        - Already-activated accounts require force=True AND super_admin, since
+        they may have created exams / taken attempts referenced by UUID in
+        cbt_service with no foreign key — deleting them here orphans that data.
+        Prefer archive_or_remove for active users in the normal case.
+
+        If the user has memberships in other orgs, only this org's membership
+        is removed; the UserModel row itself is preserved.
+        """
+        if user_id == actor.id:
+            raise HTTPException(status_code=400, detail="You cannot delete your own account.")
+
+        membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user_id,
+                OrgMembership.org_id == org_id,
+            )
+        ).first()
+        if not membership:
+            raise HTTPException(status_code=404, detail="User not found in this organization.")
+
+        if membership.role == UserRole.SUPER_ADMIN:
+            raise HTTPException(status_code=403, detail="Cannot delete the organization owner.")
+
+        user = session.exec(select(UserModel).where(UserModel.id == user_id)).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        never_activated = user.is_first_login and membership.status == MembershipStatus.PENDING
+
+        if not never_activated:
+            if not force:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This user has already activated their account and may have "
+                        "activity elsewhere on the platform. Use the archive/remove "
+                        "endpoint instead, or pass force=true (super_admin only) to "
+                        "permanently delete anyway."
+                    ),
+                )
+            if actor_role != UserRole.SUPER_ADMIN:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only a super admin can force-delete an already-active user.",
+                )
+
+        session.delete(membership)
+        session.flush()
+
+        remaining_memberships = session.exec(
+            select(OrgMembership).where(OrgMembership.user_id == user_id)
+        ).all()
+
+        if not remaining_memberships:
+            session.delete(user)
+            action = DeleteAction.DELETED
+        else:
+            action = DeleteAction.MEMBERSHIP_REMOVED
+
+        session.commit()
+        return DeleteUserResponse(
+            detail=f"User {action.replace('_', ' ')}.",
+            user_id=user_id,
+            action=action,
+        )

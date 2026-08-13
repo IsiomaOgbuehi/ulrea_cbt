@@ -9,7 +9,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole, Verifica
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import BulkStudentResult, CreateStaffUser, CreateStudent, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -238,6 +238,7 @@ async def create_students_bulk(
     session: SessionDep,
     ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
     file: UploadFile = File(...),
+    cohort_id: UUID | None = None,
 ):
     """
     Upload an Excel file to create multiple students at once.
@@ -255,6 +256,7 @@ async def create_students_bulk(
         ctx=ctx,
         rows=rows,
         org_id=ctx.membership.org_id,
+        cohort_id=cohort_id
     )
 
     # Send access code emails for students who have email addresses
@@ -957,4 +959,41 @@ async def move_student_cohort(
     return CohortService.change_student_cohort(
         session=session, student_id=student_id, new_cohort_id=payload.cohort_id,
         actor=ctx.user, org_id=ctx.membership.org_id,
+    )
+
+
+
+''' ADMIN UPDATE STAFF ✏️ '''
+@router.patch("/staff/{user_id}", response_model=UserRead)
+async def admin_update_staff(
+    user_id: UUID,
+    payload: AdminUpdateUserRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(AdminOrAbove),
+):
+    """Fix a wrong email/name for a staff member — works for any org role, not just teachers."""
+    user = UserManagementService.admin_update_user(
+        session=session, user_id=user_id, org_id=ctx.membership.org_id, payload=payload,
+    )
+    return UserRead.model_validate(user, from_attributes=True)
+
+
+''' DELETE USER 🗑️ '''
+@router.delete("/{user_id}", response_model=DeleteUserResponse)
+async def delete_user(
+    user_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(AdminOrAbove),
+    force: bool = Query(
+        default=False,
+        description="Permanently delete an already-activated user. Super admin only — use with caution, see docs.",
+    ),
+):
+    return UserManagementService.delete_user(
+        session=session,
+        user_id=user_id,
+        org_id=ctx.membership.org_id,
+        actor=ctx.user,
+        actor_role=ctx.membership.role,
+        force=force,
     )

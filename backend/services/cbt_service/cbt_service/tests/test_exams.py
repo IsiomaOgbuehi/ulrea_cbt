@@ -1,6 +1,11 @@
 # exam_service/tests/test_exams.py
 import pytest
 from uuid import uuid4
+from sqlmodel import Session, select
+from cbt_service.database.models.exam import ExamAssignment
+from .conftest import engine, STUDENT_ID
+
+from .attempt_conftest import start_attempt
 from .conftest import create_exam, add_items, make_auth_header, ORG_ID, TEST_SECRET
 
 
@@ -227,3 +232,164 @@ def test_teacher_cannot_view_audit_log(client, teacher_headers):
 
     response = client.get(f"/api/v1/exams/{exam['id']}/audit", headers=teacher_headers)
     assert response.status_code == 403
+
+
+
+def test_super_admin_can_override_exam_status_to_draft(client, super_admin_headers, admin_headers):
+    exam = create_exam(client, admin_headers, title="Locked Exam")
+    # push it forward first so the override is a genuine backward move
+    client.post(f"/api/v1/exams/{exam['id']}/submit", headers=admin_headers)
+
+    response = client.patch(
+        f"/api/v1/exams/{exam['id']}/status-override",
+        json={"status": "draft", "reason": "Needs more items before going live"},
+        headers=super_admin_headers,
+    )
+    assert response.status_code == 200, response.json()
+    assert response.json()["status"] == "draft"
+
+
+def test_teacher_cannot_override_exam_status(client, teacher_headers):
+    exam = create_exam(client, teacher_headers, title="Teacher Exam")
+
+    response = client.patch(
+        f"/api/v1/exams/{exam['id']}/status-override",
+        json={"status": "active"},
+        headers=teacher_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_cannot_override_status_to_archived_directly(client, super_admin_headers, admin_headers):
+    exam = create_exam(client, admin_headers, title="Not Archivable This Way")
+
+    response = client.patch(
+        f"/api/v1/exams/{exam['id']}/status-override",
+        json={"status": "archived"},
+        headers=super_admin_headers,
+    )
+    assert response.status_code == 400
+    assert "delete endpoint" in response.json()["detail"].lower()
+
+
+def test_cannot_change_status_of_archived_exam(
+    client,
+    super_admin_headers,
+    admin_headers,
+    student_headers,
+):
+    exam = create_exam(
+        client,
+        admin_headers,
+        title="To Be Archived",
+    )
+
+    # Force the exam into ARCHIVED via the delete path
+    # by first creating an attempt.
+    from uuid import UUID, uuid4
+    from sqlmodel import Session
+
+    from cbt_service.database.models.exam import ExamAssignment
+    from .conftest import engine, STUDENT_ID, ADMIN_ID
+
+    assignment_id = uuid4()
+
+    # API responses contain UUIDs as strings.
+    # SQLModel expects UUID objects for UUID columns.
+    exam_id = UUID(exam["id"])
+    org_id = UUID(exam["org_id"])
+
+    with Session(engine) as session:
+        session.add(
+            ExamAssignment(
+                id=assignment_id,
+                exam_id=exam_id,
+                student_id=STUDENT_ID,
+                org_id=org_id,
+                assigned_by=ADMIN_ID,
+            )
+        )
+        session.commit()
+
+    # Create an attempt so deleting the exam archives it
+    start_attempt(
+        client,
+        student_headers,
+        exam_id=exam["id"],
+        assignment_id=assignment_id,
+    )
+
+    response = client.delete(
+        f"/api/v1/exams/{exam['id']}",
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200, response.json()
+
+    # Archived exams should be terminal.
+    response = client.patch(
+        f"/api/v1/exams/{exam['id']}/status-override",
+        json={"status": "draft"},
+        headers=super_admin_headers,
+    )
+
+    assert response.status_code == 400
+    assert "terminal state" in response.json()["detail"].lower()
+
+
+
+
+def test_admin_can_delete_exam_without_attempts(client, admin_headers):
+    exam = create_exam(client, admin_headers, title="Deletable Exam")
+
+    response = client.delete(f"/api/v1/exams/{exam['id']}", headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["action"] == "deleted"
+
+    followup = client.get(f"/api/v1/exams/{exam['id']}", headers=admin_headers)
+    assert followup.status_code == 404
+
+
+def test_teacher_cannot_delete_exam(client, teacher_headers):
+    exam = create_exam(client, teacher_headers, title="Teacher's Exam")
+
+    response = client.delete(f"/api/v1/exams/{exam['id']}", headers=teacher_headers)
+    assert response.status_code == 403
+
+
+def test_deleting_exam_with_attempts_archives_instead(client, admin_headers, student_headers):
+    exam = create_exam(client, admin_headers, title="Exam With Attempts")
+
+    from uuid import UUID, uuid4
+    from sqlmodel import Session
+    from cbt_service.database.models.exam import ExamAssignment
+    from .conftest import engine, STUDENT_ID, ADMIN_ID
+
+    exam_id = UUID(exam["id"])
+    org_id = UUID(exam["org_id"])
+    assignment_id = uuid4()
+
+    with Session(engine) as session:
+        session.add(ExamAssignment(
+            id=assignment_id,
+            exam_id=exam_id,
+            student_id=STUDENT_ID,
+            org_id=org_id,
+            assigned_by=ADMIN_ID,
+        ))
+        session.commit()
+
+    start_attempt(client, student_headers, exam_id=exam["id"], assignment_id=assignment_id)
+
+    response = client.delete(f"/api/v1/exams/{exam['id']}", headers=admin_headers)
+    assert response.status_code == 200, response.json()
+    assert response.json()["action"] == "archived"
+
+    followup = client.get(f"/api/v1/exams/{exam['id']}", headers=admin_headers)
+    assert followup.status_code == 200
+    assert followup.json()["status"] == "archived"
+
+
+def test_delete_nonexistent_exam_returns_404(client, admin_headers):
+    response = client.delete(f"/api/v1/exams/{uuid4()}", headers=admin_headers)
+    assert response.status_code == 404

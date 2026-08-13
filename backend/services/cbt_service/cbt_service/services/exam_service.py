@@ -1,15 +1,16 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete as sql_delete
 
+from cbt_service.database.models.attempt import AttemptModel
 from cbt_service.database.models.exam import (
     ExamModel, ExamSection, ExamItem, ExamAssignment, ExamAuditLog
 )
 from cbt_service.database.models.enums.exam_enum import ExamStatus, AssignmentStatus
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.schemas.exam_schemas import (
-    ExamCreate, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
+    ExamCreate, ExamDeleteResponse, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
     ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser, MyAssignmentRead
 )
 
@@ -82,6 +83,33 @@ class ExamService:
 
         return session.exec(query).all()
 
+    # @staticmethod
+    # def get_all(session: Session, current_user: CurrentUser) -> list[ExamModel]:
+    #     query = select(ExamModel).where(ExamModel.org_id == current_user.org_id)
+
+    #     if current_user.role == UserRole.TEACHER:
+    #         assigned_subject_ids = select(SubjectAssignment.subject_id).where(
+    #             SubjectAssignment.teacher_id == current_user.id
+    #         )
+    #         assigned_cohort_ids = select(SubjectAssignment.cohort_id).where(
+    #             TeacherCohortAssignment.teacher_id == current_user.id
+    #         )
+
+    #         query = query.where(
+    #             or_(
+    #                 ExamModel.created_by == current_user.id,
+    #                 and_(
+    #                     ExamModel.subject_id.in_(assigned_subject_ids),
+    #                     or_(
+    #                         ExamModel.cohort_id.is_(None),  # not cohort-scoped
+    #                         ExamModel.cohort_id.in_(assigned_cohort_ids),
+    #                     ),
+    #                 ),
+    #             )
+    #         )
+
+    #     return session.exec(query).all()
+
     @staticmethod
     def get_by_id(session: Session, exam_id: UUID, current_user: CurrentUser) -> ExamModel:
         exam = session.exec(
@@ -124,13 +152,49 @@ class ExamService:
         session.refresh(exam)
         return exam
 
-    @staticmethod
-    def delete(session: Session, exam_id: UUID, current_user: CurrentUser):
-        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_edit(exam, current_user)
+    # @staticmethod
+    # def delete(session: Session, exam_id: UUID, current_user: CurrentUser):
+    #     exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+    #     ExamService._assert_can_edit(exam, current_user)
 
+    #     session.delete(exam)
+    #     session.commit()
+
+    @staticmethod
+    def delete(session: Session, exam_id: UUID, current_user: CurrentUser) -> ExamDeleteResponse:
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+
+        has_attempts = session.exec(
+            select(AttemptModel.id).where(AttemptModel.exam_id == exam_id).limit(1)
+        ).first()
+
+        if has_attempts:
+            # Preserve history — students have already engaged with this exam
+            exam.status = ExamStatus.ARCHIVED
+            exam.updated_at = datetime.now(timezone.utc)
+            session.add(exam)
+            _log(session, exam_id, current_user.org_id, current_user.id, "exam_archived", None)
+            session.commit()
+            return ExamDeleteResponse(
+                detail="Exam archived — attempts exist and were preserved.",
+                exam_id=exam_id,
+                action="archived",
+            )
+
+        # No attempts — safe to fully remove, including exam-scoped child rows
+        session.exec(sql_delete(ExamItem).where(ExamItem.exam_id == exam_id))
+        session.exec(sql_delete(ExamSection).where(ExamSection.exam_id == exam_id))
+        session.exec(sql_delete(ExamAssignment).where(ExamAssignment.exam_id == exam_id))
+        session.exec(sql_delete(ExamAuditLog).where(ExamAuditLog.exam_id == exam_id))
         session.delete(exam)
         session.commit()
+        _log(session, exam_id, current_user.org_id, current_user.id, "deleted", {"exam_title": exam.title})
+
+        return ExamDeleteResponse(
+            detail="Exam permanently deleted.",
+            exam_id=exam_id,
+            action="deleted",
+        )
 
     # --------------------------------------------------------
     # APPROVAL FLOW
@@ -428,34 +492,81 @@ class ExamService:
 
 
 
+    # @staticmethod
+    # def get_sections_with_items_internal(session: Session, exam_id: UUID) -> list[ExamSectionInternalRead]:
+    #     """
+    #     Internal only — no org/role scoping needed here since the caller
+    #     (attempt_service) already verified the student's attempt ownership.
+    #     """
+    #     sections = session.exec(
+    #         select(ExamSection)
+    #         .where(ExamSection.exam_id == exam_id)
+    #         .order_by(ExamSection.order)
+    #     ).all()
+
+    #     result = []
+    #     for section in sections:
+    #         exam_items = session.exec(
+    #             select(ExamItem)
+    #             .where(ExamItem.section_id == section.id)
+    #             .order_by(ExamItem.order)
+    #         ).all()
+    #         result.append(ExamSectionInternalRead(
+    #             id=section.id,
+    #             title=section.title,
+    #             order=section.order,
+    #             items=[
+    #                 ExamItemInternalRead(id=ei.id, item_id=ei.item_id, order=ei.order, marks=ei.marks)
+    #                 for ei in exam_items
+    #             ],
+    #         ))
+    #     return result
+
+    # exam_service.py
+
     @staticmethod
     def get_sections_with_items_internal(session: Session, exam_id: UUID) -> list[ExamSectionInternalRead]:
-        """
-        Internal only — no org/role scoping needed here since the caller
-        (attempt_service) already verified the student's attempt ownership.
-        """
         sections = session.exec(
             select(ExamSection)
             .where(ExamSection.exam_id == exam_id)
             .order_by(ExamSection.order)
         ).all()
 
+        all_items = session.exec(
+            select(ExamItem)
+            .where(ExamItem.exam_id == exam_id)
+            .order_by(ExamItem.order)
+        ).all()
+
+        items_by_section: dict[UUID | None, list[ExamItem]] = {}
+        for item in all_items:
+            items_by_section.setdefault(item.section_id, []).append(item)
+
         result = []
         for section in sections:
-            exam_items = session.exec(
-                select(ExamItem)
-                .where(ExamItem.section_id == section.id)
-                .order_by(ExamItem.order)
-            ).all()
+            section_items = items_by_section.pop(section.id, [])
             result.append(ExamSectionInternalRead(
                 id=section.id,
                 title=section.title,
                 order=section.order,
                 items=[
-                    ExamItemInternalRead(item_id=ei.item_id, order=ei.order, marks=ei.marks)
-                    for ei in exam_items
+                    ExamItemInternalRead(id=ei.id, item_id=ei.item_id, order=ei.order, marks=ei.marks)
+                    for ei in section_items
                 ],
             ))
+
+        unsectioned = items_by_section.pop(None, [])
+        if unsectioned:
+            result.append(ExamSectionInternalRead(
+                id=exam_id,
+                title="General",
+                order=len(result),
+                items=[
+                    ExamItemInternalRead(id=ei.id, item_id=ei.item_id, order=ei.order, marks=ei.marks)
+                    for ei in unsectioned
+                ],
+            ))
+
         return result
 
 
@@ -486,3 +597,69 @@ class ExamService:
             )
             for assignment, exam in assignments
         ]
+
+
+
+
+    @staticmethod
+    def update_status(
+        session: Session,
+        exam_id: UUID,
+        new_status: ExamStatus,
+        reason: str | None,
+        current_user: CurrentUser,
+    ) -> ExamModel:
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+
+        if exam.status == new_status:
+            return exam  # no-op
+
+        ExamService._assert_valid_status_override(exam.status, new_status)
+
+        old_status = exam.status
+        exam.status = new_status
+        exam.updated_at = datetime.now(timezone.utc)
+
+        if new_status == ExamStatus.REJECTED and reason:
+            exam.rejection_reason = reason
+        if new_status == ExamStatus.APPROVED:
+            exam.approved_by = current_user.id
+        if new_status == ExamStatus.REJECTED:
+            exam.rejected_by = current_user.id
+
+        session.add(exam)
+
+        _log(
+            session, exam_id, current_user.org_id, current_user.id,
+            "exam_status_override",
+            {"from": old_status, "to": new_status, "reason": reason},
+        )
+
+        session.commit()
+        session.refresh(exam)
+        return exam
+
+
+    @staticmethod
+    def _assert_valid_status_override(current_status: ExamStatus, new_status: ExamStatus) -> None:
+        """
+        Super-admin/admin override — deliberately more permissive than the normal
+        submit → approve/reject workflow, since this exists specifically for
+        fixing mistakes (e.g. an exam wrongly approved, or one that needs to
+        go back to draft for edits after teachers already added items).
+
+        Still blocks nonsensical destinations: nothing should be manually set
+        to ARCHIVED here — that's reserved for delete()'s attempt-preservation
+        path, since ARCHIVED has a specific meaning tied to attempt history.
+        """
+        if new_status == ExamStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=400,
+                detail="Exams can only be archived via the delete endpoint, not this override.",
+            )
+
+        if current_status == ExamStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=400,
+                detail="Archived exams cannot have their status changed. They are a terminal state.",
+            )

@@ -1,3 +1,4 @@
+import asyncio
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
@@ -6,6 +7,7 @@ from pydantic import BaseModel
 from typing import Any
 import random
 
+from cbt_service.database.models.enums.exam_enum import ExamStatus
 from cbt_service.schemas.item_subject_schemas import ItemForDisplayRead, ItemForScoringRead
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.database.models.exam import ExamAssignment, ExamModel
@@ -75,7 +77,6 @@ class AttemptService:
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found.")
 
-        # Check existing attempts
         existing = session.exec(
             select(AttemptModel).where(
                 AttemptModel.exam_id == payload.exam_id,
@@ -83,15 +84,33 @@ class AttemptService:
             )
         ).all()
 
-        # in_progress = [a for a in existing if a.status == AttemptStatus.STARTED]
         in_progress = next((a for a in existing if a.status == AttemptStatus.STARTED), None)
         if in_progress:
             return in_progress
-            # raise HTTPException(status_code=400, detail="You already have an attempt in progress.")
 
-        # Enforce max_attempts — same-service call now that exam_service is merged in,
-        # no client/network round-trip needed.
-        max_attempts = exam.max_attempts or 1  # default to single-attempt if unset
+        # Reactivate a reset attempt in place, instead of creating a new row.
+        # A reset is meant to give the SAME attempt a clean restart, not free
+        # up a slot for a separate attempt record — otherwise you end up with
+        # one permanently-RESET row and a second independent SUBMITTED row.
+        reset_attempts = [a for a in existing if a.status == AttemptStatus.RESET]
+        if reset_attempts:
+            # If more than one has ever been reset, resume the most recent.
+            attempt_to_resume = max(reset_attempts, key=lambda a: a.started_at)
+            attempt_to_resume.status = AttemptStatus.STARTED
+            attempt_to_resume.started_at = datetime.now(timezone.utc)
+            attempt_to_resume.submitted_at = None
+            attempt_to_resume.raw_score = None
+            attempt_to_resume.final_score = None
+            attempt_to_resume.percentage = None
+            attempt_to_resume.passed = None
+            attempt_to_resume.scored_at = None
+            attempt_to_resume.scored_by = None
+            session.add(attempt_to_resume)
+            session.commit()
+            session.refresh(attempt_to_resume)
+            return attempt_to_resume
+
+        max_attempts = exam.max_attempts or 1
         countable = [a for a in existing if a.status != AttemptStatus.RESET]
         if len(countable) >= max_attempts:
             raise HTTPException(
@@ -165,7 +184,8 @@ class AttemptService:
         attempt = await AttemptService.get_attempt(session, attempt_id, student_id)  # expiry-checked
 
         if attempt.status != AttemptStatus.STARTED:
-            raise HTTPException(status_code=400, detail="Attempt already submitted.")
+            return attempt
+            # raise HTTPException(status_code=400, detail="Attempt already submitted.")
 
         exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
         if not exam:
@@ -269,6 +289,7 @@ class AttemptService:
                     continue
                 items.append(AttemptItemRead(
                     id=item_id,
+                    exam_item_id=exam_item.id,
                     question_text=content["question_text"],
                     item_type=content["item_type"],
                     options=content.get("options"),
@@ -552,3 +573,45 @@ class AttemptService:
             return attempt
 
         return await AttemptService._finalize_submission(session, attempt, exam, auto=True)
+
+
+    @staticmethod
+    def _to_attempt_read(session: Session, attempt: AttemptModel) -> AttemptRead:
+        exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+        now = datetime.now(timezone.utc)
+
+        started_at = attempt.started_at if attempt.started_at.tzinfo else attempt.started_at.replace(tzinfo=timezone.utc)
+        expires_at = started_at + timedelta(minutes=exam.duration_minutes) if exam else started_at
+
+        remaining = (
+            max(0, int((expires_at - now).total_seconds()))
+            if attempt.status == AttemptStatus.STARTED
+            else 0
+        )
+
+        return AttemptRead(
+            id=attempt.id, exam_id=attempt.exam_id, student_id=attempt.student_id,
+            status=attempt.status, attempt_number=attempt.attempt_number,
+            started_at=attempt.started_at, submitted_at=attempt.submitted_at,
+            raw_score=attempt.raw_score, final_score=attempt.final_score,
+            percentage=attempt.percentage, passed=attempt.passed,
+            expires_at=expires_at, remaining_seconds=remaining, server_time=now,
+        )
+
+
+    @staticmethod
+    def sweep_expired_attempts(session: Session) -> int:
+        now = datetime.now(timezone.utc)
+        candidates = session.exec(
+            select(AttemptModel).where(AttemptModel.status == AttemptStatus.STARTED)
+        ).all()
+        expired = 0
+        for attempt in candidates:
+            exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+            if not exam:
+                continue
+            started_at = attempt.started_at if attempt.started_at.tzinfo else attempt.started_at.replace(tzinfo=timezone.utc)
+            if now >= started_at + timedelta(minutes=exam.duration_minutes):
+                asyncio.run(AttemptService._finalize_submission(session, attempt, exam, auto=True))
+                expired += 1
+        return expired

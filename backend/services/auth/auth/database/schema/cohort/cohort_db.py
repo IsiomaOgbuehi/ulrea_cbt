@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
+from sqlalchemy import UniqueConstraint
 
 from .enum import CohortStatus
 
@@ -29,6 +30,15 @@ class CohortModel(SQLModel, table=True):
 
 class CohortMember(SQLModel, table=True):
     __tablename__ = "cohort_members"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "cohort_id",
+            "student_id",
+            "org_id",
+            name="uq_cohort_member",
+        ),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     cohort_id: UUID = Field(foreign_key="cohorts.id", index=True, nullable=False)

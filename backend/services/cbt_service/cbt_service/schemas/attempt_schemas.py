@@ -46,6 +46,9 @@ class AttemptRead(BaseModel):
     final_score: float | None
     percentage: float | None
     passed: bool | None
+    expires_at: datetime          # ← add
+    remaining_seconds: int        # ← add
+    server_time: datetime         # ← add
 
 
 class ResponseRead(BaseModel):
@@ -66,6 +69,7 @@ class AttemptOptionRead(BaseModel):
 
 class AttemptItemRead(BaseModel):
     id: UUID
+    exam_item_id: UUID
     question_text: str
     item_type: str
     options: list[AttemptOptionRead] | None = None   # for MCQ — no correct_answers field at all

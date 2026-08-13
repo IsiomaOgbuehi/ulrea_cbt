@@ -114,7 +114,7 @@ class ExamAuditLog(SQLModel, table=True):
     exam_id: UUID = Field(foreign_key="exams.id", index=True, nullable=False)
     org_id: UUID = Field(index=True, nullable=False)
     actor_id: UUID = Field(nullable=False)
-    action: ExamAction                                                 # e.g. "submitted_for_approval"
+    action: str = Field(nullable=False)                                            # e.g. "submitted_for_approval"
     extra_data: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)
 

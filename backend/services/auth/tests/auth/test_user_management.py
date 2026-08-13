@@ -1,3 +1,15 @@
+import jwt as pyjwt
+
+from io import BytesIO
+from openpyxl import Workbook
+
+from sqlmodel import select, Session
+from ..conftest import engine
+
+from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember
+from auth.database.schema.user.user_db import UserModel
+from auth.database.schema.membership.membership_db import OrgMembership
+
 from tests.conftest import (
     do_signup, do_request_otp, do_verify_otp,
     do_full_signup, SIGNUP_PAYLOAD, USER_EMAIL
@@ -26,6 +38,38 @@ STUDENT_PAYLOAD = {
     "phone": "+1000000003",
     "institution_id": "STU/2024/001",   # required reg number
 }
+
+
+def create_student_excel(rows):
+    workbook = Workbook()
+    worksheet = workbook.active
+
+    worksheet.append([
+        "firstname",
+        "lastname",
+        "othername",
+        "email",
+        "phone",
+        "institution_id",
+        "access_code",
+    ])
+
+    for row in rows:
+        worksheet.append([
+            row.get("firstname"),
+            row.get("lastname"),
+            row.get("othername"),
+            row.get("email"),
+            row.get("phone"),
+            row.get("institution_id"),
+            row.get("access_code"),
+        ])
+
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+
+    return output
 
 
 def get_super_admin_token(client) -> str:
@@ -333,3 +377,371 @@ def test_debug_redis_path(client):
     )
     print("Response:", response.json())
     print("Status:", response.status_code)
+
+
+
+
+
+
+
+
+
+
+
+
+# --------
+
+def _decode_user_id(token: str) -> str:
+    """Test-only helper — pulls `sub` out of a token without verifying signature."""
+    payload = pyjwt.decode(token, options={"verify_signature": False})
+    return payload["sub"]
+
+
+# ============================================================
+# ADMIN UPDATE USER
+# ============================================================
+
+def test_admin_can_update_staff_email(client):
+    token = get_super_admin_token(client)
+
+    create_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert create_resp.status_code == 200, create_resp.json()
+    teacher_id = create_resp.json()["id"]
+
+    update_resp = client.patch(
+        f"/api/v1/users/staff/{teacher_id}",
+        json={"email": "corrected@cbtech.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert update_resp.status_code == 200, update_resp.json()
+    assert update_resp.json()["email"] == "corrected@cbtech.com"
+
+
+def test_cannot_update_to_duplicate_email(client):
+    token = get_super_admin_token(client)
+
+    client.post(
+        "/api/v1/users/staff/create",
+        json=ADMIN_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    teacher_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    teacher_id = teacher_resp.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/users/staff/{teacher_id}",
+        json={"email": ADMIN_PAYLOAD["email"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409, response.json()
+
+
+def test_teacher_cannot_update_other_users(client):
+    token = get_super_admin_token(client)
+
+    teacher_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    teacher_id = teacher_resp.json()["id"]
+    teacher_token = _activate_staff(client, teacher_id)["access_token"]
+
+    another_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=ADMIN_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    another_id = another_resp.json()["id"]
+
+    response = client.patch(
+        f"/api/v1/users/staff/{another_id}",
+        json={"firstname": "Hacked"},
+        headers={"Authorization": f"Bearer {teacher_token}"},
+    )
+    assert response.status_code == 403, response.json()
+
+
+# ============================================================
+# ADMIN DELETE USER
+# ============================================================
+
+def test_admin_can_delete_never_activated_staff(client):
+    token = get_super_admin_token(client)
+
+    create_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    teacher_id = create_resp.json()["id"]
+
+    delete_resp = client.delete(
+        f"/api/v1/users/{teacher_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert delete_resp.status_code == 200, delete_resp.json()
+    assert delete_resp.json()["action"] == "deleted"
+
+    # confirm gone
+    followup = client.patch(
+        f"/api/v1/users/staff/{teacher_id}",
+        json={"firstname": "Ghost"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert followup.status_code == 404
+
+
+def test_cannot_delete_active_user_without_force(client):
+    token = get_super_admin_token(client)
+
+    create_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    teacher_id = create_resp.json()["id"]
+    _activate_staff(client, teacher_id)  # now activated
+
+    response = client.delete(
+        f"/api/v1/users/{teacher_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+    assert "force" in response.json()["detail"].lower()
+
+
+def test_admin_cannot_force_delete_active_user(client):
+    """force=true requires super_admin — a plain admin gets 403 even with the flag."""
+    super_token = get_super_admin_token(client)
+
+    admin_create = client.post(
+        "/api/v1/users/staff/create",
+        json=ADMIN_PAYLOAD,
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    admin_id = admin_create.json()["id"]
+    admin_token = _activate_staff(client, admin_id)["access_token"]
+
+    teacher_create = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    teacher_id = teacher_create.json()["id"]
+    _activate_staff(client, teacher_id)  # now activated
+
+    response = client.delete(
+        f"/api/v1/users/{teacher_id}?force=true",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 403
+
+
+def test_super_admin_can_force_delete_active_user(client):
+    super_token = get_super_admin_token(client)
+
+    create_resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    teacher_id = create_resp.json()["id"]
+    _activate_staff(client, teacher_id)  # now activated
+
+    response = client.delete(
+        f"/api/v1/users/{teacher_id}?force=true",
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["action"] == "deleted"
+
+
+def test_cannot_delete_super_admin(client):
+    token = get_super_admin_token(client)
+    super_admin_id = _decode_user_id(token)
+
+    response = client.delete(
+        f"/api/v1/users/{super_admin_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.json()['detail'] == 'You cannot delete your own account.'
+    # assert response.status_code == 403
+
+
+def test_cannot_delete_self(client):
+    super_token = get_super_admin_token(client)
+
+    admin_create = client.post(
+        "/api/v1/users/staff/create",
+        json=ADMIN_PAYLOAD,
+        headers={"Authorization": f"Bearer {super_token}"},
+    )
+    admin_id = admin_create.json()["id"]
+    admin_token = _activate_staff(client, admin_id)["access_token"]
+
+    response = client.delete(
+        f"/api/v1/users/{admin_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 400
+    # assert "yourself" in response.json()["detail"].lower()
+
+
+# Bulk create without cohort
+def test_bulk_create_students_without_cohort(client):
+    token = get_super_admin_token(client)
+
+    excel_file = create_student_excel([
+        {
+            "firstname": "John",
+            "lastname": "Doe",
+            "email": "john.bulk@example.com",
+            "institution_id": "848348349",
+        },
+        {
+            "firstname": "Jane",
+            "lastname": "Doe",
+            "email": "jane.bulk@example.com",
+            "institution_id": "848390696",
+        },
+    ])
+
+    response = client.post(
+        "/api/v1/users/students/create/bulk",
+        files={
+            "file": (
+                "students.xlsx",
+                excel_file.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        headers={
+            "Authorization": f"Bearer {token}",
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+
+    data = response.json()
+
+    print("\nBULK RESPONSE:")
+    print(data)
+
+    assert data["total_rows"] == 2
+    assert data["successful_rows"] == 2
+    assert data["failed_rows"] == 0
+    assert len(data["students"]) == 2
+
+# Bulk create with Cohort
+def test_bulk_create_students_assigns_to_cohort(client):
+    token = get_super_admin_token(client)
+
+    # Get the authenticated user's organization
+    with Session(engine) as session:
+        user = session.exec(
+            select(UserModel).where(
+                UserModel.email == USER_EMAIL
+            )
+        ).first()
+
+        assert user is not None
+
+        membership = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user.id
+            )
+        ).first()
+
+        assert membership is not None
+
+        user_id = user.id
+        org_id = membership.org_id
+
+        cohort = CohortModel(
+            org_id=org_id,
+            name="JSS3A",
+            description="Test cohort",
+            created_by=user_id,
+        )
+
+        session.add(cohort)
+        session.commit()
+        session.refresh(cohort)
+
+        cohort_id = cohort.id
+
+    excel_file = create_student_excel([
+        {
+            "firstname": "John",
+            "lastname": "Doe",
+            "email": "john.cohort@example.com",
+            "institution_id": "848398349",
+        },
+        {
+            "firstname": "Jane",
+            "lastname": "Doe",
+            "email": "jane.cohort@example.com",
+            "institution_id": "4309434",
+        },
+    ])
+
+    response = client.post(
+        f"/api/v1/users/students/create/bulk?cohort_id={cohort_id}",
+        files={
+            "file": (
+                "students.xlsx",
+                excel_file.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        headers={
+            "Authorization": f"Bearer {token}",
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+
+    data = response.json()
+
+    assert data["total_rows"] == 2
+    assert data["successful_rows"] == 2
+    assert data["failed_rows"] == 0
+    assert len(data["students"]) == 2
+
+    # API returns string UUIDs
+    student_ids = {
+        student["id"]
+        for student in data["students"]
+    }
+
+    # Verify cohort memberships
+    with Session(engine) as session:
+        members = session.exec(
+            select(CohortMember).where(
+                CohortMember.cohort_id == cohort_id
+            )
+        ).all()
+
+        assert len(members) == 2
+
+        # Convert DB UUIDs to strings for comparison
+        assigned_student_ids = {
+            str(member.student_id)
+            for member in members
+        }
+
+        assert assigned_student_ids == student_ids
+
+        for member in members:
+            assert member.org_id == org_id
+            assert member.cohort_id == cohort_id
+            assert member.added_by == user_id

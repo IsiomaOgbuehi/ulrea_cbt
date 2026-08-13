@@ -162,6 +162,7 @@ class UserSummary(BaseModel):
 
 
 class ExamItemInternalRead(BaseModel):
+    id: UUID | None
     item_id: UUID
     order: int
     marks: float  # exam-level override, if you support per-exam marks overrides
@@ -183,3 +184,14 @@ class MyAssignmentRead(BaseModel):
     start_time: datetime | None
     end_time: datetime | None
     has_attempted: bool     # so the frontend can show "resume" vs "start"
+
+
+class ExamStatusUpdate(BaseModel):
+    status: ExamStatus
+    reason: str | None = None  # optional context, useful for rejections/archives via this override
+
+
+class ExamDeleteResponse(BaseModel):
+    detail: str
+    exam_id: UUID
+    action: str  # "deleted" | "archived"

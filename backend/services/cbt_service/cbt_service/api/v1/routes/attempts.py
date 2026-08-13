@@ -38,7 +38,8 @@ async def start_attempt(
         student_id=current_user.id,
         org_id=current_user.org_id,
     )
-    return AttemptRead.model_validate(attempt, from_attributes=True)
+    # return AttemptRead.model_validate(attempt, from_attributes=True)
+    return AttemptService._to_attempt_read(session, attempt)
 
 
 ''' GET ATTEMPT 🔍 '''
@@ -49,7 +50,8 @@ async def get_attempt(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     attempt = await AttemptService.get_attempt(session, attempt_id, current_user.id)
-    return AttemptRead.model_validate(attempt, from_attributes=True)
+    # return AttemptRead.model_validate(attempt, from_attributes=True)
+    return AttemptService._to_attempt_read(session, attempt)
 
 
 ''' SAVE RESPONSE 💾 '''
@@ -101,7 +103,8 @@ async def submit_attempt(
         student_id=current_user.id,
         pass_mark=pass_mark,
     )
-    return AttemptRead.model_validate(attempt, from_attributes=True)
+    # return AttemptRead.model_validate(attempt, from_attributes=True)
+    return AttemptService._to_attempt_read(session, attempt)
 
 
 ''' MANUAL REVIEW ✍️ '''
@@ -168,4 +171,4 @@ async def reset_attempt(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
-    return AttemptRead.model_validate(attempt, from_attributes=True)
+    return AttemptService._to_attempt_read(session, attempt)
