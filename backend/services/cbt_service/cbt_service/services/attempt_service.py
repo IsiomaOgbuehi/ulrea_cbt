@@ -84,6 +84,28 @@ class AttemptService:
             )
         ).all()
 
+        # assignment = session.exec(
+        #     select(ExamAssignment).where(ExamAssignment.id == payload.assignment_id)
+        # ).first()
+        assignment = session.exec(
+            select(ExamAssignment).where(
+                ExamAssignment.id == payload.assignment_id,
+                ExamAssignment.exam_id == payload.exam_id,
+                ExamAssignment.student_id == student_id,
+                ExamAssignment.org_id == org_id,
+            )
+        ).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found.")
+
+        effective_start, effective_end = ExamService.get_effective_window(exam, assignment)
+        now = datetime.now(timezone.utc)
+
+        if effective_start and now < effective_start:
+            raise HTTPException(status_code=400, detail="This exam is not yet available.")
+        if effective_end and now > effective_end:
+            raise HTTPException(status_code=400, detail="The window for this exam has closed.")
+
         in_progress = next((a for a in existing if a.status == AttemptStatus.STARTED), None)
         if in_progress:
             return in_progress
@@ -465,7 +487,12 @@ class AttemptService:
                 select(ExamAssignment).where(ExamAssignment.id == attempt.assignment_id)
             ).first()
             if assignment:
+                exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
                 assignment.scheduled_at = payload.new_scheduled_at
+                assignment.deadline_override = (
+                    payload.new_scheduled_at + timedelta(minutes=exam.duration_minutes)
+                    if exam else None
+                )
                 session.add(assignment)
 
         _log(session, attempt.exam_id, current_user.org_id, current_user.id,
@@ -515,8 +542,8 @@ class AttemptService:
             neg = item_data.get("negative_marks", 0.0)
 
             if item_type in ("mcq_single", "mcq_multi", "true_false", "numeric"):
-                student_answer = sorted(resp.answer or [])
-                correct_answer = sorted(correct or [])
+                student_answer = sorted(a.strip().lower() for a in (resp.answer or []))
+                correct_answer = sorted(a.strip().lower() for a in (correct or []))
 
                 if student_answer == correct_answer:
                     resp.is_correct = True
@@ -590,7 +617,7 @@ class AttemptService:
         )
 
         return AttemptRead(
-            id=attempt.id, exam_id=attempt.exam_id, student_id=attempt.student_id,
+            id=attempt.id, exam_id=attempt.exam_id, assignment_id=attempt.assignment_id, student_id=attempt.student_id,
             status=attempt.status, attempt_number=attempt.attempt_number,
             started_at=attempt.started_at, submitted_at=attempt.submitted_at,
             raw_score=attempt.raw_score, final_score=attempt.final_score,

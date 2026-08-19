@@ -7,6 +7,7 @@ from sqlmodel import Session
 from cbt_service.database.models.item import ItemModel, BulkUploadLog
 from cbt_service.database.models.enums.item_subject_enums import ItemType, ItemSource
 from cbt_service.schemas.item_subject_schemas import BulkUploadResult, CurrentUser
+from cbt_service.services.item.utils.item_answer_utils import assert_correct_answers_valid, build_true_false_options, normalize_boolean_answer, normalize_correct_answers
 
 
 # ============================================================
@@ -87,20 +88,29 @@ def _parse_tags(raw: str) -> list[str] | None:
 # VALIDATION
 # ============================================================
 
+
+
 def _validate_row(row: dict, row_num: int):
     question_text = _safe_str(row.get("question_text")).strip()
     if not question_text:
         return None, f"Row {row_num}: question_text is required"
 
     raw_type = _safe_str(row.get("item_type")).strip().lower()
-
     if raw_type not in VALID_TYPES:
         return None, f"Row {row_num}: invalid item_type '{raw_type}'"
 
-    options = _parse_options(row)
+    if raw_type == ItemType.TRUE_FALSE.value:
+        options = build_true_false_options()   # ← ignore option_a/option_b entirely, always canonical
+    else:
+        options = _parse_options(row)
 
     raw_correct = row.get("correct_answers") or row.get("correct_answer")
     correct_answers = _parse_correct_answers(raw_correct)
+
+    if raw_type == ItemType.TRUE_FALSE.value:
+        correct_answers = normalize_boolean_answer(correct_answers)
+    else:
+        correct_answers = normalize_correct_answers(options, correct_answers)
 
     difficulty = _safe_str(row.get("difficulty")).strip().lower() or None
     if difficulty and difficulty not in VALID_DIFFICULTIES:
@@ -112,12 +122,24 @@ def _validate_row(row: dict, row_num: int):
     except Exception:
         return None, f"Row {row_num}: marks must be numeric"
 
-    # RULES
     if raw_type in (ItemType.MCQ_SINGLE.value, ItemType.MCQ_MULTI.value, ItemType.TRUE_FALSE.value):
         if not options or len(options) < 2:
             return None, f"Row {row_num}: MCQ/TF requires at least 2 options"
         if not correct_answers:
             return None, f"Row {row_num}: correct_answers required"
+
+        try:
+            assert_correct_answers_valid(options, correct_answers)
+        except HTTPException as exc:
+            return None, f"Row {row_num}: {exc.detail}"
+
+        valid_keys = {opt["key"] for opt in options}
+        bad = [a for a in correct_answers if a not in valid_keys]
+        if bad:
+            return None, (
+                f"Row {row_num}: correct_answers {bad} doesn't match any option "
+                f"key or text (valid keys: {', '.join(sorted(valid_keys))})"
+            )
 
     if raw_type == ItemType.NUMERIC.value and not correct_answers:
         return None, f"Row {row_num}: numeric requires correct_answers"

@@ -98,10 +98,14 @@ class ExamAssignment(SQLModel, table=True):
     status: AssignmentStatus = Field(default=AssignmentStatus.ASSIGNED)                     # AssignmentStatus
     cohort_id: UUID | None = Field(default=None, index=True)  # ← add this
     scheduled_at: datetime | None = Field(
-            default=None,
-            sa_column=Column(DateTime(timezone=True), nullable=True),
-        )                        # override global exam time
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )                        # override global exam time
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)
+    deadline_override: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class ExamAuditLog(SQLModel, table=True):

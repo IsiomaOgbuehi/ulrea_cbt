@@ -8,6 +8,7 @@ from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
 from cbt_service.schemas.item_subject_schemas import ItemCreate, ItemUpdate, CurrentUser
 from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
 from cbt_service.database.models.enums.enums import UserRole
+from cbt_service.services.item.utils.item_answer_utils import normalize_correct_answers, assert_correct_answers_valid
 
 
 class ItemService:
@@ -145,6 +146,16 @@ class ItemService:
         item = ItemService.get_by_id(session, item_id, current_user)
 
         update_data = payload.model_dump(exclude_unset=True)
+
+        # Re-validate correct_answers against options whenever either changes —
+        # use the incoming value if provided, otherwise fall back to what's
+        # already stored, so partial updates can't desync the two.
+        if "options" in update_data or "correct_answers" in update_data:
+            new_options = update_data.get("options", item.options)
+            new_correct = normalize_correct_answers(new_options, new_correct)
+            assert_correct_answers_valid(new_options, new_correct)
+            update_data["correct_answers"] = new_correct
+
         for key, value in update_data.items():
             setattr(item, key, value)
 

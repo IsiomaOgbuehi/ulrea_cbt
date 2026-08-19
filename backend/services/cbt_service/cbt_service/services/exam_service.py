@@ -571,32 +571,95 @@ class ExamService:
 
 
 
+    # @staticmethod
+    # def get_my_assignments(session: Session, current_user: CurrentUser) -> list[MyAssignmentRead]:
+    #     assignments = session.exec(
+    #         select(ExamAssignment, ExamModel)
+    #         .join(ExamModel, ExamAssignment.exam_id == ExamModel.id)
+    #         .where(
+    #             ExamAssignment.student_id == current_user.id,
+    #             ExamAssignment.org_id == current_user.org_id,
+    #         )
+    #         .order_by(ExamModel.start_time.desc().nulls_last())
+    #     ).all()
+
+    #     return [
+    #         MyAssignmentRead(
+    #             assignment_id=assignment.id,
+    #             exam_id=exam.id,
+    #             exam_title=exam.title,
+    #             status=assignment.status,
+    #             scheduled_at=assignment.scheduled_at,
+    #             duration_minutes=exam.duration_minutes,
+    #             start_time=exam.start_time,
+    #             end_time=exam.end_time,
+    #             has_attempted=assignment.status == AssignmentStatus.ASSIGNED,  # adjust to your actual status values
+    #         )
+    #         for assignment, exam in assignments
+    #     ]
+
     @staticmethod
-    def get_my_assignments(session: Session, current_user: CurrentUser) -> list[MyAssignmentRead]:
+    def get_my_assignments(
+        session: Session,
+        current_user: CurrentUser,
+    ) -> list[MyAssignmentRead]:
+
         assignments = session.exec(
             select(ExamAssignment, ExamModel)
-            .join(ExamModel, ExamAssignment.exam_id == ExamModel.id)
+            .join(
+                ExamModel,
+                ExamAssignment.exam_id == ExamModel.id,
+            )
             .where(
                 ExamAssignment.student_id == current_user.id,
                 ExamAssignment.org_id == current_user.org_id,
             )
-            .order_by(ExamModel.start_time.desc().nulls_last())
+            .order_by(
+                ExamModel.start_time.desc().nulls_last()
+            )
         ).all()
 
-        return [
-            MyAssignmentRead(
-                assignment_id=assignment.id,
-                exam_id=exam.id,
-                exam_title=exam.title,
-                status=assignment.status,
-                scheduled_at=assignment.scheduled_at,
-                duration_minutes=exam.duration_minutes,
-                start_time=exam.start_time,
-                end_time=exam.end_time,
-                has_attempted=assignment.status == AssignmentStatus.ASSIGNED,  # adjust to your actual status values
+        now = datetime.now(timezone.utc)
+
+        results = []
+
+        for assignment, exam in assignments:
+            # Resolve the actual window for this specific assignment.
+            # Assignment-level scheduling should override the exam-level
+            # window where applicable.
+            effective_start, effective_end = (
+                ExamService.get_effective_window(
+                    exam,
+                    assignment,
+                )
             )
-            for assignment, exam in assignments
-        ]
+
+            can_attempt = (
+                (effective_start is None or now >= effective_start)
+                and
+                (effective_end is None or now <= effective_end)
+            )
+
+            results.append(
+                MyAssignmentRead(
+                    assignment_id=assignment.id,
+                    exam_id=exam.id,
+                    exam_title=exam.title,
+                    status=assignment.status,
+                    scheduled_at=assignment.scheduled_at,
+                    duration_minutes=exam.duration_minutes,
+                    start_time=exam.start_time,
+                    end_time=exam.end_time,
+
+                    effective_start=effective_start,
+                    effective_end=effective_end,
+                    can_attempt=can_attempt,
+
+                    has_attempted=assignment.status == AssignmentStatus.ASSIGNED,
+                )
+            )
+
+        return results
 
 
 
@@ -663,3 +726,15 @@ class ExamService:
                 status_code=400,
                 detail="Archived exams cannot have their status changed. They are a terminal state.",
             )
+
+
+    @staticmethod
+    def get_effective_window(exam: ExamModel, assignment: ExamAssignment) -> tuple[datetime | None, datetime | None]:
+        """
+        Single source of truth for "when can this specific student attempt this exam."
+        A reset with a new scheduled time overrides the exam's global window for
+        that assignment only — everyone else still uses the exam-level window.
+        """
+        effective_start = assignment.scheduled_at or exam.start_time
+        effective_end = assignment.deadline_override or exam.end_time
+        return effective_start, effective_end

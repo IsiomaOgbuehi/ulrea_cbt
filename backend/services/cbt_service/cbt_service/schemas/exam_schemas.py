@@ -181,6 +181,9 @@ class MyAssignmentRead(BaseModel):
     status: AssignmentStatus            # assignment status: pending / scheduled / etc.
     scheduled_at: datetime | None
     duration_minutes: int
+    effective_start: datetime | None   # ← new
+    effective_end: datetime | None     # ← new
+    can_attempt: bool                  # ← new — computed server-side, frontend just reads it
     start_time: datetime | None
     end_time: datetime | None
     has_attempted: bool     # so the frontend can show "resume" vs "start"

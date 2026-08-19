@@ -37,6 +37,7 @@ class ManualReviewRequest(BaseModel):
 class AttemptRead(BaseModel):
     id: UUID
     exam_id: UUID
+    assignment_id: UUID | None = None
     student_id: UUID
     status: str
     attempt_number: int

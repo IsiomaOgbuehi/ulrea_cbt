@@ -1,7 +1,7 @@
 import secrets
 import string
 from uuid import UUID
-from sqlmodel import Session, select, func, or_
+from sqlmodel import Session, select, func, or_, delete
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -932,8 +932,7 @@ class UserManagementService:
         Hard-deletes a user + their OrgMembership row for this org, but only
         when it's safe to do so:
 
-        - Never-activated accounts (is_first_login=True, membership still PENDING)
-        are always safe — nothing in cbt_service could reference them yet.
+        - Never-activated accounts are eligible for hard deletion, provided no dependent records prevent deletion.
         - Already-activated accounts require force=True AND super_admin, since
         they may have created exams / taken attempts referenced by UUID in
         cbt_service with no foreign key — deleting them here orphans that data.
@@ -988,6 +987,13 @@ class UserManagementService:
         ).all()
 
         if not remaining_memberships:
+            session.exec(
+            delete(CohortMember).where(
+                    CohortMember.student_id == user_id
+                )
+            )
+            session.flush()
+            
             session.delete(user)
             action = DeleteAction.DELETED
         else:
