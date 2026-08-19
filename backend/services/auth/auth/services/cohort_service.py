@@ -1,16 +1,17 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, or_
 
-from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus
+from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus, TeacherCohortAssignment
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
-    CohortMemberRead, AddMembersRequest, GraduateCohortRequest
+    CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse
 )
+from auth.services.user.user_context import UserContext
 
 
 class CohortService:
@@ -110,10 +111,56 @@ class CohortService:
         return [CohortService._to_read(c, session) for c in cohorts]
 
     @staticmethod
-    def get_by_id(session: Session, cohort_id: UUID, org_id: UUID) -> CohortRead:
-        # org_id already explicit here — no changes needed
-        cohort = CohortService._get_cohort(session, cohort_id, org_id)
-        return CohortService._to_read(cohort, session)
+    def get_by_id(
+        session: Session,
+        cohort_id: UUID,
+        ctx: UserContext,
+    ) -> CohortRead:
+
+        cohort = CohortService._get_cohort(
+            session=session,
+            cohort_id=cohort_id,
+            org_id=ctx.membership.org_id,
+        )
+
+        role = ctx.membership.role
+
+        # Admins can view any cohort in their organization.
+        if role in {
+            UserRole.SUPER_ADMIN,
+            UserRole.ADMIN,
+        }:
+            return CohortService._to_read(cohort, session)
+
+        # Teachers, supervisors and staff must be assigned
+        # to the cohort through TeacherCohortAssignment.
+        if role in {
+            UserRole.TEACHER,
+            UserRole.SUPERVISOR,
+            UserRole.STAFF,
+        }:
+            assignment = session.exec(
+                select(TeacherCohortAssignment).where(
+                    TeacherCohortAssignment.teacher_id == ctx.user.id,
+                    TeacherCohortAssignment.cohort_id == cohort_id,
+                    TeacherCohortAssignment.org_id == ctx.membership.org_id,
+                )
+            ).first()
+
+            if not assignment:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You are not assigned to this cohort.",
+                )
+
+            return CohortService._to_read(cohort, session)
+
+        # Students should not reach this point if NonStudent is correct,
+        # but keep this as a defensive authorization check.
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to view this cohort.",
+        )
 
     @staticmethod
     def update(
@@ -276,17 +323,40 @@ class CohortService:
         session: Session,
         cohort_id: UUID,
         org_id: UUID,
-    ) -> list[CohortMemberRead]:
-        # org_id already explicit here — no changes needed
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> PaginatedResponse[CohortMemberRead]:
         CohortService._get_cohort(session, cohort_id, org_id)
 
-        results = session.exec(
+        base_query = (
             select(CohortMember, UserModel)
             .join(UserModel, UserModel.id == CohortMember.student_id)
             .where(CohortMember.cohort_id == cohort_id)
+        )
+
+        if search:
+            term = f"%{search.strip()}%"
+            base_query = base_query.where(
+                or_(
+                    UserModel.firstname.ilike(term),
+                    UserModel.lastname.ilike(term),
+                    UserModel.email.ilike(term),
+                )
+            )
+
+        total = session.exec(
+            select(func.count()).select_from(base_query.subquery())
+        ).one()
+
+        results = session.exec(
+            base_query
+            .order_by(UserModel.lastname, UserModel.firstname)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         ).all()
 
-        return [
+        items = [
             CohortMemberRead(
                 id=member.id,
                 cohort_id=member.cohort_id,
@@ -296,11 +366,19 @@ class CohortService:
                 firstname=user.firstname,
                 lastname=user.lastname,
                 email=user.email,
-                # access_code=user.access_code,
-                # institution_id=user.institution_id,
             )
             for member, user in results
         ]
+
+        total_pages = (total + page_size - 1) // page_size if total else 0
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )
 
     # --------------------------------------------------------
     # USED BY EXAM SERVICE

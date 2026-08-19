@@ -19,6 +19,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.services.user.user_context import UserContext
 from auth.utility.jwt.jwt import decode_access_token, decode_provisional_token
 from auth.services.teacher_cohort_service import TeacherCohortService
+from auth.database.schema.cohort.cohort_db import CohortModel
 
 
 SECRET_KEY = settings.SECRET_KEY
@@ -204,25 +205,50 @@ async def require_cohort_access(
 ) -> UserContext:
     """
     Allows access if the user is ADMIN/SUPER_ADMIN (full org access),
-    OR a TEACHER/STAFF who is specifically assigned to this cohort.
- 
-    Use this in place of AdminOrAbove on endpoints that teachers
-    should be able to reach for their own assigned cohorts —
-    e.g. viewing cohort members.
+    or TEACHER/STAFF/SUPERVISOR who is specifically assigned
+    to this cohort within their organization.
     """
     role = ctx.membership.role
- 
+    org_id = ctx.membership.org_id
+
     if role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+        # The cohort must still belong to the user's organization.
+        cohort = session.exec(
+            select(CohortModel).where(
+                CohortModel.id == cohort_id,
+                CohortModel.org_id == org_id,
+            )
+        ).first()
+
+        if not cohort:
+            raise HTTPException(
+                status_code=404,
+                detail="Cohort not found.",
+            )
+
         return ctx
- 
-    if role in (UserRole.TEACHER, UserRole.STAFF):
+
+    if role in (
+        UserRole.TEACHER,
+        UserRole.STAFF,
+        UserRole.SUPERVISOR,
+    ):
         assigned = TeacherCohortService.is_teacher_assigned(
             session=session,
             cohort_id=cohort_id,
             teacher_id=ctx.user.id,
+            org_id=org_id,
         )
+
         if assigned:
             return ctx
-        raise HTTPException(status_code=403, detail="You are not assigned to this cohort.")
- 
-    raise HTTPException(status_code=403, detail="Insufficient permissions.")
+
+        raise HTTPException(
+            status_code=403,
+            detail="You are not assigned to this cohort.",
+        )
+
+    raise HTTPException(
+        status_code=403,
+        detail="Insufficient permissions.",
+    )

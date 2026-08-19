@@ -141,8 +141,13 @@ def _get_cohort_member_ids(client, token: str, cohort_id: str) -> list[str]:
         f"/api/v1/cohorts/{cohort_id}/members",
         headers={"Authorization": f"Bearer {token}"},
     )
+
     assert resp.status_code == 200, resp.json()
-    return [m["student_id"] for m in resp.json()]
+
+    return [
+        m["student_id"]
+        for m in resp.json()["items"]
+    ]
 
 
 # ============================================================
@@ -281,8 +286,14 @@ def test_admin_can_view_cohort_members(client):
         f"/api/v1/cohorts/{cohort_id}/members",
         headers={"Authorization": f"Bearer {token}"},
     )
+
     assert resp.status_code == 200, resp.json()
-    member_student_ids = [m["student_id"] for m in resp.json()]
+
+    member_student_ids = [
+        m["student_id"]
+        for m in resp.json()["items"]
+    ]
+
     assert student_id in member_student_ids
 
 
@@ -296,15 +307,22 @@ def test_admin_can_remove_student_from_cohort(client):
         f"/api/v1/cohorts/{cohort_id}/members/{student_id}",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 204, resp.json()
 
-    # Verify removal
+    assert resp.status_code == 204
+
     members_resp = client.get(
         f"/api/v1/cohorts/{cohort_id}/members",
         headers={"Authorization": f"Bearer {token}"},
     )
-    member_ids = [m["id"] for m in members_resp.json()]
-    assert student_id not in member_ids
+
+    assert members_resp.status_code == 200, members_resp.json()
+
+    member_student_ids = [
+        m["student_id"]
+        for m in members_resp.json()["items"]
+    ]
+
+    assert student_id not in member_student_ids
 
 
 def test_add_duplicate_student_to_cohort_is_idempotent(client):
@@ -430,9 +448,15 @@ def test_assigned_teacher_can_view_cohort_members(client):
         f"/api/v1/cohorts/{cohort_id}/members",
         headers={"Authorization": f"Bearer {teacher_token}"},
     )
+
     assert resp.status_code == 200, resp.json()
-    member_student_ids = [m["student_id"] for m in resp.json()]
-    assert student_id in member_student_ids 
+
+    member_student_ids = [
+        m["student_id"]
+        for m in resp.json()["items"]
+    ]
+
+    assert student_id in member_student_ids
 
 
 def test_unassigned_teacher_cannot_view_cohort_members(client):

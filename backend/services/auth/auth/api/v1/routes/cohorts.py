@@ -5,7 +5,7 @@ from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.user.enums import UserRole
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, AssignTeacherRequest, CohortCreate, CohortUpdate, CohortRead,
-    AddMembersRequest, CohortMemberRead, GraduateCohortRequest, MyCohortRead, TeacherCohortAssignmentRead
+    AddMembersRequest, CohortMemberRead, GraduateCohortRequest, MyCohortRead, PaginatedResponse, TeacherCohortAssignmentRead
 )
 from auth.services.cohort_service import CohortService
 from auth.utility.redis.redis_client import redis_client
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/cohorts", tags=["cohorts"])
 
 
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
+TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF, UserRole.SUPERVISOR)
 
 
 ''' CREATE COHORT 📚 '''
@@ -70,9 +70,9 @@ async def list_my_cohorts(
 async def get_cohort(
     cohort_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(TeacherOrAbove),
 ):
-    return CohortService.get_by_id(session=session, cohort_id=cohort_id, org_id=ctx.membership.org_id)
+    return CohortService.get_by_id(session=session, cohort_id=cohort_id, ctx=ctx)
 
 
 ''' UPDATE COHORT ✏️ '''
@@ -145,17 +145,27 @@ async def remove_member(
 
 
 ''' VIEW COHORT MEMBERS 👀 '''
-@router.get("/{cohort_id}/members", response_model=list[CohortMemberRead])
+@router.get("/{cohort_id}/members", response_model=PaginatedResponse[CohortMemberRead])
 async def get_members(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(require_cohort_access),
+    search: str | None = Query(None, description="Search by firstname, lastname, or email"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
 ):
     """
     Admins can view members of any cohort in their org.
     Teachers/staff can only view members of cohorts they're assigned to.
     """
-    return CohortService.get_members(session=session, cohort_id=cohort_id, org_id=ctx.membership.org_id)
+    return CohortService.get_members(
+        session=session,
+        cohort_id=cohort_id,
+        org_id=ctx.membership.org_id,
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
 
 
 ''' ASSIGN TEACHER TO COHORT 🧑‍🏫➕ '''

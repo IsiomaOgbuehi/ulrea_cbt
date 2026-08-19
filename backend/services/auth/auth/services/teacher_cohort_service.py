@@ -88,15 +88,18 @@ class TeacherCohortService:
         ).all()
 
     @staticmethod
-    def is_teacher_assigned(session: Session, cohort_id: UUID, teacher_id: UUID) -> bool:
-        """
-        Row-level check used by the access-control dependency.
-        Returns True if the teacher is assigned to this specific cohort.
-        """
+    def is_teacher_assigned(
+        session: Session,
+        cohort_id: UUID,
+        teacher_id: UUID,
+        org_id: UUID,
+    ) -> bool:
         assignment = session.exec(
             select(TeacherCohortAssignment).where(
                 TeacherCohortAssignment.cohort_id == cohort_id,
                 TeacherCohortAssignment.teacher_id == teacher_id,
+                TeacherCohortAssignment.org_id == org_id,
             )
         ).first()
+
         return assignment is not None
