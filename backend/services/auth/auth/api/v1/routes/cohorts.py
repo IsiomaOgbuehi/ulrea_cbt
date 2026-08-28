@@ -35,7 +35,7 @@ async def create_cohort(
 @router.get("", response_model=list[CohortRead])
 async def list_cohorts(
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(TeacherOrAbove),
     status: str | None = Query(default=None, description="Filter by status: active, graduated, archived"),
 ):
     return CohortService.get_all(session, ctx.membership.org_id, status)

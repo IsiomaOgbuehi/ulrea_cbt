@@ -791,6 +791,7 @@ class UserManagementService:
         session: Session,
         org_id: UUID,
         cohort_id: UUID | None = None,
+        subject_user_ids: list[UUID] | None = None,  # NEW — pre-fetched from cbt_service
         name: str | None = None,
         page: int = 1,
         per_page: int = 10,
@@ -818,6 +819,11 @@ class UserManagementService:
                 TeacherCohortAssignment,
                 TeacherCohortAssignment.teacher_id == UserModel.id,
             ).where(TeacherCohortAssignment.cohort_id == cohort_id)
+
+        if subject_user_ids is not None:  # NEW block
+            if not subject_user_ids:
+                return [], 0
+            base = base.where(UserModel.id.in_(subject_user_ids))
 
         total = len(session.exec(base).all())
         rows = session.exec(

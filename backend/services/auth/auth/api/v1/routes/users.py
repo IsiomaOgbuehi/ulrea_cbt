@@ -36,6 +36,7 @@ from auth.utility.jwt.token_activation import (
     create_password_reset_token,
     verify_password_reset_token,
 )
+from auth.clients.cbt_service_client import cbt_service_client
 
 
 router = APIRouter()
@@ -887,15 +888,22 @@ async def list_staff(
     session: SessionDep,
     ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
     cohort_id: UUID | None = Query(default=None),
-    subject_id: UUID | None = Query(default=None),
+    subject_id: UUID | None = Query(default=None),  # un-commented
     name: str | None = Query(default=None, description="Search by staff first/last name"),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
 ):
+    subject_user_ids = None
+    if subject_id:
+        subject_user_ids = await cbt_service_client.get_assigned_user_ids(
+            subject_id=subject_id,
+            org_id=ctx.membership.org_id,
+        )
+
     rows, total = UserManagementService.list_staff(
         session=session, org_id=ctx.membership.org_id,
-        cohort_id=cohort_id, 
-        # subject_id=subject_id, 
+        cohort_id=cohort_id,
+        subject_user_ids=subject_user_ids,
         name=name,
         page=page, per_page=per_page,
     )
@@ -909,7 +917,7 @@ async def list_staff(
 @router.get("/students", response_model=PaginatedStudentResponse)
 async def list_students(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)),
     status: MembershipStatus | None = Query(default=None),
     cohort_id: UUID | None = Query(default=None),
     name: str | None = Query(default=None, description="Search by student first/last name"),

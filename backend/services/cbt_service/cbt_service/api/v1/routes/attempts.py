@@ -168,7 +168,7 @@ async def reset_attempt(
     attempt_id: UUID,
     payload: ResetAttemptRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(AdminOrAbove),
 ):
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
     return AttemptService._to_attempt_read(session, attempt)

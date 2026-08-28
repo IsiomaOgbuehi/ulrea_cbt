@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     OTP_SECRET: str
     ENVIRONMENT: str = "dev"
     INTERNAL_SECRET: str
+    CBT_SERVICE_URL: str
     
     # Redis
     REDIS_URL: str | None = None

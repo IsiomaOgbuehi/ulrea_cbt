@@ -183,3 +183,25 @@ class SubjectService:
                 SubjectAssignment.subject_id == subject_id,
             )
         ).all()
+
+
+    @staticmethod
+    def get_assigned_user_ids(session: Session, subject_id: UUID, org_id: UUID) -> list[UUID]:
+        """Used internally by auth_service to filter staff listings by subject assignment."""
+        subject = session.exec(
+            select(SubjectModel).where(
+                SubjectModel.id == subject_id,
+                SubjectModel.org_id == org_id,
+            )
+        ).first()
+        if not subject:
+            raise HTTPException(status_code=404, detail="Subject not found.")
+
+        return session.exec(
+            select(SubjectAssignment.assigned_to).where(
+                SubjectAssignment.subject_id == subject_id,
+                SubjectAssignment.org_id == org_id,
+            )
+        ).all()
+
+    

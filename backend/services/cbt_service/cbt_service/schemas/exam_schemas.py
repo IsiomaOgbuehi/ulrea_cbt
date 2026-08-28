@@ -48,6 +48,7 @@ class ExamRead(BaseModel):
     id: UUID
     org_id: UUID
     subject_id: UUID
+    subject_name: str | None = None
     created_by: UUID
     approved_by: UUID | None
     title: str

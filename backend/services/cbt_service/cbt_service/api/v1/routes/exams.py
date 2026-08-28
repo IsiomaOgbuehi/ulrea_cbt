@@ -38,8 +38,11 @@ async def list_exams(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
-    exams = ExamService.get_all(session, current_user)
-    return [ExamRead.model_validate(e, from_attributes=True) for e in exams]
+    rows = ExamService.get_all(session, current_user)
+    return [
+        ExamRead.model_validate({**exam.model_dump(), "subject_name": subject_name})
+        for exam, subject_name in rows
+    ]
 
 
 ''' MY ASSIGNED EXAMS 🎓 '''

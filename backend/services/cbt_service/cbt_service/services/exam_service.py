@@ -2,7 +2,9 @@ from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete
+from sqlalchemy import or_, and_
 
+from cbt_service.database.models.subject import SubjectAssignment, SubjectModel
 from cbt_service.database.models.attempt import AttemptModel
 from cbt_service.database.models.exam import (
     ExamModel, ExamSection, ExamItem, ExamAssignment, ExamAuditLog
@@ -44,16 +46,41 @@ class ExamService:
             raise HTTPException(status_code=404, detail="Exam not found.")
         return exam
 
+
     @staticmethod
-    def _assert_can_edit(exam: ExamModel, current_user: CurrentUser):
-        """Only the creating teacher (or admin/super_admin) can edit a DRAFT exam."""
+    def _assert_can_edit(session: Session, exam: ExamModel, current_user: CurrentUser):
+        """Creator, any teacher assigned to the exam's subject, or admin/super_admin can edit a DRAFT exam."""
         if exam.status not in (ExamStatus.DRAFT, ExamStatus.REJECTED):
             raise HTTPException(
                 status_code=400,
                 detail=f"Exam cannot be edited in '{exam.status}' status."
             )
-        if current_user.role == UserRole.TEACHER and exam.created_by != current_user.id:
-            raise HTTPException(status_code=403, detail="You can only edit your own exams.")
+
+        ExamService._assert_can_view(session, exam, current_user)
+
+
+    @staticmethod
+    def _assert_can_view(session: Session, exam: ExamModel, current_user: CurrentUser):
+        """
+        Creator, any teacher assigned to the exam's subject, or admin/super_admin
+        can view the exam and its sections/items/assignments.
+        Students are handled separately via ExamAssignment (see get_by_id).
+        """
+        if current_user.role != UserRole.TEACHER:
+            return  # admin/super_admin unrestricted
+
+        if exam.created_by == current_user.id:
+            return
+
+        assignment = session.exec(
+            select(SubjectAssignment).where(
+                SubjectAssignment.subject_id == exam.subject_id,
+                SubjectAssignment.assigned_to == current_user.id,
+                SubjectAssignment.org_id == current_user.org_id,
+            )
+        ).first()
+        if not assignment:
+            raise HTTPException(status_code=403, detail="You are not assigned to this exam's subject.")
 
     # --------------------------------------------------------
     # EXAM CRUD
@@ -73,43 +100,49 @@ class ExamService:
         session.refresh(exam)
         return exam
 
-    @staticmethod
-    def get_all(session: Session, current_user: CurrentUser) -> list[ExamModel]:
-        query = select(ExamModel).where(ExamModel.org_id == current_user.org_id)
-
-        # Teachers only see their own exams
-        if current_user.role == UserRole.TEACHER:
-            query = query.where(ExamModel.created_by == current_user.id)
-
-        return session.exec(query).all()
-
     # @staticmethod
     # def get_all(session: Session, current_user: CurrentUser) -> list[ExamModel]:
     #     query = select(ExamModel).where(ExamModel.org_id == current_user.org_id)
 
     #     if current_user.role == UserRole.TEACHER:
     #         assigned_subject_ids = select(SubjectAssignment.subject_id).where(
-    #             SubjectAssignment.teacher_id == current_user.id
-    #         )
-    #         assigned_cohort_ids = select(SubjectAssignment.cohort_id).where(
-    #             TeacherCohortAssignment.teacher_id == current_user.id
+    #             SubjectAssignment.assigned_to == current_user.id,
+    #             SubjectAssignment.org_id == current_user.org_id,
     #         )
 
     #         query = query.where(
     #             or_(
     #                 ExamModel.created_by == current_user.id,
-    #                 and_(
-    #                     ExamModel.subject_id.in_(assigned_subject_ids),
-    #                     or_(
-    #                         ExamModel.cohort_id.is_(None),  # not cohort-scoped
-    #                         ExamModel.cohort_id.in_(assigned_cohort_ids),
-    #                     ),
-    #                 ),
+    #                 ExamModel.subject_id.in_(assigned_subject_ids),
     #             )
     #         )
 
     #     return session.exec(query).all()
 
+    @staticmethod
+    def get_all(session: Session, current_user: CurrentUser) -> list[tuple[ExamModel, str | None]]:
+        query = (
+            select(ExamModel, SubjectModel.name)
+            .join(SubjectModel, SubjectModel.id == ExamModel.subject_id, isouter=True)
+            .where(ExamModel.org_id == current_user.org_id)
+        )
+
+        if current_user.role == UserRole.TEACHER:
+            assigned_subject_ids = select(SubjectAssignment.subject_id).where(
+                SubjectAssignment.assigned_to == current_user.id,
+                SubjectAssignment.org_id == current_user.org_id,
+            )
+
+            query = query.where(
+                or_(
+                    ExamModel.created_by == current_user.id,
+                    ExamModel.subject_id.in_(assigned_subject_ids),
+                )
+            )
+
+        return session.exec(query).all()
+
+   
     @staticmethod
     def get_by_id(session: Session, exam_id: UUID, current_user: CurrentUser) -> ExamModel:
         exam = session.exec(
@@ -131,8 +164,11 @@ class ExamService:
             ).first()
             if not assignment:
                 raise HTTPException(status_code=404, detail="Exam not found.")  # 404, not 403 — don't confirm existence
+        else:
+            ExamService._assert_can_view(session, exam, current_user)
 
         return exam
+
 
     @staticmethod
     def update(
@@ -140,7 +176,7 @@ class ExamService:
         payload: ExamUpdate, current_user: CurrentUser
     ) -> ExamModel:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_edit(exam, current_user)
+        ExamService._assert_can_edit(session, exam, current_user)
 
         for key, value in payload.model_dump(exclude_unset=True).items():
             setattr(exam, key, value)
@@ -152,13 +188,6 @@ class ExamService:
         session.refresh(exam)
         return exam
 
-    # @staticmethod
-    # def delete(session: Session, exam_id: UUID, current_user: CurrentUser):
-    #     exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-    #     ExamService._assert_can_edit(exam, current_user)
-
-    #     session.delete(exam)
-    #     session.commit()
 
     @staticmethod
     def delete(session: Session, exam_id: UUID, current_user: CurrentUser) -> ExamDeleteResponse:
@@ -263,7 +292,7 @@ class ExamService:
         payload: ExamSectionCreate, current_user: CurrentUser
     ) -> ExamSection:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_edit(exam, current_user)
+        ExamService._assert_can_edit(session, exam, current_user)
 
         section = ExamSection(
             exam_id=exam_id,
@@ -275,9 +304,11 @@ class ExamService:
         session.refresh(section)
         return section
 
+    
     @staticmethod
     def get_sections(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamSection]:
-        ExamService._get_exam(session, exam_id, current_user.org_id)
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
         return session.exec(
             select(ExamSection).where(ExamSection.exam_id == exam_id).order_by(ExamSection.order)
         ).all()
@@ -292,7 +323,7 @@ class ExamService:
         payload: ExamItemAdd, current_user: CurrentUser
     ) -> list[ExamItem]:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_edit(exam, current_user)
+        ExamService._assert_can_edit(session, exam, current_user)
 
         # Get current max order
         existing = session.exec(
@@ -339,7 +370,7 @@ class ExamService:
         exam_item_id: UUID, current_user: CurrentUser
     ):
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_edit(exam, current_user)
+        ExamService._assert_can_edit(session, exam, current_user)
 
         exam_item = session.exec(
             select(ExamItem).where(
@@ -355,9 +386,12 @@ class ExamService:
         session.add(exam)
         session.commit()
 
+    
+
     @staticmethod
     def get_items(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamItem]:
-        ExamService._get_exam(session, exam_id, current_user.org_id)
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
         return session.exec(
             select(ExamItem).where(ExamItem.exam_id == exam_id).order_by(ExamItem.order)
         ).all()
@@ -407,11 +441,12 @@ class ExamService:
         session.commit()
         return assignments
 
+    
+
     @staticmethod
-    def get_assignments(
-        session: Session, exam_id: UUID, current_user: CurrentUser
-    ) -> list[ExamAssignment]:
-        ExamService._get_exam(session, exam_id, current_user.org_id)
+    def get_assignments(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamAssignment]:
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
         return session.exec(
             select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
         ).all()
@@ -492,38 +527,6 @@ class ExamService:
 
 
 
-    # @staticmethod
-    # def get_sections_with_items_internal(session: Session, exam_id: UUID) -> list[ExamSectionInternalRead]:
-    #     """
-    #     Internal only — no org/role scoping needed here since the caller
-    #     (attempt_service) already verified the student's attempt ownership.
-    #     """
-    #     sections = session.exec(
-    #         select(ExamSection)
-    #         .where(ExamSection.exam_id == exam_id)
-    #         .order_by(ExamSection.order)
-    #     ).all()
-
-    #     result = []
-    #     for section in sections:
-    #         exam_items = session.exec(
-    #             select(ExamItem)
-    #             .where(ExamItem.section_id == section.id)
-    #             .order_by(ExamItem.order)
-    #         ).all()
-    #         result.append(ExamSectionInternalRead(
-    #             id=section.id,
-    #             title=section.title,
-    #             order=section.order,
-    #             items=[
-    #                 ExamItemInternalRead(id=ei.id, item_id=ei.item_id, order=ei.order, marks=ei.marks)
-    #                 for ei in exam_items
-    #             ],
-    #         ))
-    #     return result
-
-    # exam_service.py
-
     @staticmethod
     def get_sections_with_items_internal(session: Session, exam_id: UUID) -> list[ExamSectionInternalRead]:
         sections = session.exec(
@@ -570,33 +573,6 @@ class ExamService:
         return result
 
 
-
-    # @staticmethod
-    # def get_my_assignments(session: Session, current_user: CurrentUser) -> list[MyAssignmentRead]:
-    #     assignments = session.exec(
-    #         select(ExamAssignment, ExamModel)
-    #         .join(ExamModel, ExamAssignment.exam_id == ExamModel.id)
-    #         .where(
-    #             ExamAssignment.student_id == current_user.id,
-    #             ExamAssignment.org_id == current_user.org_id,
-    #         )
-    #         .order_by(ExamModel.start_time.desc().nulls_last())
-    #     ).all()
-
-    #     return [
-    #         MyAssignmentRead(
-    #             assignment_id=assignment.id,
-    #             exam_id=exam.id,
-    #             exam_title=exam.title,
-    #             status=assignment.status,
-    #             scheduled_at=assignment.scheduled_at,
-    #             duration_minutes=exam.duration_minutes,
-    #             start_time=exam.start_time,
-    #             end_time=exam.end_time,
-    #             has_attempted=assignment.status == AssignmentStatus.ASSIGNED,  # adjust to your actual status values
-    #         )
-    #         for assignment, exam in assignments
-    #     ]
 
     @staticmethod
     def get_my_assignments(

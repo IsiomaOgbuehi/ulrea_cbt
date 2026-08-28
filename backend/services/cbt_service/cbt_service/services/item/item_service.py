@@ -87,8 +87,8 @@ class ItemService:
         )
 
         # Teachers only see their own items; admins and above see everything
-        if current_user.role == UserRole.TEACHER:
-            query = query.where(ItemModel.created_by == current_user.id)
+        # if current_user.role == UserRole.TEACHER:
+        #     query = query.where(ItemModel.created_by == current_user.id)
 
         if status:
             query = query.where(ItemModel.status == status)
@@ -150,9 +150,17 @@ class ItemService:
         # Re-validate correct_answers against options whenever either changes —
         # use the incoming value if provided, otherwise fall back to what's
         # already stored, so partial updates can't desync the two.
+
+        # if "options" in update_data or "correct_answers" in update_data:
+        #     new_options = update_data.get("options", item.options)
+        #     new_correct = normalize_correct_answers(new_options, new_correct)
+        #     assert_correct_answers_valid(new_options, new_correct)
+        #     update_data["correct_answers"] = new_correct
+
         if "options" in update_data or "correct_answers" in update_data:
             new_options = update_data.get("options", item.options)
-            new_correct = normalize_correct_answers(new_options, new_correct)
+            incoming_correct = update_data.get("correct_answers", item.correct_answers)
+            new_correct = normalize_correct_answers(new_options, incoming_correct)
             assert_correct_answers_valid(new_options, new_correct)
             update_data["correct_answers"] = new_correct
 
