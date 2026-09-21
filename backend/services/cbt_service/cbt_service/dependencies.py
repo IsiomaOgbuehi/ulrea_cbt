@@ -66,3 +66,4 @@ async def verify_internal_secret(x_internal_secret: str = Header(...)):
 # Convenience dependencies
 AdminOrAbove = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN))
 TeacherOrAbove = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER))
+StudentOnly = Depends(require_roles(UserRole.STUDENT))

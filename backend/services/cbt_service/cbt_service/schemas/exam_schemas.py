@@ -20,6 +20,7 @@ class ExamCreate(BaseModel):
     show_result_immediately: bool = True
     allow_review: bool = True
     max_attempts: int = 1
+    max_violations: int | None = None
 
     @model_validator(mode="after")
     def validate_times(self):
@@ -42,6 +43,7 @@ class ExamUpdate(BaseModel):
     show_result_immediately: bool | None = None
     allow_review: bool | None = None
     max_attempts: int | None = None
+    max_violations: int | None = None
 
 
 class ExamRead(BaseModel):

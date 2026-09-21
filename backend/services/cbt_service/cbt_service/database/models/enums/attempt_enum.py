@@ -5,3 +5,4 @@ class AttemptStatus(str, Enum):
     SUBMITTED = 'submitted'
     SCORED = 'scored'
     RESET = 'reset'
+    TERMINATED = 'terminated'

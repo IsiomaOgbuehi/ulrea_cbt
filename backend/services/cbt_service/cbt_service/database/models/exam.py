@@ -46,6 +46,7 @@ class ExamModel(SQLModel, table=True):
     show_result_immediately: bool = Field(default=True)
     allow_review: bool = Field(default=True)                    # can student review answers
     max_attempts: int = Field(default=1)
+    max_violations: int | None = None  # None = no limit enforced
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)

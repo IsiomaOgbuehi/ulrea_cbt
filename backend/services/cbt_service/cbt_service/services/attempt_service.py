@@ -513,18 +513,18 @@ class AttemptService:
         exam: ExamModel,
         pass_mark: float | None = None,
         auto: bool = False,
+        final_status: AttemptStatus = AttemptStatus.SUBMITTED,   # NEW
     ) -> AttemptModel:
         """
-        Scores and closes out an attempt. Shared by student-triggered submit
-        and lazy time-expiry auto-submit, so both paths score identically.
+        Scores and closes out an attempt. Shared by student-triggered submit,
+        lazy time-expiry auto-submit, and violation-triggered termination —
+        all three score identically; only the resulting status differs.
         """
         responses = session.exec(
             select(ResponseModel).where(ResponseModel.attempt_id == attempt.id)
         ).all()
 
         item_ids = [r.item_id for r in responses]
-        # item_bank_client = ItemBankClient()
-        # item_bank = await item_bank_client.get_items_for_scoring(item_ids)  # dict[UUID, dict]
         item_bank = AttemptService._get_items_for_scoring(session, item_ids)
 
         raw_score = 0.0
@@ -559,17 +559,21 @@ class AttemptService:
                     resp.marks_awarded = 0.0
             else:
                 resp.is_correct = None
-                resp.marks_awarded = None  # short_answer/essay — awaits manual review
+                resp.marks_awarded = None
 
             session.add(resp)
 
-        attempt.status = AttemptStatus.SUBMITTED
+        attempt.status = final_status
         attempt.submitted_at = datetime.now(timezone.utc)
         attempt.raw_score = raw_score
         attempt.final_score = max(0.0, final_score)
         attempt.percentage = round((attempt.final_score / total_possible * 100), 2) if total_possible else 0.0
         attempt.scored_at = datetime.now(timezone.utc)
-        attempt.scored_by = "auto_expired" if auto else "auto"
+        attempt.scored_by = (
+            "violation_termination" if final_status == AttemptStatus.TERMINATED
+            else "auto_expired" if auto
+            else "auto"
+        )
 
         effective_pass_mark = pass_mark if pass_mark is not None else exam.pass_mark
         if effective_pass_mark is not None:

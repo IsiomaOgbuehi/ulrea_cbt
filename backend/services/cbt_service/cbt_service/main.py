@@ -7,7 +7,7 @@ import time
 from cbt_service.core.redis.redis_client import redis_client
 
 from cbt_service.database.database import database_engine as engine
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations
 
 def run_migrations():
     alembic_cfg = Config("alembic.ini")
@@ -72,3 +72,7 @@ app.include_router(attempts.router, prefix="/api/v1")
 
 # Internal
 app.include_router(internal.router)
+
+# Violations
+app.include_router(violations.router, prefix="/api/v1")
+app.include_router(exam_violations.router, prefix="/api/v1")
