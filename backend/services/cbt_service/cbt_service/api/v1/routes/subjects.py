@@ -136,3 +136,18 @@ async def get_subject_assignments(
         )
         for a in assignments
     ]
+
+
+
+''' GET SUBJECTS ASSIGNED TO A STAFF MEMBER 🧑‍🏫 '''
+@router.get("/staff/{user_id}", response_model=list[SubjectRead])
+async def get_subjects_by_staff(
+    user_id: UUID,
+    session: SessionDep,
+    include_archived: bool = False,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+) -> list[SubjectRead]:
+    subjects = SubjectService.get_by_assigned_user(
+        session, user_id, current_user, include_archived
+    )
+    return [SubjectRead.model_validate(s, from_attributes=True) for s in subjects]

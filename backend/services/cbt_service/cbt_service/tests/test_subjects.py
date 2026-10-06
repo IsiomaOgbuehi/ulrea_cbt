@@ -1,4 +1,9 @@
 import pytest
+from uuid import uuid4
+
+import jwt
+from fastapi.testclient import TestClient
+
 from .conftest import (
     create_subject, assign_teacher,
     SUPER_ADMIN_ID, ADMIN_ID, TEACHER_ID, ORG_ID, TEST_SECRET
@@ -165,3 +170,152 @@ def test_cannot_access_other_org_subject(client, admin_headers):
 
     response = client.get(f"/api/v1/subjects/{subject['id']}", headers=other_headers)
     assert response.status_code == 404  # not 403 — don't reveal existence
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# GET /subjects/staff/{user_id}
+# ---------------------------------------------------------------------------
+
+def test_admin_can_list_subjects_assigned_to_teacher(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    math = create_subject(client, admin_headers, "Math")
+    create_subject(client, admin_headers, "Physics")  # not assigned
+    assign_teacher(client, admin_headers, math["id"], TEACHER_ID)
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=admin_headers
+    )
+    assert response.status_code == 200, response.json()
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "Math"
+
+
+def test_teacher_can_list_own_assigned_subjects(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    teacher_headers: dict[str, str],
+) -> None:
+    math = create_subject(client, admin_headers, "Math")
+    biology = create_subject(client, admin_headers, "Biology")
+    create_subject(client, admin_headers, "Chemistry")  # not assigned
+    assign_teacher(client, admin_headers, math["id"], TEACHER_ID)
+    assign_teacher(client, admin_headers, biology["id"], TEACHER_ID)
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=teacher_headers
+    )
+    assert response.status_code == 200, response.json()
+    names = [s["name"] for s in response.json()]
+    assert names == ["Biology", "Math"]  # ordered by name, unassigned excluded
+
+
+def test_teacher_cannot_list_another_users_subjects(
+    client: TestClient, teacher_headers: dict[str, str]
+) -> None:
+    response = client.get(
+        f"/api/v1/subjects/staff/{ADMIN_ID}", headers=teacher_headers
+    )
+    assert response.status_code == 403
+
+
+def test_staff_subjects_empty_when_no_assignments(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    create_subject(client, admin_headers, "Math")
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=admin_headers
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_staff_subjects_excludes_archived_by_default(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    active = create_subject(client, admin_headers, "Active Subject")
+    archived = create_subject(client, admin_headers, "Archived Subject")
+    assign_teacher(client, admin_headers, active["id"], TEACHER_ID)
+    assign_teacher(client, admin_headers, archived["id"], TEACHER_ID)
+
+    archive_response = client.delete(
+        f"/api/v1/subjects/{archived['id']}", headers=admin_headers
+    )
+    assert archive_response.status_code == 200
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=admin_headers
+    )
+    assert response.status_code == 200
+    names = [s["name"] for s in response.json()]
+    assert names == ["Active Subject"]
+
+
+def test_staff_subjects_includes_archived_when_requested(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    active = create_subject(client, admin_headers, "Active Subject")
+    archived = create_subject(client, admin_headers, "Archived Subject")
+    assign_teacher(client, admin_headers, active["id"], TEACHER_ID)
+    assign_teacher(client, admin_headers, archived["id"], TEACHER_ID)
+    client.delete(f"/api/v1/subjects/{archived['id']}", headers=admin_headers)
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}",
+        params={"include_archived": True},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert {s["name"] for s in data} == {"Active Subject", "Archived Subject"}
+    statuses = {s["name"]: s["status"] for s in data}
+    assert statuses["Archived Subject"] == "archived"
+
+
+def test_staff_subjects_reflects_unassignment(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    subject = create_subject(client, admin_headers, "Math")
+    assign_teacher(client, admin_headers, subject["id"], TEACHER_ID)
+
+    client.delete(
+        f"/api/v1/subjects/{subject['id']}/assign/{TEACHER_ID}",
+        headers=admin_headers,
+    )
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=admin_headers
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_staff_subjects_do_not_leak_across_orgs(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    subject = create_subject(client, admin_headers, "Org A Subject")
+    assign_teacher(client, admin_headers, subject["id"], TEACHER_ID)
+
+    # Admin from a different org queries the same teacher ID
+    other_org_payload: dict[str, object] = {
+        "sub": str(uuid4()),
+        "org_id": str(uuid4()),  # different org
+        "role": "admin",
+        "verified": True,
+        "type": "access",
+        "jti": str(uuid4()),
+        "exp": 9999999999,
+    }
+    other_token: str = jwt.encode(other_org_payload, TEST_SECRET, algorithm="HS256")
+    other_headers: dict[str, str] = {"Authorization": f"Bearer {other_token}"}
+
+    response = client.get(
+        f"/api/v1/subjects/staff/{TEACHER_ID}", headers=other_headers
+    )
+    assert response.status_code == 200
+    assert response.json() == []  # empty, not Org A's data

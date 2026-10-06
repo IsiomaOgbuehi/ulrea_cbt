@@ -204,4 +204,39 @@ class SubjectService:
             )
         ).all()
 
+
+    @staticmethod
+    def get_by_assigned_user(
+        session: Session,
+        user_id: UUID,
+        current_user: CurrentUser,
+        include_archived: bool = False,
+    ) -> list[SubjectModel]:
+        """
+        Return all subjects assigned to `user_id` within the caller's org.
+        Admins/Super Admins can query any user; everyone else can only query themselves.
+        """
+        is_admin: bool = current_user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN)
+        if not is_admin and user_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view your own subject assignments.",
+            )
+
+        query = (
+            select(SubjectModel)
+            .join(SubjectAssignment, SubjectAssignment.subject_id == SubjectModel.id)
+            .where(
+                SubjectAssignment.assigned_to == user_id,
+                SubjectAssignment.org_id == current_user.org_id,  # tenant guard
+                SubjectModel.org_id == current_user.org_id,       # tenant guard
+            )
+            .order_by(SubjectModel.name)
+        )
+
+        if not include_archived:
+            query = query.where(SubjectModel.status == SubjectStatus.ACTIVE)
+
+        return list(session.exec(query).all())
+
     
