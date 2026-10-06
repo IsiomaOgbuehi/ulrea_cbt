@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from fastapi.responses import Response
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import require_roles
@@ -7,7 +7,7 @@ from cbt_service.schemas.item_subject_schemas import (
     ItemCreate, ItemStatusUpdate, ItemUpdate, ItemRead, BulkUploadResult, CurrentUser, PaginatedResponse
 )
 from cbt_service.services.item.item_service import ItemService
-from cbt_service.services.item.bulk_upload_service import BulkUploadService
+from cbt_service.services.item.bulk_upload_service import BulkUploadService, read_upload_within_limit
 from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemStatus, ItemType
 from cbt_service.database.models.enums.enums import UserRole
 
@@ -130,20 +130,47 @@ async def bulk_upload_items(
     file: UploadFile = File(...),
 ):
     """
-    Upload questions in bulk via Excel file.
-    Use GET /bulk/template to download the expected format.
-    Partial success is supported — valid rows are saved even if some rows fail.
+    Upload questions in bulk via Excel file. Accepts the native template
+    or a supported third-party export (currently Edu Expression).
+    Use GET /bulk/template to download the native format.
+    Partial success is supported: valid rows are saved even if some rows fail.
+    Max file size: 5MB.
     """
-    if not file.filename.endswith((".xlsx", ".xls")):
-        from fastapi import HTTPException
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
 
-    file_bytes = await file.read()
-    result = BulkUploadService.process_upload(
+    file_bytes = await read_upload_within_limit(file)
+    return BulkUploadService.process_upload(
         session=session,
         file_bytes=file_bytes,
         filename=file.filename,
         subject_id=subject_id,
         current_user=current_user,
     )
-    return result
+
+# ''' BULK UPLOAD ⬆️ '''
+# @router.post("/bulk", response_model=BulkUploadResult, tags=["bulk-upload"])
+# async def bulk_upload_items(
+#     subject_id: UUID,
+#     session: SessionDep,
+#     current_user: CurrentUser = Depends(TeacherOrAbove),
+#     file: UploadFile = File(...),
+# ):
+#     """
+#     Upload questions in bulk via Excel file.
+#     Use GET /bulk/template to download the expected format.
+#     Partial success is supported — valid rows are saved even if some rows fail.
+#     """
+#     if not file.filename.endswith((".xlsx", ".xls")):
+#         from fastapi import HTTPException
+#         raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
+
+#     file_bytes = await file.read()
+#     result = BulkUploadService.process_upload(
+#         session=session,
+#         file_bytes=file_bytes,
+#         filename=file.filename,
+#         subject_id=subject_id,
+#         current_user=current_user,
+#     )
+#     return result

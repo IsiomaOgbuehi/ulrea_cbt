@@ -183,12 +183,17 @@ async def create_student(
     # if not payload.cohort_id:
     #     raise HTTPException(status_code=422, detail="Cohort Id is required to create student")    HANDLE FOR ADMIN/SUPER ADMIN CREATTION
     
-    user, access_code = UserManagementService.create_student(
-        session=session,
-        ctx=ctx,
-        payload=payload,
-        org_id=ctx.membership.org_id,
-    )
+    try:
+
+        user, access_code = UserManagementService.create_student(
+            session=session,
+            ctx=ctx,
+            payload=payload,
+            org_id=ctx.membership.org_id,
+        )
+    except HTTPException as e:
+        logging.warning("Error creating student: %s", e.detail)
+        raise HTTPException(status_code=400, detail=e.detail)
 
     # Auto-assign to cohort if provided
     if payload.cohort_id:
@@ -198,9 +203,12 @@ async def create_student(
                 cohort_id=payload.cohort_id,
                 payload=AddMembersRequest(student_ids=[user.id]),
                 actor=ctx.user,
+                org_id=ctx.membership.org_id
             )
         except HTTPException as e:
             logging.warning("Could not assign student to cohort: %s", e.detail)
+            raise HTTPException(status_code=400, detail=e.detail)
+            
 
     if user.email:
         await EmailService.send_student_access_code_email(
