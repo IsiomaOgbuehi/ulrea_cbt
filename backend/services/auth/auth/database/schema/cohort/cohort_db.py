@@ -42,7 +42,9 @@ class CohortMember(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     cohort_id: UUID = Field(foreign_key="cohorts.id", index=True, nullable=False)
-    student_id: UUID = Field(foreign_key="users.id", index=True, nullable=False)
+    student_id: UUID = Field(
+        foreign_key="users.id", ondelete="CASCADE", index=True, nullable=False
+    )
     org_id: UUID = Field(index=True, nullable=False)
     added_by: UUID = Field(nullable=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -57,8 +59,12 @@ class TeacherCohortAssignment(SQLModel, table=True):
     __tablename__ = "teacher_cohort_assignments"
  
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    teacher_id: UUID = Field(foreign_key="users.id", index=True, nullable=False)
+    teacher_id: UUID = Field(
+        foreign_key="users.id", ondelete="CASCADE", index=True, nullable=False
+    )
     cohort_id: UUID = Field(foreign_key="cohorts.id", index=True, nullable=False)
     org_id: UUID = Field(index=True, nullable=False)
-    assigned_by: UUID = Field(foreign_key="users.id", nullable=False)
+    assigned_by: UUID | None = Field(
+        default=None, foreign_key="users.id", ondelete="SET NULL", nullable=True
+    )
     assigned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

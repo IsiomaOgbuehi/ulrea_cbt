@@ -2,6 +2,12 @@ import jwt as pyjwt
 
 from io import BytesIO
 from openpyxl import Workbook
+from fastapi.testclient import TestClient
+from httpx import Response
+from openpyxl import Workbook, load_workbook 
+from typing import Any
+from uuid import UUID
+from datetime import datetime
 
 from sqlmodel import select, Session
 from ..conftest import engine
@@ -745,3 +751,262 @@ def test_bulk_create_students_assigns_to_cohort(client):
             assert member.org_id == org_id
             assert member.cohort_id == cohort_id
             assert member.added_by == user_id
+
+
+# ============================================================
+# STUDENT EXPORT
+# ============================================================
+
+EXPORT_URL = "/api/v1/users/students/export"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EXPECTED_EXPORT_HEADERS = [
+    "ID", "First Name", "Last Name", "Registration Number",
+    "Email", "Access Code", "Status", "Created At",
+]
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _create_student(client: TestClient, token: str, **overrides: str) -> dict[str, Any]:
+    """Create a student; overrides let tests vary phone / reg number / names."""
+    payload = {**STUDENT_PAYLOAD, **overrides}
+    response = client.post(
+        "/api/v1/users/students/create", json=payload, headers=_auth(token),
+    )
+    assert response.status_code == 200, response.json()
+    return response.json()
+
+
+def _export(client: TestClient, token: str, **params: str) -> Response:
+    return client.get(EXPORT_URL, params=params, headers=_auth(token))
+
+
+def _read_export(response: Response) -> tuple[list[str], list[dict[str, Any]]]:
+    """Parse the xlsx body into (headers, list of {header: value} records)."""
+    workbook = load_workbook(BytesIO(response.content))
+    worksheet = workbook["Students"]
+    rows = list(worksheet.iter_rows(values_only=True))
+    headers = [str(h) for h in rows[0]]
+    records = [dict(zip(headers, row)) for row in rows[1:]]
+    return headers, records
+
+
+def _create_cohort(name: str = "EXPORT-COHORT") -> UUID:
+    """Create a cohort in the signed-up super admin's org and return its id."""
+    with Session(engine) as session:
+        user = session.exec(
+            select(UserModel).where(UserModel.email == USER_EMAIL)
+        ).first()
+        assert user is not None
+
+        membership = session.exec(
+            select(OrgMembership).where(OrgMembership.user_id == user.id)
+        ).first()
+        assert membership is not None
+
+        cohort = CohortModel(
+            org_id=membership.org_id,
+            name=name,
+            description="Export test cohort",
+            created_by=user.id,
+        )
+        session.add(cohort)
+        session.commit()
+        session.refresh(cohort)
+        return cohort.id
+
+
+def test_admin_can_export_students(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    created = _create_student(client, token)
+
+    response = _export(client, token)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(XLSX_MIME)
+    assert "attachment" in response.headers["content-disposition"]
+    assert ".xlsx" in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+
+    headers, records = _read_export(response)
+    assert headers == EXPECTED_EXPORT_HEADERS
+    assert len(records) == 1
+
+    row = records[0]
+    assert row["ID"] == created["id"]
+    assert row["First Name"] == STUDENT_PAYLOAD["firstname"]
+    assert row["Last Name"] == STUDENT_PAYLOAD["lastname"]
+    assert row["Registration Number"] == STUDENT_PAYLOAD["institution_id"]
+    assert row["Access Code"] == created["access_code"]
+    assert row["Email"] is None  # students are created without an email
+    assert isinstance(row["Status"], str) and row["Status"]
+    assert isinstance(row["Created At"], datetime)
+
+
+def test_export_contains_no_credentials(client: TestClient) -> None:
+    """Regression: exports must never carry passwords or security Q&A."""
+    token = get_super_admin_token(client)
+    access_code = _create_student(client, token)["access_code"]
+    client.post(
+        "/api/v1/users/student/init",
+        json={
+            "access_code": access_code,
+            "favorite_question": "What is your pet's name?",
+            "favorite_answer": "Fluffy",
+        },
+    )
+
+    response = _export(client, token)
+    assert response.status_code == 200, response.text
+
+    headers, records = _read_export(response)
+    lowered = [h.lower() for h in headers]
+    assert not any(
+        word in h for h in lowered for word in ("password", "question", "answer")
+    )
+    # The security answer must not leak into any cell either
+    assert all("fluffy" not in str(v).lower() for r in records for v in r.values())
+
+
+def test_export_does_not_modify_students(client: TestClient) -> None:
+    """Export is read-only: a student can still log in afterwards."""
+    token = get_super_admin_token(client)
+    access_code = _create_student(client, token)["access_code"]
+    setup = client.post(
+        "/api/v1/users/student/init",
+        json={
+            "access_code": access_code,
+            "favorite_question": "What is your pet's name?",
+            "favorite_answer": "Fluffy",
+        },
+    )
+    assert setup.status_code == 200, setup.json()
+
+    # reset_passwords was removed; a stale client sending it must change nothing
+    export = _export(client, token, reset_passwords="true")
+    assert export.status_code == 200, export.text
+
+    login = client.post(
+        "/api/v1/users/student/login",
+        json={"access_code": access_code, "favorite_answer": "Fluffy"},
+    )
+    assert login.status_code == 200, login.json()
+
+
+def test_export_filter_by_name(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    _create_student(client, token)  # Charlie Student
+    _create_student(
+        client, token,
+        firstname="Diana", lastname="Okafor",
+        phone="+1000000004", institution_id="STU/2024/002",
+    )
+
+    response = _export(client, token, name="diana")
+    assert response.status_code == 200, response.text
+
+    _, records = _read_export(response)
+    assert len(records) == 1
+    assert records[0]["First Name"] == "Diana"
+    assert records[0]["Registration Number"] == "STU/2024/002"
+
+
+def test_export_filter_by_cohort(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    cohort_id = _create_cohort()
+
+    bulk = client.post(
+        f"/api/v1/users/students/create/bulk?cohort_id={cohort_id}",
+        files={"file": (
+            "students.xlsx",
+            create_student_excel([
+                {"firstname": "In", "lastname": "CohortOne",
+                 "email": "in1.export@example.com", "institution_id": "EXP/001"},
+                {"firstname": "In", "lastname": "CohortTwo",
+                 "email": "in2.export@example.com", "institution_id": "EXP/002"},
+            ]).getvalue(),
+            XLSX_MIME,
+        )},
+        headers=_auth(token),
+    )
+    assert bulk.status_code == 200, bulk.json()
+    assert bulk.json()["successful_rows"] == 2
+
+    _create_student(client, token)  # not in the cohort
+
+    response = _export(client, token, cohort_id=str(cohort_id))
+    assert response.status_code == 200, response.text
+
+    _, records = _read_export(response)
+    assert {r["Registration Number"] for r in records} == {"EXP/001", "EXP/002"}
+
+    # Unfiltered export includes everyone
+    _, all_records = _read_export(_export(client, token))
+    assert len(all_records) == 3
+
+
+def test_export_with_no_matches_returns_header_only(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    _create_student(client, token)
+
+    response = _export(client, token, status="archived")
+    assert response.status_code == 200, response.text
+
+    headers, records = _read_export(response)
+    assert headers == EXPECTED_EXPORT_HEADERS
+    assert records == []
+
+
+def test_export_neutralises_formula_injection(client: TestClient) -> None:
+    """A name starting with '=' must not become a live Excel formula."""
+    token = get_super_admin_token(client)
+    _create_student(client, token, firstname="=1+1")
+
+    response = _export(client, token)
+    assert response.status_code == 200, response.text
+
+    _, records = _read_export(response)
+    assert records[0]["First Name"] == "'=1+1"
+
+
+# def test_teacher_can_export_students(client: TestClient) -> None:
+#     super_token = get_super_admin_token(client)
+#     _create_student(client, super_token)
+
+#     teacher_create = client.post(
+#         "/api/v1/users/staff/create",
+#         json=TEACHER_PAYLOAD,
+#         headers=_auth(super_token),
+#     )
+#     assert teacher_create.status_code == 200, teacher_create.json()
+#     teacher_token = _activate_staff(client, teacher_create.json()["id"])["access_token"]
+
+#     response = _export(client, teacher_token)
+#     assert response.status_code == 200, response.text
+#     assert response.headers["content-type"].startswith(XLSX_MIME)
+    # If teachers become cohort-scoped, assert the narrowed row count here.
+
+
+def test_student_cannot_export_students(client: TestClient) -> None:
+    super_token = get_super_admin_token(client)
+    access_code = _create_student(client, super_token)["access_code"]
+
+    setup = client.post(
+        "/api/v1/users/student/init",
+        json={
+            "access_code": access_code,
+            "favorite_question": "What is your pet's name?",
+            "favorite_answer": "Fluffy",
+        },
+    )
+    assert setup.status_code == 200, setup.json()
+    student_token = setup.json()["access_token"]
+
+    response = _export(client, student_token)
+    assert response.status_code == 403, response.text
+
+
+def test_export_requires_authentication(client: TestClient) -> None:
+    response = client.get(EXPORT_URL)
+    assert response.status_code == 401

@@ -4,6 +4,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlmodel import select
+from fastapi.responses import StreamingResponse
+from datetime import UTC, datetime
+from io import BytesIO
 
 from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
 from auth.database.schema.user.user_db import UserModel
@@ -947,6 +950,34 @@ async def list_students(
             )
             for user, membership in rows
         ],
+    )
+
+
+''' EXPORT STUDENT DATA 📊 '''
+# Declare this before any "/students/{student_id}" routes
+@router.get("/students/export")
+async def export_students(
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    status: MembershipStatus | None = Query(default=None),
+    cohort_id: UUID | None = Query(default=None),
+    name: str | None = Query(default=None),
+) -> StreamingResponse:
+    buf: BytesIO = UserManagementService.export_students_xlsx(
+        session=session,
+        org_id=ctx.membership.org_id,
+        status=status,
+        name=name,
+        cohort_id=cohort_id,
+    )
+    filename = f"students_{datetime.now(UTC):%Y%m%d_%H%M}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

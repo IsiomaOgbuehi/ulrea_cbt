@@ -2,6 +2,15 @@ import secrets
 import string
 from uuid import UUID
 from sqlmodel import Session, select, func, or_, delete
+from sqlmodel.sql.expression import Select
+from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.styles import Font
+from io import BytesIO
+from datetime import datetime
+from collections.abc import Sequence
+from typing import cast
+from openpyxl.utils import get_column_letter
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -23,6 +32,15 @@ CREATION_PERMISSIONS: dict[UserRole, list[UserRole]] = {
     UserRole.SUPER_ADMIN: [UserRole.ADMIN, UserRole.TEACHER, UserRole.SUPERVISOR, UserRole.STUDENT, UserRole.STAFF],
     UserRole.ADMIN: [UserRole.TEACHER, UserRole.SUPERVISOR, UserRole.STAFF, UserRole.STUDENT],
 }
+
+StudentRow = tuple[UserModel, OrgMembership]
+CellValue = str | int | float | datetime | None
+
+def _safe_cell(value: CellValue) -> CellValue:
+    """Prevent Excel formula injection from user-controlled strings."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 class UserManagementService:
 
@@ -783,6 +801,84 @@ class UserManagementService:
         total = len(session.exec(base).all())
         rows = session.exec(base.offset((page - 1) * per_page).limit(per_page)).all()
         return rows, total
+
+
+
+    @staticmethod
+    def _students_query(
+        org_id: UUID,
+        status: MembershipStatus | None = None,
+        name: str | None = None,
+        cohort_id: UUID | None = None,
+    ) -> Select[StudentRow]:
+        q = (
+            select(UserModel, OrgMembership)
+            .join(OrgMembership, OrgMembership.user_id == UserModel.id)
+            .where(
+                OrgMembership.org_id == org_id,
+                OrgMembership.role == UserRole.STUDENT,
+            )
+        )
+        if status:
+            q = q.where(OrgMembership.status == status)
+        if cohort_id:
+            q = q.join(CohortMember, CohortMember.student_id == UserModel.id).where(
+                CohortMember.cohort_id == cohort_id
+            )
+        if name:
+            pattern = f"%{name.strip().lower()}%"
+            q = q.where(or_(
+                func.lower(UserModel.firstname).like(pattern),
+                func.lower(UserModel.lastname).like(pattern),
+            ))
+        return q
+
+
+
+    @staticmethod
+    def export_students_xlsx(
+        session: Session,
+        org_id: UUID,
+        status: MembershipStatus | None = None,
+        name: str | None = None,
+        cohort_id: UUID | None = None,
+    ) -> BytesIO:
+        rows: Sequence[StudentRow] = session.exec(
+            UserManagementService._students_query(org_id, status, name, cohort_id)
+        ).all()
+
+        wb = Workbook()
+        ws = cast(Worksheet, wb.active)  # openpyxl types .active as optional
+        ws.title = "Students"
+        ws.append([
+            "ID", "First Name", "Last Name", "Registration Number",
+            "Email", "Access Code", "Status", "Created At",
+        ])
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+
+        for user, m in rows:
+            ws.append([_safe_cell(v) for v in (
+                str(user.id),
+                user.firstname,
+                user.lastname,
+                m.institution_id,
+                user.email,
+                user.access_code,
+                m.status.value,
+                m.created_at.replace(tzinfo=None) if m.created_at else None,  # Excel rejects tz-aware
+            )])
+
+        ws.freeze_panes = "A2"
+        for idx, col in enumerate(ws.columns, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = min(
+                max(len(str(c.value or "")) for c in col) + 2, 40
+            )
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
     
 
 
