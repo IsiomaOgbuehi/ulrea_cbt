@@ -2,7 +2,7 @@ import asyncio
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlmodel import select
 from fastapi.responses import StreamingResponse
 from datetime import UTC, datetime
@@ -12,7 +12,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole, Verifica
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -40,6 +40,7 @@ from auth.utility.jwt.token_activation import (
     verify_password_reset_token,
 )
 from auth.clients.cbt_service_client import cbt_service_client
+from auth.utility.redis.redis_client import redis_client
 
 
 router = APIRouter()
@@ -136,7 +137,7 @@ async def create_staff_user(
         )
 
     try:
-        activation_token = create_staff_activation_token(str(user.id))
+        activation_token = create_staff_activation_token(user_id=str(user.id), email=user.email)
         activation_link = (
             f"{settings.FRONTEND_URL}"
             f"/activate-staff-account"
@@ -165,6 +166,63 @@ async def create_staff_user(
         role=payload.role,
         temporary_password=temp_password if IS_DEV else "sent via email",
         is_existing_user=False,
+    )
+
+
+''' EDIT PENDING STAFF EMAIL + RESEND ACTIVATION 📧 '''
+@router.patch(
+    "/staff/{user_id}/email",   # move into AuthRoutes if you keep routes there
+    response_model=ResendActivationResponse,
+)
+async def update_pending_staff_email(
+    user_id: UUID,
+    payload: UpdateStaffEmailRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+) -> ResendActivationResponse:
+    user, changed = UserManagementService.update_pending_staff_email(
+        session=session, ctx=ctx, user_id=user_id, new_email=payload.email
+    )
+
+    # Cooldown on plain resends (same email) to stop email spam; fail open if Redis is down
+    if not changed:
+        try:
+            acquired = await redis_client.set(
+                f"staff_activation_resend:{user.id}", "1", ex=60, nx=True
+            )
+        except Exception:
+            acquired = True
+        if not acquired:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Activation link was sent recently. Try again in a minute.",
+            )
+
+    email_sent: bool = False
+    try:
+        activation_token = create_staff_activation_token(user_id=str(user.id), email=payload.email)
+        activation_link = (
+            f"{settings.FRONTEND_URL}/activate-staff-account?token={activation_token}"
+        )
+        await asyncio.wait_for(
+            EmailService.send_staff_activation_email(
+                email=user.email,
+                firstname=user.firstname,
+                activation_link=activation_link,
+            ),
+            timeout=10.0,
+        )
+        email_sent = True
+        if IS_DEV:
+            print(f"ACTIVATION TOKEN LINK: {activation_link}")
+    except Exception:
+        logging.exception("Activation email failed for %s", user.email)
+
+    return ResendActivationResponse(
+        user_id=user.id,
+        email=user.email,
+        email_changed=changed,
+        email_sent=email_sent,
     )
 
 
@@ -348,24 +406,36 @@ async def staff_first_login_setup(
 async def activate_staff_account(
     payload: StaffActivationPayload,
     session: SessionDep,
-):
+) -> StaffActivateResponse:
+    if payload.password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+    invalid_link = HTTPException(
+        status_code=400, detail="Invalid or expired activation link."
+    )
+
     try:
-        if payload.password != payload.confirm_password:
-            raise HTTPException(status_code=400, detail="Passwords do not match.")
+        user_id_str, token_email = verify_staff_activation_token(payload.token)
+    except ValueError:
+        raise invalid_link
 
-        user_id = verify_staff_activation_token(payload.token)
+    try:
+        user: UserModel | None = session.get(UserModel, UUID(user_id_str))
+    except ValueError:  # malformed UUID in the token
+        raise invalid_link
 
-        if not user_id:
-            raise HTTPException(status_code=400, detail="Invalid or expired token.")
+    if user is None:
+        raise invalid_link
 
-        user = session.get(UserModel, UUID(user_id))
+    # Reject links issued for a previous email address.
+    # Tokens issued before this change have no email claim and are still accepted.
+    if token_email is not None and token_email != user.email.strip().lower():
+        raise invalid_link
 
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found.")
+    if not user.is_first_login:
+        raise HTTPException(status_code=400, detail="Account already activated.")
 
-        if not user.is_first_login:
-            raise HTTPException(status_code=400, detail="Account already activated.")
-
+    try:
         user.password = PasswordHasher.create(payload.password)
         user.is_first_login = False
         user.verified = True
@@ -375,7 +445,9 @@ async def activate_staff_account(
         session.flush()
 
         # Activate the pending membership created when admin created this user
-        membership = MembershipService.get_pending_membership(session=session, user_id=user.id)
+        membership: OrgMembership | None = MembershipService.get_pending_membership(
+            session=session, user_id=user.id
+        )
 
         if membership:
             membership.status = MembershipStatus.ACTIVE
@@ -389,14 +461,14 @@ async def activate_staff_account(
         session.refresh(user)
 
         # Get org from now-active membership
-        active_membership = session.exec(
+        active_membership: OrgMembership | None = session.exec(
             select(OrgMembership).where(
                 OrgMembership.user_id == user.id,
                 OrgMembership.status == MembershipStatus.ACTIVE,
             )
         ).first()
 
-        org_id = active_membership.org_id if active_membership else user.id  # fallback
+        org_id: UUID = active_membership.org_id if active_membership else user.id  # fallback
         role = active_membership.role if active_membership else None
 
         access_token = create_access_token(user.id, org_id, role)
@@ -405,14 +477,14 @@ async def activate_staff_account(
         return StaffActivateResponse(
             detail="Account activated successfully.",
             access_token=access_token.access_token,
-            refresh_token=refresh_token
+            refresh_token=refresh_token,
         )
-    except Exception as e:
-        logging.warning("Error: %s", str(e))
+    except Exception:
+        logging.exception("Staff activation failed for user %s", user_id_str)
         session.rollback()
         raise HTTPException(
-            status_code=409, 
-            detail={"message": "Error", "error": str(e)}
+            status_code=500,
+            detail="Could not activate the account. Please try again.",
         )
         
 
@@ -576,7 +648,7 @@ async def student_login(
 
 
 ''' RESEND STAFF ACTIVATION 🔁 '''
-@router.post(AuthRoutes.STAFF_ACTIVATE_RESEND.value)
+@router.post(AuthRoutes.STAFF_ACTIVATE_RESEND.value, deprecated=True)
 async def resend_staff_activation(
     payload: ResendActivationRequest,
     session: SessionDep,
@@ -612,7 +684,7 @@ async def resend_staff_activation(
         return {"detail": "If that email exists, a new activation link has been sent."}
 
     # Issue a fresh 24hr token
-    activation_token = create_staff_activation_token(str(user.id))
+    activation_token = create_staff_activation_token(user_id=str(user.id), email=payload.email)
     activation_link = (
         f"{settings.FRONTEND_URL}"
         f"/activate-staff-account"
@@ -671,7 +743,7 @@ async def admin_resend_staff_activation(
     if not user.is_first_login:
         raise HTTPException(status_code=400, detail="Account is already activated.")
 
-    activation_token = create_staff_activation_token(str(user.id))
+    activation_token = create_staff_activation_token(user_id=str(user.id), email=user.email)
     activation_link = (
         f"{settings.FRONTEND_URL}"
         f"/activate-staff-account"
@@ -726,7 +798,7 @@ async def forgot_password(
         ).first()
 
         if pending_membership:
-            activation_token = create_staff_activation_token(str(user.id))
+            activation_token = create_staff_activation_token(user_id=str(user.id), email=user.email)
             activation_link = (
                 f"{settings.FRONTEND_URL}"
                 f"/activate-staff-account"

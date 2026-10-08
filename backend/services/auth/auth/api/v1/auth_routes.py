@@ -12,6 +12,7 @@ class AuthRoutes(Enum):
     REFRESH_TOKEN = '/token/refresh'
 
     # lives in users.py router
+    STAFF = '/staff'
     CREATE_STAFF = '/staff/create'
     CREATE_STUDENT = '/students/create'
     CREATE_STUDENTS_BULK = '/students/create/bulk'

@@ -42,10 +42,17 @@ class GraduateCohortRequest(BaseModel):
 class AddMembersRequest(BaseModel):
     student_ids: list[UUID]
 
+
+class SkippedMember(BaseModel):
+    student_id: UUID
+    reason: str  # "not_in_org" | "not_a_student" | "inactive:<status>"
+
+
 class AddMembersResponse(BaseModel):
     added: int
     already_members: int = 0
     not_found: int = 0
+    skipped: list[SkippedMember]
     cohort_id: UUID
 
 class RemoveMemberRequest(BaseModel):

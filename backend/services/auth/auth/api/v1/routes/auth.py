@@ -191,6 +191,7 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
         requires_setup=user.is_first_login,
     )
 
+
 ''' REFRESH TOKEN 🔄 '''
 @router.post(AuthRoutes.REFRESH_TOKEN.value, response_model=RefreshResponse)
 async def refresh_token(payload: RefreshRequest, session: SessionDep):
@@ -262,6 +263,7 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
 
 def _slugify(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
 
 ''' SIGN UP 🧑‍💻 '''
 @router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
@@ -540,117 +542,6 @@ async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
     except Exception:
         logging.exception("OTP verification error")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-
-
-# ''' VERIFY OTP ✅ '''
-# @router.post(AuthRoutes.VERIFY_OTP.value, response_model=OTPVerifyResponse)
-# async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
-
-#     try:
-#         is_valid = await OtpService.verify_otp(
-#             purpose=payload.purpose,
-#             identifier=payload.identifier,
-#             otp=payload.otp,
-#         )
-
-#         if not is_valid:
-#             raise HTTPException(status_code=400, detail="Invalid OTP.")
-
-#         user = session.exec(
-#             select(UserModel).where(UserModel.email == payload.identifier)
-#         ).first()
-
-#         if not user:
-#             raise HTTPException(status_code=404, detail="User not found.")
-
-#         if not user.verified:
-#             user.verified = True
-#             session.add(user)
-#             session.flush()
-
-#             if payload.purpose == OtpPurpose.SIGNUP:
-#                 # Find org via owner_user_id — always available, no expiry
-#                 org = MembershipService.get_pending_org_for_user(session, user.id)
-
-#                 if not org:
-#                     raise HTTPException(
-#                         status_code=400,
-#                         detail="No organization found. Please sign up again."
-#                     )
-
-#                 # Register membership
-#                 MembershipService.auto_add_on_verification(
-#                     session=session,
-#                     user=user,
-#                     org_id=org.id,
-#                     role=UserRole.SUPER_ADMIN,
-#                     created_by=user.id,
-#                     verification_method=VerificationMethod.EMAIL_OTP,
-#                 )
-
-#                 # Auto-start platform trial
-#                 try:
-#                     default_plan = session.exec(
-#                         select(PlatformPlan).where(
-#                             PlatformPlan.trial_days > 0,
-#                             PlatformPlan.status == PlatformPlanStatus.ACTIVE,
-#                         ).order_by(PlatformPlan.price)
-#                     ).first()
-
-#                     if default_plan:
-#                         PlatformSubscriptionService.start_trial(
-#                             session=session,
-#                             org_id=org.id,
-#                             plan_id=default_plan.id,
-#                         )
-#                 except Exception:
-#                     logging.warning(
-#                         "Could not auto-start trial for org %s", org.id
-#                     )
-
-#                 session.commit()
-#                 session.refresh(user)
-
-#         # Determine org_id for token — get from active membership
-#         membership = session.exec(
-#             select(OrgMembership).where(
-#                 OrgMembership.user_id == user.id,
-#                 OrgMembership.status == MembershipStatus.ACTIVE,
-#             )
-#         ).first()
-
-#         if not membership:
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail="No active organization membership found."
-#             )
-
-#         access_token = create_access_token(
-#             user.id,
-#             membership.org_id,
-#             membership.role,
-#         )
-#         refresh_token = create_refresh_token(user.id)
-
-#         return OTPVerifyResponse(
-#             message="OTP verified successfully.",
-#             verified=True,
-#             token=TokenData(
-#                 access_token=access_token.access_token,
-#                 refresh_token=refresh_token,
-#             )
-#         )
-
-#     except ValueError as e:
-#         raise HTTPException(status_code=429, detail=str(e))
-#     except HTTPException:
-#         raise
-#     except Exception:
-#         logging.exception("OTP verification error")
-#         raise HTTPException(status_code=500, detail="Internal server error")
-
 
 
 '''

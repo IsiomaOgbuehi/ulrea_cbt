@@ -72,6 +72,17 @@ class CreateStaffUser(BaseModel):
     role: UserRole
     institution_id: str | None = None
 
+
+class UpdateStaffEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class ResendActivationResponse(BaseModel):
+    user_id: UUID
+    email: EmailStr
+    email_changed: bool
+    email_sent: bool
+
 class CreateStudent(BaseModel):
     """Used by ADMIN/SUPER_ADMIN to create students."""
     firstname: str

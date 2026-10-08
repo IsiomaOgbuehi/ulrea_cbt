@@ -23,6 +23,11 @@ class ItemDifficulty(str, Enum):
     EASY = "easy"
     MEDIUM = "medium"
     HARD = "hard"
+    TEST = "test"
+    CAT1 = "cat1"
+    CAT2 = "cat2"
+    CAT3 = "cat3"
+    EXAM = "exam"
 
 
 class ItemSource(str, Enum):

@@ -1,6 +1,6 @@
 from uuid import UUID
 import copy
-from tests.conftest import do_full_signup, SIGNUP_PAYLOAD
+from tests.conftest import do_full_signup, SIGNUP_PAYLOAD, make_staff_activation_token
 
 # ============================================================
 # PAYLOADS
@@ -55,9 +55,15 @@ def get_super_admin_token(client) -> str:
     return do_full_signup(client)["token"]["access_token"]
 
 
-def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
-    from auth.utility.jwt.token_activation import create_staff_activation_token
-    activation_token = create_staff_activation_token(user_id)
+
+def _activate_staff(
+    client,
+    user_id: str,
+    email: str,
+    password: str = "newSecurePass123!",
+) -> dict:
+    activation_token = make_staff_activation_token(user_id, email)
+
     resp = client.post(
         "/api/v1/users/staff/activate",
         json={
@@ -66,21 +72,72 @@ def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -
             "confirm_password": password,
         },
     )
+
     assert resp.status_code == 200, resp.json()
     return resp.json()
 
+# def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
+#     activation_token = make_staff_activation_token(user_id)
+#     resp = client.post(
+#         "/api/v1/users/staff/activate",
+#         json={
+#             "token": activation_token,
+#             "password": password,
+#             "confirm_password": password,
+#         },
+#     )
+#     assert resp.status_code == 200, resp.json()
+#     return resp.json()
 
-def _create_and_activate_teacher(client, super_token: str, payload: dict = TEACHER_PAYLOAD) -> tuple[str, str]:
-    """Returns (teacher_id, teacher_token)."""
+# def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
+#     from auth.utility.jwt.token_activation import create_staff_activation_token
+#     activation_token = create_staff_activation_token(user_id)
+#     resp = client.post(
+#         "/api/v1/users/staff/activate",
+#         json={
+#             "token": activation_token,
+#             "password": password,
+#             "confirm_password": password,
+#         },
+#     )
+#     assert resp.status_code == 200, resp.json()
+#     return resp.json()
+
+def _create_and_activate_teacher(
+    client,
+    super_token: str,
+    payload: dict = TEACHER_PAYLOAD,
+) -> tuple[str, str]:
     resp = client.post(
         "/api/v1/users/staff/create",
         json=payload,
         headers={"Authorization": f"Bearer {super_token}"},
     )
+
     assert resp.status_code == 200, resp.json()
+
     teacher_id = resp.json()["id"]
-    teacher_token = _activate_staff(client, teacher_id)["access_token"]
+
+    teacher_token = _activate_staff(
+        client,
+        teacher_id,
+        payload["email"],
+    )["access_token"]
+
     return teacher_id, teacher_token
+
+
+# def _create_and_activate_teacher(client, super_token: str, payload: dict = TEACHER_PAYLOAD) -> tuple[str, str]:
+#     """Returns (teacher_id, teacher_token)."""
+#     resp = client.post(
+#         "/api/v1/users/staff/create",
+#         json=payload,
+#         headers={"Authorization": f"Bearer {super_token}"},
+#     )
+#     assert resp.status_code == 200, resp.json()
+#     teacher_id = resp.json()["id"]
+#     teacher_token = _activate_staff(client, teacher_id)["access_token"]
+#     return teacher_id, teacher_token
 
 
 def _create_cohort(client, token: str, payload: dict = COHORT_PAYLOAD) -> dict:

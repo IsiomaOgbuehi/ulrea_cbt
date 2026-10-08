@@ -61,3 +61,4 @@ class ExamAction(str, Enum):
     SETTINGS_UPDATED = "settings_updated"            # exam settings changed
     EXAM_STATUS_OVERRIDE = 'exam_status_override'
     EXAM_ARCHIVED = 'exam_archived'
+    ATTEMPT_RESET = "attempt_reset"

@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from typing import Any
 from uuid import UUID
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
 from sqlmodel import select, Session
 from ..conftest import engine
@@ -18,7 +19,7 @@ from auth.database.schema.membership.membership_db import OrgMembership
 
 from tests.conftest import (
     do_signup, do_request_otp, do_verify_otp,
-    do_full_signup, SIGNUP_PAYLOAD, USER_EMAIL
+    do_full_signup, SIGNUP_PAYLOAD, USER_EMAIL, make_staff_activation_token
 )
 
 
@@ -83,10 +84,14 @@ def get_super_admin_token(client) -> str:
     return verify_data['token']['access_token']
 
 
-def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
-    """Helper: generate activation token and complete staff activation flow."""
-    from auth.utility.jwt.token_activation import create_staff_activation_token
-    activation_token = create_staff_activation_token(user_id)
+def _activate_staff(
+    client,
+    user_id: str,
+    email: str,
+    password: str = "newSecurePass123!",
+) -> dict:
+    activation_token = make_staff_activation_token(user_id, email)
+
     resp = client.post(
         "/api/v1/users/staff/activate",
         json={
@@ -94,6 +99,49 @@ def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -
             "password": password,
             "confirm_password": password,
         },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+# def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
+#     """Helper: generate activation token and complete staff activation flow."""
+#     activation_token = make_staff_activation_token(user_id)
+#     resp = client.post(
+#         "/api/v1/users/staff/activate",
+#         json={
+#             "token": activation_token,
+#             "password": password,
+#             "confirm_password": password,
+#         },
+#     )
+#     assert resp.status_code == 200, resp.json()
+#     return resp.json()
+
+
+# def _activate_staff(client, user_id: str, password: str = "newSecurePass123!") -> dict:
+#     """Helper: generate activation token and complete staff activation flow."""
+#     from auth.utility.jwt.token_activation import create_staff_activation_token
+#     activation_token = create_staff_activation_token(user_id)
+#     resp = client.post(
+#         "/api/v1/users/staff/activate",
+#         json={
+#             "token": activation_token,
+#             "password": password,
+#             "confirm_password": password,
+#         },
+#     )
+#     assert resp.status_code == 200, resp.json()
+#     return resp.json()
+
+
+
+def _create_pending_teacher(client, token: str) -> dict:
+    resp = client.post(
+        "/api/v1/users/staff/create",
+        json=TEACHER_PAYLOAD,
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200, resp.json()
     return resp.json()
@@ -147,7 +195,7 @@ def test_admin_can_create_teacher(client):
     admin_id = create_resp.json()["id"]
 
     # Admin activates account
-    activate_data = _activate_staff(client, admin_id)
+    activate_data = _activate_staff(client, admin_id, ADMIN_PAYLOAD["email"])
     admin_token = activate_data["access_token"]
 
     # Admin creates a teacher
@@ -173,7 +221,7 @@ def test_staff_first_login_setup(client):
     created_user = create_response.json()
 
     # Activate via token — temp-password login is no longer supported
-    activate_data = _activate_staff(client, created_user["id"])
+    activate_data = _activate_staff(client, created_user["id"], created_user["email"])
     assert "access_token" in activate_data
 
     # Login with newly set password works
@@ -185,7 +233,6 @@ def test_staff_first_login_setup(client):
 
 
 def test_staff_account_activation(client):
-    from auth.utility.jwt.token_activation import create_staff_activation_token
 
     token = get_super_admin_token(client)
 
@@ -198,7 +245,7 @@ def test_staff_account_activation(client):
     created_user = create_response.json()
     assert created_user["is_first_login"] is True
 
-    activation_token = create_staff_activation_token(created_user["id"])
+    activation_token = make_staff_activation_token(created_user["id"], TEACHER_PAYLOAD["email"])
 
     activate_response = client.post(
         "/api/v1/users/staff/activate",
@@ -235,7 +282,7 @@ def test_teacher_cannot_create_users(client):
     assert create_resp.status_code == 200, create_resp.json()
     teacher_id = create_resp.json()["id"]
 
-    activate_data = _activate_staff(client, teacher_id)
+    activate_data = _activate_staff(client, teacher_id, TEACHER_PAYLOAD["email"])
     teacher_token = activate_data["access_token"]
 
     # Teacher tries to create another user — role check fires before anything else
@@ -459,7 +506,7 @@ def test_teacher_cannot_update_other_users(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     teacher_id = teacher_resp.json()["id"]
-    teacher_token = _activate_staff(client, teacher_id)["access_token"]
+    teacher_token = _activate_staff(client, teacher_id, TEACHER_PAYLOAD["email"])["access_token"]
 
     another_resp = client.post(
         "/api/v1/users/staff/create",
@@ -515,7 +562,7 @@ def test_cannot_delete_active_user_without_force(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     teacher_id = create_resp.json()["id"]
-    _activate_staff(client, teacher_id)  # now activated
+    _activate_staff(client, teacher_id, TEACHER_PAYLOAD["email"])  # now activated
 
     response = client.delete(
         f"/api/v1/users/{teacher_id}",
@@ -535,7 +582,7 @@ def test_admin_cannot_force_delete_active_user(client):
         headers={"Authorization": f"Bearer {super_token}"},
     )
     admin_id = admin_create.json()["id"]
-    admin_token = _activate_staff(client, admin_id)["access_token"]
+    admin_token = _activate_staff(client, admin_id, ADMIN_PAYLOAD["email"])["access_token"]
 
     teacher_create = client.post(
         "/api/v1/users/staff/create",
@@ -543,7 +590,7 @@ def test_admin_cannot_force_delete_active_user(client):
         headers={"Authorization": f"Bearer {super_token}"},
     )
     teacher_id = teacher_create.json()["id"]
-    _activate_staff(client, teacher_id)  # now activated
+    _activate_staff(client, teacher_id, TEACHER_PAYLOAD["email"])  # now activated
 
     response = client.delete(
         f"/api/v1/users/{teacher_id}?force=true",
@@ -561,7 +608,7 @@ def test_super_admin_can_force_delete_active_user(client):
         headers={"Authorization": f"Bearer {super_token}"},
     )
     teacher_id = create_resp.json()["id"]
-    _activate_staff(client, teacher_id)  # now activated
+    _activate_staff(client, teacher_id, TEACHER_PAYLOAD["email"])  # now activated
 
     response = client.delete(
         f"/api/v1/users/{teacher_id}?force=true",
@@ -592,7 +639,7 @@ def test_cannot_delete_self(client):
         headers={"Authorization": f"Bearer {super_token}"},
     )
     admin_id = admin_create.json()["id"]
-    admin_token = _activate_staff(client, admin_id)["access_token"]
+    admin_token = _activate_staff(client, admin_id, ADMIN_PAYLOAD["email"])["access_token"]
 
     response = client.delete(
         f"/api/v1/users/{admin_id}",
@@ -1010,3 +1057,86 @@ def test_student_cannot_export_students(client: TestClient) -> None:
 def test_export_requires_authentication(client: TestClient) -> None:
     response = client.get(EXPORT_URL)
     assert response.status_code == 401
+
+
+def test_old_activation_link_rejected_after_email_change(client):
+    token = get_super_admin_token(client)
+    teacher = _create_pending_teacher(client, token)
+
+    teacher_id = teacher["id"]
+    teacher_email = teacher["email"]
+
+    # Token issued for the original email
+    old_token = make_staff_activation_token(
+        user_id=teacher_id,
+        email=teacher_email,
+    )
+
+    patch_resp = client.patch(
+        f"/api/v1/users/staff/{teacher_id}",
+        json={"email": "corrected@cbtech.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert patch_resp.status_code == 200, patch_resp.json()
+
+    payload = {
+        "password": "newSecurePass123!",
+        "confirm_password": "newSecurePass123!",
+    }
+
+    # Old token should now be rejected because it contains the old email.
+    stale = client.post(
+        "/api/v1/users/staff/activate",
+        json={"token": old_token, **payload},
+    )
+    assert stale.status_code == 400, stale.json()
+
+    # New token must contain the NEW email.
+    fresh_token = make_staff_activation_token(
+        user_id=teacher_id,
+        email="corrected@cbtech.com",
+    )
+
+    fresh = client.post(
+        "/api/v1/users/staff/activate",
+        json={"token": fresh_token, **payload},
+    )
+    assert fresh.status_code == 200, fresh.json()
+
+
+def test_admin_can_edit_pending_staff_email_and_resend(client):
+    token = get_super_admin_token(client)
+    teacher = _create_pending_teacher(client, token)
+    teacher_id = teacher["id"]
+
+    with patch(
+        "auth.utility.email.email_service.EmailService.send_staff_activation_email",
+        new_callable=AsyncMock,
+    ) as send:
+        resp = client.patch(
+            f"/api/v1/users/staff/{teacher_id}/email",
+            json={"email": "bob.new@cbtech.com"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200, resp.json()
+    data = resp.json()
+    assert data["email"] == "bob.new@cbtech.com"
+    assert data["email_changed"] is True
+    assert data["email_sent"] is True
+    send.assert_awaited_once()
+
+
+def test_cannot_edit_email_of_activated_staff(client):
+    token = get_super_admin_token(client)
+    teacher = _create_pending_teacher(client, token)
+    teacher_id = teacher["id"]
+    teacher_email = teacher["email"]
+    _activate_staff(client, teacher_id, teacher_email)
+
+    resp = client.patch(
+        f"/api/v1/users/staff/{teacher_id}/email",
+        json={"email": "bob.new@cbtech.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 409, resp.json()

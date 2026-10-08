@@ -9,7 +9,7 @@ from auth.database.schema.membership.membership_db import OrgMembership
 from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
-    CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse
+    CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse, SkippedMember
 )
 from auth.services.user.user_context import UserContext
 
@@ -248,20 +248,27 @@ class CohortService:
         added = []
         already_in = []
         not_found = []
+        skipped: list[SkippedMember] = []
 
         for student_id in payload.student_ids:
             # Verify student belongs to this org via OrgMembership — not UserModel
-            membership = session.exec(
+            membership: OrgMembership | None = session.exec(
                 select(OrgMembership).where(
                     OrgMembership.user_id == student_id,
                     OrgMembership.org_id == org_id,
-                    OrgMembership.role == UserRole.STUDENT,
-                    OrgMembership.status == MembershipStatus.ACTIVE,
                 )
             ).first()
 
-            if not membership:
-                not_found.append(str(student_id))
+            if membership is None:
+                skipped.append(SkippedMember(student_id=student_id, reason="not_in_org"))
+                continue
+            if membership.role != UserRole.STUDENT:
+                skipped.append(SkippedMember(student_id=student_id, reason="not_a_student"))
+                continue
+            if membership.status not in (MembershipStatus.ACTIVE, MembershipStatus.PENDING):
+                skipped.append(
+                    SkippedMember(student_id=student_id, reason=f"inactive:{membership.status}")
+                )
                 continue
 
             existing = session.exec(
@@ -290,7 +297,8 @@ class CohortService:
             added=len(added),
             already_members=len(already_in),
             not_found=len(not_found),
-            cohort_id=cohort_id
+            skipped=skipped,
+            cohort_id=cohort_id,
         )
 
     @staticmethod

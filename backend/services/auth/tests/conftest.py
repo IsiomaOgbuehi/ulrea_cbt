@@ -4,9 +4,15 @@ from sqlmodel import Session, SQLModel
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
+from uuid import UUID
 
 from auth.main import app
 from auth.database.database import database
+
+from auth.database.schema import *
+
+# from auth.database.schema.user.user_db import UserModel
+from auth.utility.jwt.token_activation import create_staff_activation_token
 
 # ============================================================
 # DATABASE
@@ -151,3 +157,37 @@ def do_full_signup(client, email=USER_EMAIL):
 def get_super_admin_token(client) -> str:
     verify_data = do_full_signup(client)
     return verify_data['token']['access_token']
+
+
+# def make_staff_activation_token(user_id: str) -> str:
+#     """Test helper: activation token bound to the user's current email."""
+#     with Session(engine) as session:
+#         user: UserModel | None = session.get(UserModel, UUID(user_id))
+#         assert user is not None, f"user {user_id} not found"
+#         return create_staff_activation_token(user_id, user.email)
+
+# def make_staff_activation_token(user_id: str) -> str:
+#     print(">>> make_staff_activation_token")
+#     print(">>> ENGINE:", engine)
+
+#     from sqlalchemy import inspect
+#     print(">>> USERS EXISTS IN HELPER:",
+#           inspect(engine).has_table("users"))
+
+#     with Session(engine) as session:
+#         print(">>> QUERYING USER:", user_id)
+
+#         user = session.get(UserModel, UUID(user_id))
+
+#         print(">>> USER:", user)
+
+#         assert user is not None, f"user {user_id} not found"
+
+#         return create_staff_activation_token(
+#             user_id=user_id,
+#             email=user.email,
+#         )
+
+
+def make_staff_activation_token(user_id: str, email: str) -> str:
+    return create_staff_activation_token(user_id, email)

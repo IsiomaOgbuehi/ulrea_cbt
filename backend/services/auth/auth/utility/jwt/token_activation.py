@@ -8,42 +8,40 @@ from auth.core.settings import settings
 ALGORITHM = "HS256"
 
 
-def create_staff_activation_token(user_id: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=24)
+def create_staff_activation_token(user_id: str, email: str) -> str:
+    expire: datetime = datetime.now(timezone.utc) + timedelta(hours=24)
 
-    payload = {
+    payload: dict[str, str | datetime] = {
         "sub": str(user_id),
+        "email": email.strip().lower(),
         "type": "staff_activation",
         "exp": expire,
     }
 
-    return jwt.encode(
-        payload,
-        settings.JWT_SECRET,
-        algorithm=ALGORITHM,
-    )
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=ALGORITHM)
 
 
-def verify_staff_activation_token(token: str) -> str:
+def verify_staff_activation_token(token: str) -> tuple[str, str | None]:
+    """Returns (user_id, email_claim). email_claim is None only for tokens
+    issued before this change."""
     try:
-        payload = jwt.decode(
+        payload: dict[str, object] = jwt.decode(
             token,
             settings.JWT_SECRET,
             algorithms=[ALGORITHM],
         )
-
-        if payload.get("type") != "staff_activation":
-            raise ValueError("Invalid token type")
-
-        user_id = payload.get("sub")
-
-        if not user_id:
-            raise ValueError("Invalid token payload")
-
-        return user_id
-
     except PyJWTError:
         raise ValueError("Invalid or expired token")
+
+    if payload.get("type") != "staff_activation":
+        raise ValueError("Invalid token type")
+
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError("Invalid token payload")
+
+    email = payload.get("email")
+    return user_id, email if isinstance(email, str) else None
     
 
 

@@ -11,8 +11,9 @@ from datetime import datetime
 from collections.abc import Sequence
 from typing import cast
 from openpyxl.utils import get_column_letter
+from sqlalchemy.exc import IntegrityError
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from sqlmodel import Session, select
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole, VerificationMethod
 from auth.database.database import SessionDep
@@ -166,6 +167,88 @@ class UserManagementService:
         session.commit()
         session.refresh(user)
         return user, temp_password, False
+
+
+
+    @staticmethod
+    def update_pending_staff_email(
+        session: Session,
+        ctx: UserContext,
+        user_id: UUID,
+        new_email: str,
+    ) -> tuple[UserModel, bool]:
+        """Returns (user, email_changed). Only for staff whose membership is PENDING."""
+        org_id: UUID = ctx.membership.org_id
+        email: str = new_email.strip().lower()
+
+        membership: OrgMembership | None = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == user_id,
+                OrgMembership.org_id == org_id,
+            )
+        ).first()
+
+        if membership is None or membership.role == UserRole.STUDENT:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff member not found")
+
+        # Admins must not touch super admin accounts
+        if (
+            membership.role == UserRole.SUPER_ADMIN
+            and ctx.membership.role != UserRole.SUPER_ADMIN
+        ):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed")
+
+        if membership.status != MembershipStatus.PENDING:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Email can only be edited while the staff status is PENDING",
+            )
+
+        user: UserModel | None = session.get(UserModel, user_id)
+        if user is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff member not found")
+
+        if user.verified:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This account is already activated, so no activation link is needed",
+            )
+
+        if user.email.lower() == email:
+            return user, False
+
+        # Changing the email of an account that also belongs to other orgs would affect them
+        other_org = session.exec(
+            select(OrgMembership.id).where(
+                OrgMembership.user_id == user_id,
+                OrgMembership.org_id != org_id,
+            )
+        ).first()
+        if other_org is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This user belongs to other organizations; their email can't be changed here",
+            )
+
+        taken = session.exec(
+            select(UserModel.id).where(
+                func.lower(UserModel.email) == email,
+                UserModel.id != user_id,
+            )
+        ).first()
+        if taken is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already in use")
+
+        user.email = email
+        session.add(user)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already in use")
+        session.refresh(user)
+        return user, True
+
 
     # --------------------------------------------------------
     # STUDENT
