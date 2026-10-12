@@ -1,3 +1,4 @@
+from fastapi.testclient import TestClient
 import pytest
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from cbt_service.database.models.enums.exam_enum import (
     ExamStatus,
     AssignmentStatus,
 )
+from .helpers import report_violation, set_max_violations
 
 
 TEACHER_ID = uuid4()
@@ -334,7 +336,7 @@ def test_cannot_save_response_to_submitted_attempt(
         headers=student_headers,
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 409
 
 
 def test_submit_attempt(
@@ -513,3 +515,32 @@ def test_restarting_after_reset_reactivates_same_attempt(
         ).all()
 
         assert len(attempts) == 1
+
+
+
+
+def test_reset_clears_violation_count(
+    client: TestClient,
+    student_headers: dict[str, str],
+    admin_headers: dict[str, str],
+) -> None:
+    set_max_violations(EXAM_ID, max_violations=2)
+    attempt = start_attempt(client, student_headers)
+    report_violation(client, student_headers, attempt["id"])
+    report_violation(client, student_headers, attempt["id"])  # terminated
+
+    reset = client.post(
+        f"/api/v1/attempts/{attempt['id']}/reset",
+        json={"reason": "network failure"},
+        headers=admin_headers,
+    )
+    assert reset.status_code == 200, reset.json()
+
+    restarted = start_attempt(client, student_headers)
+    assert restarted["id"] == attempt["id"]  # same row reactivated
+
+    result = report_violation(client, student_headers, attempt["id"])
+    assert result.status_code == 201
+    data = result.json()
+    assert data["violation_count"] == 1  # not 3
+    assert data["exam_terminated"] is False

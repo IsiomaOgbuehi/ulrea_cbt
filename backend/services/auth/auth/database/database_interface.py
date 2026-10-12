@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from sqlmodel import Session
 
 from sqlalchemy import Engine
 
@@ -8,13 +10,13 @@ class IDatabase(ABC):
         pass
 
     @abstractmethod
-    def connect(self):
+    def connect(self) -> None: 
         pass
 
     @abstractmethod
-    def disconnect(self):
+    def disconnect(self)  -> None :
         pass
 
     @abstractmethod
-    def get_session(self):
+    def get_session(self)-> Iterator[Session] :
         pass

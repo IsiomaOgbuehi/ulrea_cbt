@@ -2,6 +2,8 @@ from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime
 
+from cbt_service.database.models.enums.attempt_enum import AttemptStatus
+
 
 class CurrentUser(BaseModel):
     id: UUID
@@ -127,3 +129,11 @@ class CohortAttemptSummary(BaseModel):
 class ResetAttemptRequest(BaseModel):
     reason: str
     new_scheduled_at: datetime | None = None  # if rescheduling, not just voiding
+
+
+class AttemptStatusRead(BaseModel):
+    status: AttemptStatus
+    remaining_seconds: int
+    violation_count: int
+    max_violations: int | None
+    server_time: datetime

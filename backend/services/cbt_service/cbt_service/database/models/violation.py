@@ -46,3 +46,7 @@ class ExamViolation(SQLModel, table=True):
     reviewed: bool = Field(default=False)   # lets admin/teacher mark as "looked at" during review
     reviewed_by: UUID | None = None
     reviewed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    cleared_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )

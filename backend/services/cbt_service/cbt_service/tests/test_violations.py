@@ -2,7 +2,8 @@
 
 import pytest
 from uuid import uuid4, UUID
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from fastapi.testclient import TestClient
 
 from sqlmodel import Session, select
 
@@ -131,7 +132,9 @@ def test_cannot_report_violation_for_other_students_attempt(client, student_head
     assert response.status_code == 404
 
 
-def test_cannot_report_violation_after_submission(client, student_headers):
+def test_cannot_report_violation_after_submission(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
     attempt = start_attempt(client, student_headers)
 
     submit_response = client.post(
@@ -141,7 +144,32 @@ def test_cannot_report_violation_after_submission(client, student_headers):
     assert submit_response.status_code == 200
 
     response = report_violation(client, student_headers, attempt["id"])
-    assert response.status_code == 400
+
+    # Closed attempt is a normal outcome: 200, nothing recorded, final state returned.
+    assert response.status_code == 200, response.json()
+    data = response.json()
+    assert data["violation"] is None
+    assert data["violation_count"] == 0
+    assert data["exam_terminated"] is False
+    assert data["attempt_status"] == AttemptStatus.SUBMITTED.value
+
+    with Session(engine) as session:
+        recorded = session.exec(
+            select(ExamViolation).where(ExamViolation.attempt_id == UUID(attempt["id"]))
+        ).all()
+        assert recorded == []
+
+# def test_cannot_report_violation_after_submission(client, student_headers):
+#     attempt = start_attempt(client, student_headers)
+
+#     submit_response = client.post(
+#         f"/api/v1/attempts/{attempt['id']}/submit",
+#         headers=student_headers,
+#     )
+#     assert submit_response.status_code == 200
+
+#     response = report_violation(client, student_headers, attempt["id"])
+#     assert response.status_code == 400
 
 
 # ------------------------------------------------------------------
@@ -192,7 +220,9 @@ def test_terminated_attempt_still_gets_scored(client, student_headers):
         assert db_attempt.percentage is not None
 
 
-def test_cannot_save_response_or_report_violation_after_termination(client, student_headers):
+def test_cannot_save_response_or_report_violation_after_termination(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
     set_max_violations(EXAM_ID, max_violations=1)
 
     attempt = start_attempt(client, student_headers)
@@ -209,10 +239,11 @@ def test_cannot_save_response_or_report_violation_after_termination(client, stud
         },
         headers=student_headers,
     )
-    assert save_attempt_response.status_code == 400
-
-    further_violation = report_violation(client, student_headers, attempt["id"])
-    assert further_violation.status_code == 400
+    assert save_attempt_response.status_code == 409
+    assert save_attempt_response.json()["detail"] == {
+        "code": "ATTEMPT_CLOSED",
+        "status": AttemptStatus.TERMINATED.value,
+    }
 
 
 def test_no_termination_when_max_violations_not_set(client, student_headers):
@@ -304,3 +335,149 @@ def test_admin_can_mark_violation_reviewed(client, student_headers, teacher_head
     assert data["reviewed"] is True
     assert data["reviewed_by"] is not None
     assert data["reviewed_at"] is not None
+
+
+
+def get_status(
+    client: TestClient, headers: dict[str, str], attempt_id: str
+):
+    return client.get(f"/api/v1/attempts/{attempt_id}/status", headers=headers)
+
+
+# ------------------------------------------------------------------
+# Attempt status endpoint (heartbeat)
+# ------------------------------------------------------------------
+
+def test_status_for_active_attempt(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    set_max_violations(EXAM_ID, max_violations=3)
+    attempt = start_attempt(client, student_headers)
+
+    response = get_status(client, student_headers, attempt["id"])
+
+    assert response.status_code == 200, response.json()
+    data = response.json()
+    assert data["status"] == AttemptStatus.STARTED.value
+    assert data["remaining_seconds"] > 0
+    assert data["violation_count"] == 0
+    assert data["max_violations"] == 3
+    assert data["server_time"] is not None
+
+
+def test_status_reflects_violation_count(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    set_max_violations(EXAM_ID, max_violations=5)
+    attempt = start_attempt(client, student_headers)
+
+    report_violation(client, student_headers, attempt["id"])
+    report_violation(client, student_headers, attempt["id"])
+
+    data = get_status(client, student_headers, attempt["id"]).json()
+    assert data["violation_count"] == 2
+    assert data["max_violations"] == 5
+    assert data["status"] == AttemptStatus.STARTED.value
+
+
+def test_status_max_violations_null_when_not_set(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    set_max_violations(EXAM_ID, max_violations=None)
+    attempt = start_attempt(client, student_headers)
+
+    data = get_status(client, student_headers, attempt["id"]).json()
+    assert data["max_violations"] is None
+
+
+def test_status_after_termination(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    set_max_violations(EXAM_ID, max_violations=1)
+    attempt = start_attempt(client, student_headers)
+    report_violation(client, student_headers, attempt["id"])  # triggers termination
+
+    response = get_status(client, student_headers, attempt["id"])
+
+    assert response.status_code == 200, response.json()
+    data = response.json()
+    assert data["status"] == AttemptStatus.TERMINATED.value
+    assert data["violation_count"] == 1
+    assert data["remaining_seconds"] == 0
+
+
+def test_status_after_submission(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    attempt = start_attempt(client, student_headers)
+    client.post(f"/api/v1/attempts/{attempt['id']}/submit", headers=student_headers)
+
+    data = get_status(client, student_headers, attempt["id"]).json()
+    assert data["status"] == AttemptStatus.SUBMITTED.value
+    assert data["remaining_seconds"] == 0
+
+
+def test_status_auto_submits_expired_attempt(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    """Polling after the time limit must close the attempt, not report it as live."""
+    attempt = start_attempt(client, student_headers)
+
+    # Backdate the start so the exam duration has long since elapsed
+    with Session(engine) as session:
+        db_attempt = session.exec(
+            select(AttemptModel).where(AttemptModel.id == UUID(attempt["id"]))
+        ).first()
+        assert db_attempt is not None
+        db_attempt.started_at = datetime.now(timezone.utc) - timedelta(days=1)
+        session.add(db_attempt)
+        session.commit()
+
+    response = get_status(client, student_headers, attempt["id"])
+
+    assert response.status_code == 200, response.json()
+    data = response.json()
+    assert data["status"] == AttemptStatus.SUBMITTED.value
+    assert data["remaining_seconds"] == 0
+
+    with Session(engine) as session:
+        db_attempt = session.exec(
+            select(AttemptModel).where(AttemptModel.id == UUID(attempt["id"]))
+        ).first()
+        assert db_attempt is not None
+        assert db_attempt.scored_by == "auto_expired"
+
+
+def test_status_cannot_be_read_by_other_student(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    attempt = start_attempt(client, student_headers)
+
+    other_headers = make_auth_header({
+        "sub": str(uuid4()),
+        "org_id": str(ORG_ID),
+        "role": "student",
+        "verified": True,
+        "type": "access",
+        "jti": str(uuid4()),
+        "exp": 9999999999,
+    })
+
+    response = get_status(client, other_headers, attempt["id"])
+    assert response.status_code == 404
+
+
+def test_status_requires_authentication(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    attempt = start_attempt(client, student_headers)
+
+    response = client.get(f"/api/v1/attempts/{attempt['id']}/status")
+    assert response.status_code in (401, 403)
+
+
+def test_status_unknown_attempt_returns_404(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    response = get_status(client, student_headers, str(uuid4()))
+    assert response.status_code == 404

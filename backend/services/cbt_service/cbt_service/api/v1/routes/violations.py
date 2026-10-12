@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from cbt_service.schemas.attempt_schemas import CurrentUser
 from cbt_service.database.database import SessionDep
 from cbt_service.services.violation.violation_service import ViolationService
@@ -13,10 +13,16 @@ router = APIRouter(prefix="/attempts/{attempt_id}/violations", tags=["violations
 async def report_violation(
     attempt_id: UUID,
     payload: ViolationCreate,
+    response: Response,
     session: SessionDep,
     current_user: CurrentUser = StudentOnly,
 ):
-    return await ViolationService.create(session, attempt_id, payload, current_user)
+    result: ViolationCreateResult = await ViolationService.create(
+        session, attempt_id, payload, current_user
+    )
+    if result.violation is None:
+        response.status_code = 200  # attempt already closed: nothing was recorded
+    return result
 
 
 @router.get("", response_model=list[ViolationRead])

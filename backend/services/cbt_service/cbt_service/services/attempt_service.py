@@ -2,11 +2,12 @@ import asyncio
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
-from sqlmodel import Session, delete, select
+from sqlmodel import Session, delete, select, col, delete, func, update
 from pydantic import BaseModel
 from typing import Any
 import random
 
+from cbt_service.database.models.violation import ExamViolation
 from cbt_service.database.models.enums.exam_enum import ExamStatus
 from cbt_service.schemas.item_subject_schemas import ItemForDisplayRead, ItemForScoringRead
 from cbt_service.services.item.item_service import ItemService
@@ -37,34 +38,6 @@ from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 # ============================================================
 
 class AttemptService:
-
-    # @staticmethod
-    # def start(session: Session, payload: StartAttemptRequest, student_id: UUID, org_id: UUID) -> AttemptModel:
-    #     # Check existing attempts
-    #     existing = session.exec(
-    #         select(AttemptModel).where(
-    #             AttemptModel.exam_id == payload.exam_id,
-    #             AttemptModel.student_id == student_id,
-    #         )
-    #     ).all()
-
-    #     # NOTE: max_attempts check would call exam service or read from a local
-    #     # cache/snapshot. For now we track attempt_number.
-    #     in_progress = [a for a in existing if a.status == AttemptStatus.STARTED]
-    #     if in_progress:
-    #         raise HTTPException(status_code=400, detail="You already have an attempt in progress.")
-
-    #     attempt = AttemptModel(
-    #         exam_id=payload.exam_id,
-    #         student_id=student_id,
-    #         org_id=org_id,
-    #         assignment_id=payload.assignment_id,
-    #         attempt_number=len(existing) + 1,
-    #     )
-    #     session.add(attempt)
-    #     session.commit()
-    #     session.refresh(attempt)
-    #     return attempt
 
     @staticmethod
     def start(session: Session, payload: StartAttemptRequest, student_id: UUID, org_id: UUID) -> AttemptModel:
@@ -162,7 +135,10 @@ class AttemptService:
         attempt = await AttemptService.get_attempt(session, attempt_id, student_id)  # expiry-checked
 
         if attempt.status != AttemptStatus.STARTED:
-            raise HTTPException(status_code=400, detail="Cannot save response — attempt is no longer active.")
+            raise HTTPException(
+            status_code=409,
+            detail={"code": "ATTEMPT_CLOSED", "status": attempt.status.value},
+        )
 
         existing = session.exec(
             select(ResponseModel).where(
@@ -458,20 +434,43 @@ class AttemptService:
         payload: ResetAttemptRequest,
         current_user: CurrentUser,
     ) -> AttemptModel:
-        attempt = session.exec(
-            select(AttemptModel).where(
+        # Lock the row so a violation or autosave arriving mid-reset can't
+        # interleave with the clean-up below.
+        attempt: AttemptModel | None = session.exec(
+            select(AttemptModel)
+            .where(
                 AttemptModel.id == attempt_id,
                 AttemptModel.org_id == current_user.org_id,
             )
+            .with_for_update()
         ).first()
         if not attempt:
             raise HTTPException(status_code=404, detail="Attempt not found.")
 
-        # Wipe responses so the student gets a clean slate
+        # 1. Wipe responses so the student gets a clean slate.
         session.exec(
             delete(ResponseModel).where(ResponseModel.attempt_id == attempt_id)
         )
 
+        # 2. Soft-clear violations: keep the rows as evidence, but stop them
+        #    counting toward max_violations. Already-cleared rows keep their
+        #    original cleared_at.
+        active_violation_filter = (
+            ExamViolation.attempt_id == attempt_id,
+            col(ExamViolation.cleared_at).is_(None),
+        )
+        violations_cleared: int = session.exec(
+            select(func.count()).select_from(ExamViolation).where(*active_violation_filter)
+        ).one()
+
+        if violations_cleared:
+            session.exec(
+                update(ExamViolation)
+                .where(*active_violation_filter)
+                .values(cleared_at=datetime.now(timezone.utc))
+            )
+
+        # 3. Reset the attempt itself. start() reactivates this same row.
         attempt.status = AttemptStatus.RESET
         attempt.submitted_at = None
         attempt.raw_score = None
@@ -482,12 +481,15 @@ class AttemptService:
         attempt.scored_by = None
         session.add(attempt)
 
+        # 4. Optionally reschedule the assignment.
         if payload.new_scheduled_at:
-            assignment = session.exec(
+            assignment: ExamAssignment | None = session.exec(
                 select(ExamAssignment).where(ExamAssignment.id == attempt.assignment_id)
             ).first()
             if assignment:
-                exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+                exam: ExamModel | None = session.exec(
+                    select(ExamModel).where(ExamModel.id == attempt.exam_id)
+                ).first()
                 assignment.scheduled_at = payload.new_scheduled_at
                 assignment.deadline_override = (
                     payload.new_scheduled_at + timedelta(minutes=exam.duration_minutes)
@@ -495,12 +497,77 @@ class AttemptService:
                 )
                 session.add(assignment)
 
-        _log(session, attempt.exam_id, current_user.org_id, current_user.id,
-            "attempt_reset", {"attempt_id": str(attempt_id), "reason": payload.reason})
+        # 5. Audit trail, including how many violations were cleared.
+        _log(
+            session,
+            attempt.exam_id,
+            current_user.org_id,
+            current_user.id,
+            "attempt_reset",
+            {
+                "attempt_id": str(attempt_id),
+                "reason": payload.reason,
+                "violations_cleared": violations_cleared,
+            },
+        )
 
+        # Single commit: responses, violations, attempt, assignment and log
+        # all succeed or all roll back together.
         session.commit()
         session.refresh(attempt)
         return attempt
+
+
+    # @staticmethod
+    # def reset_attempt(
+    #     session: Session,
+    #     attempt_id: UUID,
+    #     payload: ResetAttemptRequest,
+    #     current_user: CurrentUser,
+    # ) -> AttemptModel:
+    #     attempt = session.exec(
+    #         select(AttemptModel).where(
+    #             AttemptModel.id == attempt_id,
+    #             AttemptModel.org_id == current_user.org_id,
+    #         )
+    #     ).first()
+    #     if not attempt:
+    #         raise HTTPException(status_code=404, detail="Attempt not found.")
+
+    #     # Wipe responses so the student gets a clean slate
+    #     session.exec(
+    #         delete(ResponseModel).where(ResponseModel.attempt_id == attempt_id)
+    #     )
+
+    #     attempt.status = AttemptStatus.RESET
+    #     attempt.submitted_at = None
+    #     attempt.raw_score = None
+    #     attempt.final_score = None
+    #     attempt.percentage = None
+    #     attempt.passed = None
+    #     attempt.scored_at = None
+    #     attempt.scored_by = None
+    #     session.add(attempt)
+
+    #     if payload.new_scheduled_at:
+    #         assignment = session.exec(
+    #             select(ExamAssignment).where(ExamAssignment.id == attempt.assignment_id)
+    #         ).first()
+    #         if assignment:
+    #             exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+    #             assignment.scheduled_at = payload.new_scheduled_at
+    #             assignment.deadline_override = (
+    #                 payload.new_scheduled_at + timedelta(minutes=exam.duration_minutes)
+    #                 if exam else None
+    #             )
+    #             session.add(assignment)
+
+    #     _log(session, attempt.exam_id, current_user.org_id, current_user.id,
+    #         "attempt_reset", {"attempt_id": str(attempt_id), "reason": payload.reason})
+
+    #     session.commit()
+    #     session.refresh(attempt)
+    #     return attempt
 
 
 

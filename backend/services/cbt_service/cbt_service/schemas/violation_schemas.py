@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
+from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 from cbt_service.database.models.enums.violation_enums import ViolationType, ViolationSeverity
 
 
@@ -32,7 +33,8 @@ class ViolationRead(BaseModel):
 
 
 class ViolationCreateResult(BaseModel):
-    violation: ViolationRead
+    violation: ViolationRead | None
     violation_count: int
     max_violations: int | None
     exam_terminated: bool
+    attempt_status: AttemptStatus

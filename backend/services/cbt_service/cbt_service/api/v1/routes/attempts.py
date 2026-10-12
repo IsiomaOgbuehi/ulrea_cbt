@@ -1,10 +1,15 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends
+from sqlmodel import select
+
+from cbt_service.services.violation.violation_service import ViolationService
+from cbt_service.database.models.exam import ExamModel
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import get_current_user
 from cbt_service.schemas.attempt_schemas import (
     AttemptDetailRead,
     AttemptExamRead,
+    AttemptStatusRead,
     CohortAttemptSummary,
     ResetAttemptRequest,
     StartAttemptRequest,
@@ -22,6 +27,7 @@ router = APIRouter(prefix="/attempts", tags=["attempts"])
 
 AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
+StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STUDENT)
 
 
 ''' START ATTEMPT 🚀 '''
@@ -172,3 +178,28 @@ async def reset_attempt(
 ):
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
     return AttemptService._to_attempt_read(session, attempt)
+
+
+
+''' ATTEMPT STATUS (HEARTBEAT) 💓 '''
+@router.get("/{attempt_id}/status", response_model=AttemptStatusRead)
+async def get_attempt_status(
+    attempt_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(StudentOrAbove),
+) -> AttemptStatusRead:
+    """Lightweight poll: status, time left, and violation count. Enforces expiry."""
+    # get_attempt checks ownership and auto-submits if time has run out
+    attempt = await AttemptService.get_attempt(session, attempt_id, current_user.id)
+    exam = session.exec(
+        select(ExamModel).where(ExamModel.id == attempt.exam_id)
+    ).first()
+    read: AttemptRead = AttemptService._to_attempt_read(session, attempt)
+
+    return AttemptStatusRead(
+        status=attempt.status,
+        remaining_seconds=read.remaining_seconds,
+        violation_count=ViolationService._count_violations(session, attempt_id),
+        max_violations=exam.max_violations if exam else None,
+        server_time=read.server_time,
+    )
