@@ -1,8 +1,10 @@
+from dataclasses import dataclass
 import os
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlmodel import select
+from sqlmodel import Session, select
 from auth.api_models.login_response import LoginResponse, TokenData
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import SessionDep
@@ -45,6 +47,12 @@ router = APIRouter(
     responses={401: {'message': 'Unauthorized'}}
 )
 
+@dataclass
+class _LoginResult:
+    response: LoginResponse | None = None
+    needs_otp_for: UserModel | None = None   # unverified, handled async below
+
+
 async def handle_unverified_user(user: UserModel):
     try:
         otp = await OtpService.request_otp(
@@ -68,128 +76,183 @@ async def handle_unverified_user(user: UserModel):
         raise HTTPException(status_code=500, detail=str(e)) 
 
 
+
+def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
+    user = authenticate_user(session, username, password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Incorrect username or password",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+    # one query for both the membership and its org (was up to 3 queries)
+    rows: list[tuple[OrgMembership, OrganizationModel]] = list(session.exec(
+        select(OrgMembership, OrganizationModel)
+        .join(OrganizationModel, OrganizationModel.id == OrgMembership.org_id)
+        .where(OrgMembership.user_id == user.id)
+    ).all())
+    pending = next((m for m, _ in rows if m.status == MembershipStatus.PENDING), None)
+    active = next(((m, o) for m, o in rows if m.status == MembershipStatus.ACTIVE), None)
+
+    if not user.verified:
+        if pending is not None and pending.role != UserRole.STUDENT:
+            raise HTTPException(status_code=403, detail={...})   # ACTIVATION_REQUIRED, unchanged
+        return _LoginResult(needs_otp_for=user)
+
+    if active is None:
+        ...  # your org-less student / first-login / 403 branches, using `pending`
+             # instead of re-querying
+
+    membership, org = active
+    return _LoginResult(response=LoginResponse(
+        access_token=create_access_token(user.id, membership.org_id, membership.role).access_token,
+        refresh_token=create_refresh_token(user.id),
+        user=StaffUserResponse.model_validate(user, from_attributes=True),
+        organization=OrganizationRead.model_validate(org, from_attributes=True),
+        requires_setup=user.is_first_login,
+    ))
+    
+
 '''LOGIN 🔐 '''
 @router.post(AuthRoutes.LOGIN.value, response_model=LoginResponse)
 async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], session: SessionDep):
 
-    user = authenticate_user(session, form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    result = await run_in_threadpool(_login_sync, session, form_data.username, form_data.password)
+    if result.needs_otp_for is not None:
+        detail = await handle_unverified_user(result.needs_otp_for)
+        raise HTTPException(status_code=403, detail=detail)
+    assert result.response is not None
+    return result.response
+
+    # user = authenticate_user(session, form_data.username, form_data.password)
+    # if not user:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_401_UNAUTHORIZED,
+    #         detail="Incorrect username or password",
+    #         headers={"WWW-Authenticate": "Bearer"},
+    #     )
     
-    # User must verify email before login
+    # # User must verify email before login
+    # if not user.verified:
+    #     # Check if this is a staff member created by an admin (has pending membership)
+    #     # vs a SUPER_ADMIN who signed up themselves (needs OTP)
+
+    #     pending_membership = session.exec(
+    #         select(OrgMembership).where(
+    #             OrgMembership.user_id == user.id,
+    #             OrgMembership.status == MembershipStatus.PENDING,
+    #         )
+    #     ).first()
+
+    #     is_admin_created_staff = (
+    #         pending_membership is not None
+    #         and pending_membership.role != UserRole.STUDENT
+    #     )
+
+    #     if is_admin_created_staff:
+    #         # Activation link expired or never clicked — tell frontend to resend
+    #         raise HTTPException(
+    #             status_code=status.HTTP_403_FORBIDDEN,
+    #             detail={
+    #                 "message": "Account not activated.",
+    #                 "code": "ACTIVATION_REQUIRED",
+    #                 "action": "RESEND_ACTIVATION",
+    #                 "identifier": user.email,
+    #             }
+    #         )
+
+    #     detail = await handle_unverified_user(user)
+    #     raise HTTPException(
+    #         status_code=status.HTTP_403_FORBIDDEN,
+    #         detail=detail,
+    #     )
+
+    # membership = session.exec(
+    #     select(OrgMembership)
+    #     .where(
+    #         OrgMembership.user_id == user.id,
+    #         OrgMembership.status == MembershipStatus.ACTIVE,
+    #     )
+    # ).first()
+
+    #     # Staff on first login: not yet in OrgMembership — find their org via owner link
+    # # (for SUPER_ADMIN) or via the org that created them (for staff)
+    # if not membership:
+    #     # Check if this is a self-signup student (password-based, no pending membership)
+    #     pending = session.exec(
+    #         select(OrgMembership).where(
+    #             OrgMembership.user_id == user.id,
+    #             OrgMembership.status == MembershipStatus.PENDING,
+    #         )
+    #     ).first()
+
+    #     is_org_less_student = pending is None and user.verified
+
+    #     if is_org_less_student:
+    #         provisional = create_student_provisional_token(user.id)
+    #         return LoginResponse(
+    #             access_token=provisional.access_token,
+    #             refresh_token="",
+    #             user=StaffUserResponse.model_validate(user, from_attributes=True),
+    #             organization=None,
+    #             requires_setup=False,
+    #             is_provisional=True,   # frontend redirects to org discovery
+    #         )
+    
+    #     if user.is_first_login:
+    #         # Try to find org via owner_user_id (SUPER_ADMIN who never verified)
+    #         # or via the org that created this staff member
+    #         owned_org = session.exec(
+    #             select(OrganizationModel).where(
+    #                 OrganizationModel.owner_user_id == user.id
+    #             )
+    #         ).first()
+
+    #         if owned_org:
+    #             pass
+    #         else:
+    #             # Staff created by admin — org is on their creator's membership
+    #             # The org_id was set when admin created them — find it via
+    #             # the organization that has this staff member's email in their domain
+    #             # or fall back to requiring activation first
+    #             raise HTTPException(
+    #                 status_code=403,
+    #                 detail="Please complete account activation before logging in."
+    #             )
+    #     else:
+    #         raise HTTPException(
+    #             status_code=403,
+    #             detail="No active organization membership found."
+    #         )
+    
+    # owner_org = session.exec(
+    #             select(OrganizationModel).where(
+    #                 OrganizationModel.id == membership.org_id
+    #             )
+    #         ).first()
+
+
+    # token_data = create_access_token(user.id, membership.org_id, membership.role)
+    # refresh = create_refresh_token(user.id)
+
+    # return LoginResponse(
+    #     access_token=token_data.access_token,
+    #     refresh_token=refresh,
+    #     user=StaffUserResponse.model_validate(user, from_attributes=True),
+    #     organization=OrganizationRead.model_validate(owner_org, from_attributes=True) if owner_org else None,
+    #     requires_setup=user.is_first_login,
+    # )
+
+
+
+def _load_refresh_subject(session: Session, user_id: UUID) -> tuple[UserModel, OrgMembership]:
+    user = session.get(UserModel, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="User no longer exists.")
     if not user.verified:
-        # Check if this is a staff member created by an admin (has pending membership)
-        # vs a SUPER_ADMIN who signed up themselves (needs OTP)
-
-        pending_membership = session.exec(
-            select(OrgMembership).where(
-                OrgMembership.user_id == user.id,
-                OrgMembership.status == MembershipStatus.PENDING,
-            )
-        ).first()
-
-        is_admin_created_staff = (
-            pending_membership is not None
-            and pending_membership.role != UserRole.STUDENT
-        )
-
-        if is_admin_created_staff:
-            # Activation link expired or never clicked — tell frontend to resend
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "message": "Account not activated.",
-                    "code": "ACTIVATION_REQUIRED",
-                    "action": "RESEND_ACTIVATION",
-                    "identifier": user.email,
-                }
-            )
-
-        detail = await handle_unverified_user(user)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=detail,
-        )
-
-    membership = session.exec(
-        select(OrgMembership)
-        .where(
-            OrgMembership.user_id == user.id,
-            OrgMembership.status == MembershipStatus.ACTIVE,
-        )
-    ).first()
-
-        # Staff on first login: not yet in OrgMembership — find their org via owner link
-    # (for SUPER_ADMIN) or via the org that created them (for staff)
-    if not membership:
-        # Check if this is a self-signup student (password-based, no pending membership)
-        pending = session.exec(
-            select(OrgMembership).where(
-                OrgMembership.user_id == user.id,
-                OrgMembership.status == MembershipStatus.PENDING,
-            )
-        ).first()
-
-        is_org_less_student = pending is None and user.verified
-
-        if is_org_less_student:
-            provisional = create_student_provisional_token(user.id)
-            return LoginResponse(
-                access_token=provisional.access_token,
-                refresh_token="",
-                user=StaffUserResponse.model_validate(user, from_attributes=True),
-                organization=None,
-                requires_setup=False,
-                is_provisional=True,   # frontend redirects to org discovery
-            )
-    
-        if user.is_first_login:
-            # Try to find org via owner_user_id (SUPER_ADMIN who never verified)
-            # or via the org that created this staff member
-            owned_org = session.exec(
-                select(OrganizationModel).where(
-                    OrganizationModel.owner_user_id == user.id
-                )
-            ).first()
-
-            if owned_org:
-                pass
-            else:
-                # Staff created by admin — org is on their creator's membership
-                # The org_id was set when admin created them — find it via
-                # the organization that has this staff member's email in their domain
-                # or fall back to requiring activation first
-                raise HTTPException(
-                    status_code=403,
-                    detail="Please complete account activation before logging in."
-                )
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail="No active organization membership found."
-            )
-    
-    owner_org = session.exec(
-                select(OrganizationModel).where(
-                    OrganizationModel.id == membership.org_id
-                )
-            ).first()
-
-
-    token_data = create_access_token(user.id, membership.org_id, membership.role)
-    refresh = create_refresh_token(user.id)
-
-    return LoginResponse(
-        access_token=token_data.access_token,
-        refresh_token=refresh,
-        user=StaffUserResponse.model_validate(user, from_attributes=True),
-        organization=OrganizationRead.model_validate(owner_org, from_attributes=True) if owner_org else None,
-        requires_setup=user.is_first_login,
-    )
+        raise HTTPException(status_code=403, detail="Account is not verified.")
+    membership = MembershipService.get_active_membership(session, user_id)
+    if membership is None:
+        raise HTTPException(status_code=403, detail="No active organization membership found.")
+    return user, membership
 
 
 ''' REFRESH TOKEN 🔄 '''
@@ -217,17 +280,7 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
     except (ValueError, AttributeError):
         raise HTTPException(status_code=401, detail="Invalid token subject.")
 
-    user = session.exec(
-        select(UserModel).where(UserModel.id == user_id)
-    ).first()
-
-    membership = MembershipService.get_active_membership(session=session, user_id=user.id)
-
-    if not user:
-        raise HTTPException(status_code=401, detail="User no longer exists.")
-
-    if not user.verified:
-        raise HTTPException(status_code=403, detail="Account is not verified.")
+    user, membership = await run_in_threadpool(_load_refresh_subject, session, user_id)
 
     new_token = create_access_token(user.id, membership.org_id, membership.role)
 
@@ -265,51 +318,40 @@ def _slugify(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
 
 
-''' SIGN UP 🧑‍💻 '''
-@router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
-async def signup(signup_data: SignUp, session: SessionDep):
 
-    user_email = signup_data.user.email.strip().lower()
-    org_email = signup_data.organization.email.strip().lower()
+def _signup_sync(session: Session, signup_data: SignUp) -> tuple[UserModel, OrganizationModel]:
+    user_email: str = signup_data.user.email.strip().lower()
+    org_email: str = signup_data.organization.email.strip().lower()
 
     if signup_data.user.password != signup_data.user.confirm_password:
         raise HTTPException(
-            status_code=422,
-            detail={"message": "Password and Confirm password mismatch"}
+            status_code=422, detail={"message": "Password and Confirm password mismatch"}
         )
 
-    existing_user = session.exec(
-        select(UserModel).where(UserModel.email == user_email)
-    ).first()
-    if existing_user:
+    if session.exec(select(UserModel.id).where(UserModel.email == user_email)).first() is not None:
         raise HTTPException(
-            status_code=409,
-            detail={"message": "User email already exists. Please login."}
+            status_code=409, detail={"message": "User email already exists. Please login."}
         )
-
-    existing_org = session.exec(
-        select(OrganizationModel).where(OrganizationModel.email == org_email)
-    ).first()
-    if existing_org:
+    if session.exec(
+        select(OrganizationModel.id).where(OrganizationModel.email == org_email)
+    ).first() is not None:
         raise HTTPException(
-            status_code=409,
-            detail={"message": "Organization email already exists. Please login."}
+            status_code=409, detail={"message": "Organization email already exists. Please login."}
         )
 
     try:
-        # 1. Create user FIRST
+        # Hash only after the cheap checks pass
         user = UserModel.model_validate(
             signup_data.user,
             update={
                 "password": PasswordHasher.create(signup_data.user.password),
                 "verified": False,
-                "verification_method": VerificationMethod.EMAIL_OTP
+                "verification_method": VerificationMethod.EMAIL_OTP,
             },
         )
         session.add(user)
-        session.flush()  # user.id now available
+        session.flush()
 
-        # 2. Create organization WITH owner_user_id already set
         organization = OrganizationModel.model_validate(
             signup_data.organization,
             update={
@@ -318,18 +360,21 @@ async def signup(signup_data: SignUp, session: SessionDep):
             },
         )
         session.add(organization)
-
         session.commit()
-
     except IntegrityError as e:
         session.rollback()
-        raise HTTPException(
-        status_code=409, 
-        detail={"message": "Error", "error": str(e.orig)}
-    )
+        raise HTTPException(status_code=409, detail={"message": "Error", "error": str(e.orig)})
 
     session.refresh(user)
     session.refresh(organization)
+    return user, organization
+
+
+''' SIGN UP 🧑‍💻 '''
+@router.post(AuthRoutes.SIGNUP.value, response_model=SignUpResponse)
+async def signup(signup_data: SignUp, session: SessionDep):
+
+    user, organization = await run_in_threadpool(_signup_sync, session, signup_data)
 
     # Generate OTP
     try:
@@ -425,115 +470,91 @@ async def request_otp(payload: OTPRequestSchema, session: SessionDep):
 
 
 
+def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OTPVerifyResponse:
+    user: UserModel | None = session.exec(
+        select(UserModel).where(UserModel.email == payload.identifier)
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
 
+    if not user.verified:
+        user.verified = True
+        session.add(user)
+        session.flush()
 
-''' VERIFY OTP ✅ '''
-@router.post(AuthRoutes.VERIFY_OTP.value, response_model=OTPVerifyResponse)
-async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
-    try:
-        is_valid = await OtpService.verify_otp(
-            purpose=payload.purpose,
-            identifier=payload.identifier,
-            otp=payload.otp,
+        if payload.purpose == OtpPurpose.SIGNUP:
+            org: OrganizationModel | None = MembershipService.get_pending_org_for_user(session, user.id)
+
+            if org is None:
+                # Self-signup student: verified, but no org yet
+                session.commit()
+                session.refresh(user)
+                provisional = create_student_provisional_token(user.id)
+                return OTPVerifyResponse(
+                    message="Email verified. Please subscribe to an organization to continue.",
+                    verified=True,
+                    token=TokenData(access_token=provisional.access_token, refresh_token=""),
+                    is_provisional=True,
+                )
+
+            MembershipService.auto_add_on_verification(
+                session=session, user=user, org_id=org.id, role=UserRole.SUPER_ADMIN,
+                created_by=user.id, verification_method=VerificationMethod.EMAIL_OTP,
+            )
+            try:
+                default_plan: PlatformPlan | None = session.exec(
+                    select(PlatformPlan).where(
+                        PlatformPlan.trial_days > 0,
+                        PlatformPlan.status == PlatformPlanStatus.ACTIVE,
+                    ).order_by(PlatformPlan.price)
+                ).first()
+                if default_plan:
+                    PlatformSubscriptionService.start_trial(
+                        session=session, org_id=org.id, plan_id=default_plan.id,
+                    )
+            except Exception:
+                logging.warning("Could not auto-start trial for org %s", org.id)
+
+            session.commit()
+            session.refresh(user)
+        else:
+            session.commit()   # see note below
+            session.refresh(user)
+
+    membership: OrgMembership | None = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user.id,
+            OrgMembership.status == MembershipStatus.ACTIVE,
+        )
+    ).first()
+
+    if membership is None:
+        return OTPVerifyResponse(
+            message="Email verified. Please subscribe to an organization to continue.",
+            verified=True, token=None,
         )
 
+    return OTPVerifyResponse(
+        message="OTP verified successfully.",
+        verified=True,
+        token=TokenData(
+            access_token=create_access_token(user.id, membership.org_id, membership.role).access_token,
+            refresh_token=create_refresh_token(user.id),
+        ),
+    )
+
+
+# ''' VERIFY OTP ✅ '''
+@router.post(AuthRoutes.VERIFY_OTP.value, response_model=OTPVerifyResponse)
+async def verify_otp(payload: OTPVerifySchema, session: SessionDep) -> OTPVerifyResponse:
+    try:
+        is_valid: bool = await OtpService.verify_otp(
+            purpose=payload.purpose, identifier=payload.identifier, otp=payload.otp,
+        )
         if not is_valid:
             raise HTTPException(status_code=400, detail="Invalid OTP.")
 
-        user = session.exec(
-            select(UserModel).where(UserModel.email == payload.identifier)
-        ).first()
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found.")
-
-        if not user.verified:
-            user.verified = True
-            session.add(user)
-            session.flush()
-
-            if payload.purpose == OtpPurpose.SIGNUP:
-                org = MembershipService.get_pending_org_for_user(session, user.id)
-
-                is_self_signup_student = org is None
-
-                if is_self_signup_student:
-                    # Self-signup student — no org yet, just mark verified.
-                    # They subscribe to orgs via GET /student/organizations.
-                    session.commit()
-                    session.refresh(user)
-
-                    provisional = create_student_provisional_token(user.id)
-
-                    # No token yet — they have no org_id to encode.
-                    # Return verified=True and let frontend redirect to org discovery.
-                    return OTPVerifyResponse(
-                        message="Email verified. Please subscribe to an organization to continue.",
-                        verified=True,
-                        token=TokenData(
-                            access_token=provisional.access_token,
-                            refresh_token="",   # no refresh — provisional only
-                        ),
-                        is_provisional=True,    # signal to frontend to go to org discovery
-                    )
-
-                # SUPER_ADMIN signup — has an org
-                MembershipService.auto_add_on_verification(
-                    session=session,
-                    user=user,
-                    org_id=org.id,
-                    role=UserRole.SUPER_ADMIN,
-                    created_by=user.id,
-                    verification_method=VerificationMethod.EMAIL_OTP,
-                )
-
-                try:
-                    default_plan = session.exec(
-                        select(PlatformPlan).where(
-                            PlatformPlan.trial_days > 0,
-                            PlatformPlan.status == PlatformPlanStatus.ACTIVE,
-                        ).order_by(PlatformPlan.price)
-                    ).first()
-
-                    if default_plan:
-                        PlatformSubscriptionService.start_trial(
-                            session=session,
-                            org_id=org.id,
-                            plan_id=default_plan.id,
-                        )
-                except Exception:
-                    logging.warning("Could not auto-start trial for org %s", org.id)
-
-                session.commit()
-                session.refresh(user)
-
-        # Issue token — requires active membership
-        membership = session.exec(
-            select(OrgMembership).where(
-                OrgMembership.user_id == user.id,
-                OrgMembership.status == MembershipStatus.ACTIVE,
-            )
-        ).first()
-
-        if not membership:
-            # Verified student with no org yet — still no token
-            return OTPVerifyResponse(
-                message="Email verified. Please subscribe to an organization to continue.",
-                verified=True,
-                token=None,
-            )
-
-        access_token = create_access_token(user.id, membership.org_id, membership.role)
-        refresh_token = create_refresh_token(user.id)
-
-        return OTPVerifyResponse(
-            message="OTP verified successfully.",
-            verified=True,
-            token=TokenData(
-                access_token=access_token.access_token,
-                refresh_token=refresh_token,
-            )
-        )
+        return await run_in_threadpool(_complete_otp_verification, session, payload)
 
     except ValueError as e:
         raise HTTPException(status_code=429, detail=str(e))
@@ -542,6 +563,123 @@ async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
     except Exception:
         logging.exception("OTP verification error")
         raise HTTPException(status_code=500, detail="Internal server error")
+    
+
+# ''' VERIFY OTP ✅ '''
+# @router.post(AuthRoutes.VERIFY_OTP.value, response_model=OTPVerifyResponse)
+# async def verify_otp(payload: OTPVerifySchema, session: SessionDep):
+#     try:
+#         is_valid = await OtpService.verify_otp(
+#             purpose=payload.purpose,
+#             identifier=payload.identifier,
+#             otp=payload.otp,
+#         )
+
+#         if not is_valid:
+#             raise HTTPException(status_code=400, detail="Invalid OTP.")
+
+#         user = session.exec(
+#             select(UserModel).where(UserModel.email == payload.identifier)
+#         ).first()
+
+#         if not user:
+#             raise HTTPException(status_code=404, detail="User not found.")
+
+#         if not user.verified:
+#             user.verified = True
+#             session.add(user)
+#             session.flush()
+
+#             if payload.purpose == OtpPurpose.SIGNUP:
+#                 org = MembershipService.get_pending_org_for_user(session, user.id)
+
+#                 is_self_signup_student = org is None
+
+#                 if is_self_signup_student:
+#                     # Self-signup student — no org yet, just mark verified.
+#                     # They subscribe to orgs via GET /student/organizations.
+#                     session.commit()
+#                     session.refresh(user)
+
+#                     provisional = create_student_provisional_token(user.id)
+
+#                     # No token yet — they have no org_id to encode.
+#                     # Return verified=True and let frontend redirect to org discovery.
+#                     return OTPVerifyResponse(
+#                         message="Email verified. Please subscribe to an organization to continue.",
+#                         verified=True,
+#                         token=TokenData(
+#                             access_token=provisional.access_token,
+#                             refresh_token="",   # no refresh — provisional only
+#                         ),
+#                         is_provisional=True,    # signal to frontend to go to org discovery
+#                     )
+
+#                 # SUPER_ADMIN signup — has an org
+#                 MembershipService.auto_add_on_verification(
+#                     session=session,
+#                     user=user,
+#                     org_id=org.id,
+#                     role=UserRole.SUPER_ADMIN,
+#                     created_by=user.id,
+#                     verification_method=VerificationMethod.EMAIL_OTP,
+#                 )
+
+#                 try:
+#                     default_plan = session.exec(
+#                         select(PlatformPlan).where(
+#                             PlatformPlan.trial_days > 0,
+#                             PlatformPlan.status == PlatformPlanStatus.ACTIVE,
+#                         ).order_by(PlatformPlan.price)
+#                     ).first()
+
+#                     if default_plan:
+#                         PlatformSubscriptionService.start_trial(
+#                             session=session,
+#                             org_id=org.id,
+#                             plan_id=default_plan.id,
+#                         )
+#                 except Exception:
+#                     logging.warning("Could not auto-start trial for org %s", org.id)
+
+#                 session.commit()
+#                 session.refresh(user)
+
+#         # Issue token — requires active membership
+#         membership = session.exec(
+#             select(OrgMembership).where(
+#                 OrgMembership.user_id == user.id,
+#                 OrgMembership.status == MembershipStatus.ACTIVE,
+#             )
+#         ).first()
+
+#         if not membership:
+#             # Verified student with no org yet — still no token
+#             return OTPVerifyResponse(
+#                 message="Email verified. Please subscribe to an organization to continue.",
+#                 verified=True,
+#                 token=None,
+#             )
+
+#         access_token = create_access_token(user.id, membership.org_id, membership.role)
+#         refresh_token = create_refresh_token(user.id)
+
+#         return OTPVerifyResponse(
+#             message="OTP verified successfully.",
+#             verified=True,
+#             token=TokenData(
+#                 access_token=access_token.access_token,
+#                 refresh_token=refresh_token,
+#             )
+#         )
+
+#     except ValueError as e:
+#         raise HTTPException(status_code=429, detail=str(e))
+#     except HTTPException:
+#         raise
+#     except Exception:
+#         logging.exception("OTP verification error")
+#         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 '''

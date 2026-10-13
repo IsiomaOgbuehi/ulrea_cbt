@@ -1,5 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import select
 from cbt_service.database.models.subject import SubjectModel
 from cbt_service.clients.auth_client import AuthClient
@@ -22,7 +23,7 @@ TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 
 ''' CREATE SUBJECT 📚 '''
 @router.post("", response_model=SubjectRead)
-async def create_subject(
+def create_subject(
     payload: SubjectCreate,
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),
@@ -33,7 +34,7 @@ async def create_subject(
 
 ''' LIST SUBJECTS 📋 '''
 @router.get("", response_model=list[SubjectRead])
-async def list_subjects(
+def list_subjects(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
@@ -43,7 +44,7 @@ async def list_subjects(
 
 ''' GET SUBJECT BY ID 🔍 '''
 @router.get("/{subject_id}", response_model=SubjectRead)
-async def get_subject(
+def get_subject(
     subject_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -54,7 +55,7 @@ async def get_subject(
 
 ''' UPDATE SUBJECT ✏️ '''
 @router.patch("/{subject_id}", response_model=SubjectRead)
-async def update_subject(
+def update_subject(
     subject_id: UUID,
     payload: SubjectUpdate,
     session: SessionDep,
@@ -66,7 +67,7 @@ async def update_subject(
 
 ''' ARCHIVE SUBJECT 🗄️ '''
 @router.delete("/{subject_id}", response_model=SubjectRead)
-async def archive_subject(
+def archive_subject(
     subject_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),
@@ -77,7 +78,7 @@ async def archive_subject(
 
 ''' ASSIGN STAFF TO SUBJECT 👥 '''
 @router.post("/{subject_id}/assign", response_model=list[SubjectAssignmentRead])
-async def assign_subject(
+def assign_subject(
     subject_id: UUID,
     payload: SubjectAssignRequest,
     session: SessionDep,
@@ -89,7 +90,7 @@ async def assign_subject(
 
 ''' UNASSIGN STAFF FROM SUBJECT ❌ '''
 @router.delete("/{subject_id}/assign/{user_id}", status_code=status.HTTP_204_NO_CONTENT,)
-async def unassign_subject(
+def unassign_subject(
     subject_id: UUID,
     user_id: UUID,
     session: SessionDep,
@@ -105,21 +106,26 @@ async def get_subject_assignments(
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),
 ):
-    assignments = SubjectService.get_assignments(session, subject_id, current_user)
+    # assignments = SubjectService.get_assignments(session, subject_id, current_user)
 
     # Fetch subject from local DB — no HTTP call needed
-    subject = session.exec(
-        select(SubjectModel).where(SubjectModel.id == subject_id)
-    ).first()
+    # subject = session.exec(
+    #     select(SubjectModel).where(SubjectModel.id == subject_id)
+    # ).first()
+
+    subject, assignments = await run_in_threadpool(
+        SubjectService.get_assignments_with_subject, session, subject_id, current_user
+    )
 
     # Collect all user IDs we need — avoids N+1
-    user_ids = set()
+    user_ids: set[UUID] = set()
+
     for a in assignments:
         user_ids.add(a.assigned_to)
         user_ids.add(a.assigned_by)
 
     auth_client = AuthClient(redis_client)
-    users = await auth_client.get_users_bulk(list(user_ids))
+    users = await auth_client.get_users_bulk(list(user_ids), current_user.org_id)
 
     return [
         SubjectAssignmentEnriched(

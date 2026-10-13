@@ -6,84 +6,247 @@ from cbt_service.core.settings import settings
 from cbt_service.schemas.item_subject_schemas import UserSummary
 
 
+# class AuthClient:
+#     """
+#     Internal HTTP client for calling the auth service.
+#     Uses Redis to cache user lookups for 5 minutes.
+#     """
+
+#     def __init__(self, redis_client, base_url: str = None):
+#         self.base_url = base_url or settings.AUTH_SERVICE_URL
+#         self.redis = redis_client
+
+#     async def get_user(self, user_id: UUID) -> UserSummary | None:
+#         cache_key = f"user_cache:{user_id}"
+
+#         # Check cache first
+#         cached = await self.redis.get(cache_key)
+#         if cached:
+#             return UserSummary(**json.loads(cached))
+
+#         # Call auth service
+#         try:
+#             async with httpx.AsyncClient() as client:
+#                 response = await client.get(
+#                     f"{self.base_url}/internal/users/{user_id}",
+#                     headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+#                     timeout=5.0,
+#                 )
+#                 if response.status_code == 200:
+#                     user = UserSummary(**response.json())
+#                     # Cache for 5 minutes
+#                     await self.redis.set(
+#                         cache_key,
+#                         json.dumps(user.model_dump(mode="json")),
+#                         ex=300
+#                     )
+#                     return user
+#                 return None
+#         except httpx.TimeoutException:
+#             return None  # degrade gracefully — return None, not 500
+
+#     async def get_users_bulk(self, user_ids: list[UUID]) -> dict[str, UserSummary]:
+#         """Fetch multiple users in one call — avoids N+1 problem."""
+#         results = {}
+#         uncached_ids = []
+
+#         # Check cache for each
+#         for user_id in user_ids:
+#             cache_key = f"user_cache:{user_id}"
+#             cached = await self.redis.get(cache_key)
+#             if cached:
+#                 results[str(user_id)] = UserSummary(**json.loads(cached))
+#             else:
+#                 uncached_ids.append(user_id)
+
+#         # Fetch uncached in one request
+#         print(f"{self.base_url}/internal/users/bulk")
+#         if uncached_ids:
+#             try:
+#                 async with httpx.AsyncClient() as client:
+#                     response = await client.post(
+#                         f"{self.base_url}/internal/users/bulk",
+#                         json={"user_ids": [str(i) for i in uncached_ids]},
+#                         headers={
+#                             "X-Internal-Secret": settings.INTERNAL_SECRET
+#                         },
+#                         timeout=5.0,
+#                     )
+#                     if response.status_code == 200:
+#                         for user_data in response.json():
+#                             user = UserSummary(**user_data)
+#                             results[str(user.id)] = user
+#                             # Cache each result
+#                             await self.redis.set(
+#                                 f"user_cache:{user.id}",
+#                                 json.dumps(user.model_dump(mode="json")),
+#                                 ex=300
+#                             )
+#             except httpx.TimeoutException:
+#                 pass  # return whatever we have from cache
+
+#         return results
+
 class AuthClient:
     """
     Internal HTTP client for calling the auth service.
-    Uses Redis to cache user lookups for 5 minutes.
+
+    Features:
+    - Redis caching for 5 minutes.
+    - Single-user and bulk user lookups.
+    - Async HTTP requests.
+    - Graceful handling of timeouts and auth-service failures.
     """
 
-    def __init__(self, redis_client, base_url: str = None):
-        self.base_url = base_url or settings.AUTH_SERVICE_URL
+    CACHE_TTL_SECONDS = 300
+    REQUEST_TIMEOUT_SECONDS = 5.0
+
+    def __init__(self, redis_client, base_url: str | None = None):
+        self.base_url = (
+            base_url or settings.AUTH_SERVICE_URL
+        ).rstrip("/")
         self.redis = redis_client
 
+    @staticmethod
+    def _cache_key(user_id: UUID) -> str:
+        return f"user_cache:{user_id}"
+
     async def get_user(self, user_id: UUID) -> UserSummary | None:
-        cache_key = f"user_cache:{user_id}"
+        """Fetch one user, using Redis before calling auth service."""
 
-        # Check cache first
-        cached = await self.redis.get(cache_key)
-        if cached:
-            return UserSummary(**json.loads(cached))
+        cache_key = self._cache_key(user_id)
 
-        # Call auth service
         try:
-            async with httpx.AsyncClient() as client:
+            cached = await self.redis.get(cache_key)
+
+            if cached:
+                return UserSummary(**json.loads(cached))
+
+        except Exception:
+            # A Redis failure should not prevent a direct auth lookup.
+            pass
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.REQUEST_TIMEOUT_SECONDS
+            ) as client:
                 response = await client.get(
                     f"{self.base_url}/internal/users/{user_id}",
-                    headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
-                    timeout=5.0,
+                    headers={
+                        "X-Internal-Secret": settings.INTERNAL_SECRET,
+                    },
                 )
-                if response.status_code == 200:
-                    user = UserSummary(**response.json())
-                    # Cache for 5 minutes
-                    await self.redis.set(
-                        cache_key,
-                        json.dumps(user.model_dump(mode="json")),
-                        ex=300
-                    )
-                    return user
-                return None
-        except httpx.TimeoutException:
-            return None  # degrade gracefully — return None, not 500
 
-    async def get_users_bulk(self, user_ids: list[UUID]) -> dict[str, UserSummary]:
-        """Fetch multiple users in one call — avoids N+1 problem."""
-        results = {}
-        uncached_ids = []
+                if response.status_code == 404:
+                    return None
 
-        # Check cache for each
-        for user_id in user_ids:
-            cache_key = f"user_cache:{user_id}"
-            cached = await self.redis.get(cache_key)
-            if cached:
-                results[str(user_id)] = UserSummary(**json.loads(cached))
-            else:
-                uncached_ids.append(user_id)
+                response.raise_for_status()
+                user = UserSummary(**response.json())
 
-        # Fetch uncached in one request
-        print(f"{self.base_url}/internal/users/bulk")
-        if uncached_ids:
+        except (httpx.HTTPError, ValueError):
+            return None
+
+        try:
+            await self.redis.set(
+                cache_key,
+                json.dumps(user.model_dump(mode="json")),
+                ex=self.CACHE_TTL_SECONDS,
+            )
+        except Exception:
+            # The user lookup succeeded; caching is optional.
+            pass
+
+        return user
+
+    async def get_users_bulk(
+        self,
+        user_ids: list[UUID],
+        org_id: UUID | None = None,
+    ) -> dict[str, UserSummary]:
+        """
+        Fetch multiple users in one request.
+
+        Cached users are returned immediately. Uncached IDs are fetched
+        in one bulk request.
+
+        Pass org_id when retrieving users for a particular organization.
+        """
+
+        results: dict[str, UserSummary] = {}
+
+        # Remove duplicates while preserving order.
+        unique_ids = list(dict.fromkeys(user_ids))
+
+        if not unique_ids:
+            return results
+
+        uncached_ids: list[UUID] = []
+
+        # Check Redis cache.
+        for user_id in unique_ids:
+            cache_key = self._cache_key(user_id)
+
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        f"{self.base_url}/internal/users/bulk",
-                        json={"user_ids": [str(i) for i in uncached_ids]},
-                        headers={
-                            "X-Internal-Secret": settings.INTERNAL_SECRET
-                        },
-                        timeout=5.0,
+                cached = await self.redis.get(cache_key)
+            except Exception:
+                # Treat Redis errors as cache misses.
+                cached = None
+
+            if cached:
+                try:
+                    results[str(user_id)] = UserSummary(
+                        **json.loads(cached)
                     )
-                    if response.status_code == 200:
-                        for user_data in response.json():
-                            user = UserSummary(**user_data)
-                            results[str(user.id)] = user
-                            # Cache each result
-                            await self.redis.set(
-                                f"user_cache:{user.id}",
-                                json.dumps(user.model_dump(mode="json")),
-                                ex=300
-                            )
-            except httpx.TimeoutException:
-                pass  # return whatever we have from cache
+                    continue
+                except (ValueError, TypeError):
+                    # Ignore malformed cached data and fetch it again.
+                    pass
+
+            uncached_ids.append(user_id)
+
+        if not uncached_ids:
+            return results
+
+        payload = {
+            "user_ids": [str(user_id) for user_id in uncached_ids],
+        }
+
+        if org_id is not None:
+            payload["org_id"] = str(org_id)
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.REQUEST_TIMEOUT_SECONDS
+            ) as client:
+                response = await client.post(
+                    f"{self.base_url}/internal/users/bulk",
+                    json=payload,
+                    headers={
+                        "X-Internal-Secret": settings.INTERNAL_SECRET,
+                    },
+                )
+
+                response.raise_for_status()
+
+                for user_data in response.json():
+                    user = UserSummary(**user_data)
+                    user_id = str(user.id)
+
+                    results[user_id] = user
+
+                    try:
+                        await self.redis.set(
+                            self._cache_key(user.id),
+                            json.dumps(user.model_dump(mode="json")),
+                            ex=self.CACHE_TTL_SECONDS,
+                        )
+                    except Exception:
+                        # Do not discard successful API results if Redis fails.
+                        pass
+
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Return whatever was available from cache.
+            pass
 
         return results
 

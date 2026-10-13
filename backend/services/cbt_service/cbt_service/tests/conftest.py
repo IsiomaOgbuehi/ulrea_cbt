@@ -139,7 +139,7 @@ def mock_redis(monkeypatch):
 @pytest.fixture(autouse=True)
 def mock_auth_client(monkeypatch):
     """Prevent real HTTP calls to auth service in tests."""
-    async def fake_get_users_bulk(self, user_ids):
+    async def fake_get_users_bulk(self, user_ids, org_id):
         # Return a fake UserSummary for each requested id
         from cbt_service.schemas.item_subject_schemas import UserSummary
         return {

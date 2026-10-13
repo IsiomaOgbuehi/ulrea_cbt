@@ -10,7 +10,7 @@ router = APIRouter(prefix="/exams/{exam_id}/violations", tags=["violations"])
 
 
 @router.get("", response_model=list[ViolationRead])
-async def list_exam_violations(
+def list_exam_violations(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = TeacherOrAbove,
@@ -19,7 +19,7 @@ async def list_exam_violations(
 
 
 @router.patch("/{violation_id}/review", response_model=ViolationRead)
-async def review_violation(
+def review_violation(
     exam_id: UUID,  # kept in path for REST consistency; not otherwise used since violation_id is globally unique
     violation_id: UUID,
     session: SessionDep,

@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, col
 
 from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
 from cbt_service.schemas.item_subject_schemas import SubjectCreate, SubjectUpdate, CurrentUser
@@ -106,40 +106,62 @@ class SubjectService:
         user_ids: list[UUID],
         current_user: CurrentUser,
     ) -> list[SubjectAssignment]:
-        # Verify subject exists and belongs to org
-        subject = session.exec(
-            select(SubjectModel).where(
-                SubjectModel.id == subject_id,
-                SubjectModel.org_id == current_user.org_id,
-            )
-        ).first()
-        if not subject:
-            raise HTTPException(status_code=404, detail="Subject not found.")
 
-        assignments = []
-        for user_id in user_ids:
-            # Skip if already assigned
-            existing = session.exec(
+        unique_ids: list[UUID] = list(dict.fromkeys(user_ids))
+        existing: dict[UUID, SubjectAssignment] = {
+            a.assigned_to: a
+            for a in session.exec(
                 select(SubjectAssignment).where(
                     SubjectAssignment.subject_id == subject_id,
-                    SubjectAssignment.assigned_to == user_id,
+                    col(SubjectAssignment.assigned_to).in_(unique_ids),
                 )
-            ).first()
-            if existing:
-                assignments.append(existing)
-                continue
-
-            assignment = SubjectAssignment(
-                subject_id=subject_id,
-                org_id=current_user.org_id,
-                assigned_to=user_id,
-                assigned_by=current_user.id,
+            ).all()
+        }
+        created = {
+            uid: SubjectAssignment(
+                subject_id=subject_id, org_id=current_user.org_id,
+                assigned_to=uid, assigned_by=current_user.id,
             )
-            session.add(assignment)
-            assignments.append(assignment)
-
+            for uid in unique_ids if uid not in existing
+        }
+        session.add_all(created.values())
         session.commit()
-        return assignments
+        return [existing.get(uid) or created[uid] for uid in unique_ids]
+        
+        # Verify subject exists and belongs to org
+        # subject = session.exec(
+        #     select(SubjectModel).where(
+        #         SubjectModel.id == subject_id,
+        #         SubjectModel.org_id == current_user.org_id,
+        #     )
+        # ).first()
+        # if not subject:
+        #     raise HTTPException(status_code=404, detail="Subject not found.")
+
+        # assignments = []
+        # for user_id in user_ids:
+        #     # Skip if already assigned
+        #     existing = session.exec(
+        #         select(SubjectAssignment).where(
+        #             SubjectAssignment.subject_id == subject_id,
+        #             SubjectAssignment.assigned_to == user_id,
+        #         )
+        #     ).first()
+        #     if existing:
+        #         assignments.append(existing)
+        #         continue
+
+        #     assignment = SubjectAssignment(
+        #         subject_id=subject_id,
+        #         org_id=current_user.org_id,
+        #         assigned_to=user_id,
+        #         assigned_by=current_user.id,
+        #     )
+        #     session.add(assignment)
+        #     assignments.append(assignment)
+
+        # session.commit()
+        # return assignments
 
     @staticmethod
     def unassign_user(
@@ -183,6 +205,26 @@ class SubjectService:
                 SubjectAssignment.subject_id == subject_id,
             )
         ).all()
+
+    
+    @staticmethod
+    def get_assignments_with_subject(
+        session: Session, subject_id: UUID, current_user: CurrentUser
+    ) -> tuple[SubjectModel, list[SubjectAssignment]]:
+        subject = session.exec(
+            select(SubjectModel).where(
+                SubjectModel.id == subject_id,
+                SubjectModel.org_id == current_user.org_id,
+            )
+        ).first()
+        if subject is None:
+            raise HTTPException(status_code=404, detail="Subject not found.")
+        assignments = list(
+            session.exec(
+                select(SubjectAssignment).where(SubjectAssignment.subject_id == subject_id)
+            ).all()
+        )
+        return subject, assignments
 
 
     @staticmethod

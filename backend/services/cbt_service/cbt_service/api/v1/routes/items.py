@@ -1,5 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import require_roles
@@ -19,7 +20,7 @@ AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 
 ''' CREATE ITEM ➕ '''
 @router.post("", response_model=ItemRead)
-async def create_item(
+def create_item(
     subject_id: UUID,
     payload: ItemCreate,
     session: SessionDep,
@@ -31,7 +32,7 @@ async def create_item(
 
 ''' LIST ITEMS 📋 '''
 @router.get("", response_model=PaginatedResponse[ItemRead])
-async def list_items(
+def list_items(
     subject_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -59,7 +60,7 @@ async def list_items(
 
 ''' GET ITEM BY ID 🔍 '''
 @router.get("/{item_id}", response_model=ItemRead)
-async def get_item(
+def get_item(
     subject_id: UUID,
     item_id: UUID,
     session: SessionDep,
@@ -71,7 +72,7 @@ async def get_item(
 
 ''' UPDATE ITEM ✏️ '''
 @router.patch("/{item_id}", response_model=ItemRead)
-async def update_item(
+def update_item(
     subject_id: UUID,
     item_id: UUID,
     payload: ItemUpdate,
@@ -84,7 +85,7 @@ async def update_item(
 
 ''' UPDATE ITEM STATUS 🔄 '''
 @router.patch("/{item_id}/status", response_model=ItemRead)
-async def update_item_status(
+def update_item_status(
     subject_id: UUID,
     item_id: UUID,
     payload: ItemStatusUpdate,
@@ -97,7 +98,7 @@ async def update_item_status(
 
 ''' DELETE (ARCHIVE) ITEM 🗄️ '''
 @router.delete("/{item_id}", status_code=204)
-async def delete_item(
+def delete_item(
     subject_id: UUID,
     item_id: UUID,
     session: SessionDep,
@@ -108,7 +109,7 @@ async def delete_item(
 
 ''' BULK UPLOAD TEMPLATE ⬇️ '''
 @router.get("/bulk/template", tags=["bulk-upload"])
-async def download_template(
+def download_template(
     subject_id: UUID,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
@@ -140,7 +141,8 @@ async def bulk_upload_items(
         raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
 
     file_bytes = await read_upload_within_limit(file)
-    return BulkUploadService.process_upload(
+    return await run_in_threadpool(
+        BulkUploadService.process_upload,
         session=session,
         file_bytes=file_bytes,
         filename=file.filename,

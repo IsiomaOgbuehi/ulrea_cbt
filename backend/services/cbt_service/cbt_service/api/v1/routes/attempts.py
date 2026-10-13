@@ -1,7 +1,11 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlmodel import select
+from starlette.concurrency import run_in_threadpool
 
+from cbt_service.core.redis.redis_client import redis_client
+from cbt_service.clients.auth_client import AuthClient
 from cbt_service.services.violation.violation_service import ViolationService
 from cbt_service.database.models.exam import ExamModel
 from cbt_service.database.database import SessionDep
@@ -21,7 +25,7 @@ from cbt_service.schemas.attempt_schemas import (
 )
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.dependencies import require_roles
-from cbt_service.services.attempt_service import AttemptService
+from cbt_service.services.attempt_service import AttemptService, build_exam_attempts_workbook
 
 router = APIRouter(prefix="/attempts", tags=["attempts"])
 
@@ -32,7 +36,7 @@ StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 
 ''' START ATTEMPT 🚀 '''
 @router.post("", response_model=AttemptRead)
-async def start_attempt(
+def start_attempt(
     payload: StartAttemptRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
@@ -50,26 +54,26 @@ async def start_attempt(
 
 ''' GET ATTEMPT 🔍 '''
 @router.get("/{attempt_id}", response_model=AttemptRead)
-async def get_attempt(
+def get_attempt(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    attempt = await AttemptService.get_attempt(session, attempt_id, current_user.id)
+    attempt = AttemptService.get_attempt(session, attempt_id, current_user.id)
     # return AttemptRead.model_validate(attempt, from_attributes=True)
     return AttemptService._to_attempt_read(session, attempt)
 
 
 ''' SAVE RESPONSE 💾 '''
 @router.post("/{attempt_id}/responses", response_model=ResponseRead)
-async def save_response(
+def save_response(
     attempt_id: UUID,
     payload: SaveResponseRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Autosave a student's answer. Call on every answer change."""
-    response = await AttemptService.save_response(
+    response = AttemptService.save_response(
         session=session,
         attempt_id=attempt_id,
         payload=payload,
@@ -80,18 +84,18 @@ async def save_response(
 
 ''' GET RESPONSES 📋 '''
 @router.get("/{attempt_id}/responses", response_model=list[ResponseRead])
-async def get_responses(
+def get_responses(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    responses = await AttemptService.get_responses(session, attempt_id, current_user.id)
+    responses = AttemptService.get_responses(session, attempt_id, current_user.id)
     return [ResponseRead.model_validate(r, from_attributes=True) for r in responses]
 
 
 ''' SUBMIT ATTEMPT ✅ '''
 @router.post("/{attempt_id}/submit", response_model=AttemptRead)
-async def submit_attempt(
+def submit_attempt(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
@@ -103,7 +107,7 @@ async def submit_attempt(
     For now accepts it as empty — extend with AuthClient pattern.
     """
     
-    attempt = await AttemptService.submit(
+    attempt = AttemptService.submit(
         session=session,
         attempt_id=attempt_id,
         student_id=current_user.id,
@@ -115,7 +119,7 @@ async def submit_attempt(
 
 ''' MANUAL REVIEW ✍️ '''
 @router.post("/responses/{response_id}/review", response_model=ResponseRead)
-async def manual_review(
+def manual_review(
     response_id: UUID,
     payload: ManualReviewRequest,
     session: SessionDep,
@@ -135,20 +139,20 @@ async def manual_review(
 
 ''' GET EXAM CONTENT FOR ATTEMPT 📄 '''
 @router.get("/{attempt_id}/exam", response_model=AttemptExamRead)
-async def get_attempt_exam(
+def get_attempt_exam(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Returns exam structure for an in-progress attempt. No answer keys."""
-    return await AttemptService.get_exam_content(session, attempt_id, current_user.id)
+    return AttemptService.get_exam_content(session, attempt_id, current_user.id)
 
 
 
 
 ''' COHORT ATTEMPTS 📊 '''
 @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
-async def get_cohort_attempts(
+def get_cohort_attempts(
     exam_id: UUID,
     cohort_id: UUID,
     session: SessionDep,
@@ -159,38 +163,39 @@ async def get_cohort_attempts(
 
 ''' ATTEMPT DETAIL (STAFF VIEW) 🔍 '''
 @router.get("/{attempt_id}/detail", response_model=AttemptDetailRead)
-async def get_attempt_detail(
+def get_attempt_detail(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
-    return await AttemptService.get_attempt_detail_for_staff(session, attempt_id, current_user)
+    return AttemptService.get_attempt_detail_for_staff(session, attempt_id, current_user)
 
 
 
 ''' RESET/RESCHEDULE ATTEMPT 🔄 '''
 @router.post("/{attempt_id}/reset", response_model=AttemptRead)
-async def reset_attempt(
+def reset_attempt(
     attempt_id: UUID,
     payload: ResetAttemptRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),
-):
+) -> AttemptRead:
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
-    return AttemptService._to_attempt_read(session, attempt)
+    exam = session.get(ExamModel, attempt.exam_id)
+    return AttemptService._to_attempt_read_new(attempt, exam)
 
 
 
 ''' ATTEMPT STATUS (HEARTBEAT) 💓 '''
 @router.get("/{attempt_id}/status", response_model=AttemptStatusRead)
-async def get_attempt_status(
+def get_attempt_status(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(StudentOrAbove),
 ) -> AttemptStatusRead:
     """Lightweight poll: status, time left, and violation count. Enforces expiry."""
     # get_attempt checks ownership and auto-submits if time has run out
-    attempt = await AttemptService.get_attempt(session, attempt_id, current_user.id)
+    attempt = AttemptService.get_attempt(session, attempt_id, current_user.id)
     exam = session.exec(
         select(ExamModel).where(ExamModel.id == attempt.exam_id)
     ).first()
@@ -202,4 +207,57 @@ async def get_attempt_status(
         violation_count=ViolationService._count_violations(session, attempt_id),
         max_violations=exam.max_violations if exam else None,
         server_time=read.server_time,
+    )
+
+
+
+@router.get("/{exam_id}/result/export")
+async def export_exam_attempts_to_excel(
+    exam_id: UUID,
+    session: SessionDep,
+    ctx=Depends(TeacherOrAbove),
+):
+    """Download all attempts for an exam as an Excel workbook."""
+
+    org_id = ctx.membership.org_id
+
+    # Load data with synchronous database operations.
+    export_data = await run_in_threadpool(
+        AttemptService.load_exam_export_data,
+        session,
+        exam_id,
+        org_id,
+    )
+
+    # Fetch student profiles in one request to the auth service.
+    auth_client = AuthClient(redis_client)
+    
+    users_by_id = await auth_client.get_users_bulk(
+        user_ids=[
+            attempt.student_id
+            for attempt in export_data.attempts
+        ],
+        org_id=org_id,
+    )
+
+    # Workbook generation can also run outside the event loop.
+    output = await run_in_threadpool(
+        build_exam_attempts_workbook,
+        export_data,
+        users_by_id,
+    )
+
+    filename = f"exam-{exam_id}-attempts.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"'
+            ),
+        },
     )

@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
-from sqlmodel import Session, select, delete as sql_delete
+from sqlmodel import Session, select, delete as sql_delete, col, func
 from sqlalchemy import or_, and_
 
 from cbt_service.database.models.subject import SubjectAssignment, SubjectModel
@@ -240,9 +240,14 @@ class ExamService:
             raise HTTPException(status_code=403, detail="You can only submit your own exams.")
 
         # Must have at least one item
-        item_count = len(session.exec(
-            select(ExamItem).where(ExamItem.exam_id == exam_id)
-        ).all())
+        # item_count = len(session.exec(
+        #     select(ExamItem).where(ExamItem.exam_id == exam_id)
+        # ).all())
+
+        item_count: int = session.exec(
+            select(func.count()).select_from(ExamItem).where(ExamItem.exam_id == exam_id)
+        ).one()
+        
         if item_count == 0:
             raise HTTPException(status_code=400, detail="Exam must have at least one question before submission.")
 
@@ -325,44 +330,67 @@ class ExamService:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_edit(session, exam, current_user)
 
-        # Get current max order
-        existing = session.exec(
-            select(ExamItem).where(ExamItem.exam_id == exam_id)
-        ).all()
-        next_order = len(existing)
-        total_marks = sum(i.marks for i in existing)    # existing marks
+        existing = session.exec(select(ExamItem).where(ExamItem.exam_id == exam_id)).all()
+        next_order: int = len(existing)
+        total_marks = sum(i.marks for i in existing)
+        existing_item_ids: set[UUID] = {i.item_id for i in existing}
 
-        added = []
-        for item_id in payload.item_ids:
-            # Prevent duplicate items in same exam
-            duplicate = session.exec(
-                select(ExamItem).where(
-                    ExamItem.exam_id == exam_id,
-                    ExamItem.item_id == item_id,
-                )
-            ).first()
-            if duplicate:
+        added: list[ExamItem] = []
+        for item_id in dict.fromkeys(payload.item_ids):
+            if item_id in existing_item_ids:
                 continue
-
             exam_item = ExamItem(
-                exam_id=exam_id,
-                section_id=payload.section_id,
-                item_id=item_id,
-                org_id=current_user.org_id,
-                order=next_order,
+                exam_id=exam_id, section_id=payload.section_id, item_id=item_id,
+                org_id=current_user.org_id, order=next_order,
             )
             session.add(exam_item)
             added.append(exam_item)
             next_order += 1
             total_marks += exam_item.marks
 
-        # Update total marks on exam
-        exam.total_marks = total_marks  # + sum(i.marks for i in added)
+        exam.total_marks = total_marks
         session.add(exam)
         session.commit()
-        for item in added:
-            session.refresh(item)
-        return added
+        return added   # delete the per-item refresh loop
+
+        # Get current max order
+        # existing = session.exec(
+        #     select(ExamItem).where(ExamItem.exam_id == exam_id)
+        # ).all()
+        # next_order = len(existing)
+        # total_marks = sum(i.marks for i in existing)    # existing marks
+
+        # added = []
+        # for item_id in payload.item_ids:
+        #     # Prevent duplicate items in same exam
+        #     duplicate = session.exec(
+        #         select(ExamItem).where(
+        #             ExamItem.exam_id == exam_id,
+        #             ExamItem.item_id == item_id,
+        #         )
+        #     ).first()
+        #     if duplicate:
+        #         continue
+
+        #     exam_item = ExamItem(
+        #         exam_id=exam_id,
+        #         section_id=payload.section_id,
+        #         item_id=item_id,
+        #         org_id=current_user.org_id,
+        #         order=next_order,
+        #     )
+        #     session.add(exam_item)
+        #     added.append(exam_item)
+        #     next_order += 1
+        #     total_marks += exam_item.marks
+
+        # # Update total marks on exam
+        # exam.total_marks = total_marks  # + sum(i.marks for i in added)
+        # session.add(exam)
+        # session.commit()
+        # for item in added:
+        #     session.refresh(item)
+        # return added
 
     @staticmethod
     def remove_item(
@@ -401,45 +429,92 @@ class ExamService:
     # --------------------------------------------------------
 
     @staticmethod
-    def assign_students(
-        session: Session, exam_id: UUID,
-        payload: AssignStudentsRequest, current_user: CurrentUser
+    def _bulk_assign(
+        session: Session,
+        exam_id: UUID,
+        student_ids: list[UUID],
+        org_id: UUID,
+        assigned_by: UUID,
+        scheduled_at: datetime | None,
+        cohort_id: UUID | None = None,
     ) -> list[ExamAssignment]:
-        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-
-        if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
-            raise HTTPException(
-                status_code=400,
-                detail="Students can only be assigned to approved or active exams."
-            )
-
-        assignments = []
-        for student_id in payload.student_ids:
-            existing = session.exec(
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        existing: dict[UUID, ExamAssignment] = {
+            a.student_id: a
+            for a in session.exec(
                 select(ExamAssignment).where(
                     ExamAssignment.exam_id == exam_id,
-                    ExamAssignment.student_id == student_id,
+                    col(ExamAssignment.student_id).in_(unique_ids),
                 )
-            ).first()
-            if existing:
-                assignments.append(existing)
+            ).all()
+        }
+        created: dict[UUID, ExamAssignment] = {}
+        for sid in unique_ids:
+            if sid in existing:
                 continue
-
-            assignment = ExamAssignment(
-                exam_id=exam_id,
-                student_id=student_id,
-                org_id=current_user.org_id,
-                assigned_by=current_user.id,
-                scheduled_at=payload.scheduled_at,
+            created[sid] = ExamAssignment(
+                exam_id=exam_id, student_id=sid, cohort_id=cohort_id, org_id=org_id,
+                assigned_by=assigned_by, scheduled_at=scheduled_at,
             )
-            session.add(assignment)
-            assignments.append(assignment)
+        session.add_all(created.values())
+        return [existing.get(sid) or created[sid] for sid in unique_ids]
 
-        session.commit()
+    @staticmethod
+    def assign_students(session: Session, exam_id: UUID, payload: AssignStudentsRequest, current_user: CurrentUser) -> list[ExamAssignment]:
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
+            raise HTTPException(status_code=400, detail="Students can only be assigned to approved or active exams.")
+
+        assignments = ExamService._bulk_assign(
+            session, exam_id, payload.student_ids, current_user.org_id,
+            current_user.id, payload.scheduled_at,
+        )
         _log(session, exam_id, exam.org_id, current_user.id, "students_assigned",
-             {"count": len(payload.student_ids)})
-        session.commit()
+            {"count": len(payload.student_ids)})
+        session.commit()  # one commit: assignments + audit log together
         return assignments
+
+
+    # @staticmethod
+    # def assign_students(
+    #     session: Session, exam_id: UUID,
+    #     payload: AssignStudentsRequest, current_user: CurrentUser
+    # ) -> list[ExamAssignment]:
+    #     exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+
+    #     if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
+    #         raise HTTPException(
+    #             status_code=400,
+    #             detail="Students can only be assigned to approved or active exams."
+    #         )
+
+    #     assignments = []
+    #     for student_id in payload.student_ids:
+    #         existing = session.exec(
+    #             select(ExamAssignment).where(
+    #                 ExamAssignment.exam_id == exam_id,
+    #                 ExamAssignment.student_id == student_id,
+    #             )
+    #         ).first()
+    #         if existing:
+    #             assignments.append(existing)
+    #             continue
+
+    #         assignment = ExamAssignment(
+    #             exam_id=exam_id,
+    #             student_id=student_id,
+    #             org_id=current_user.org_id,
+    #             assigned_by=current_user.id,
+    #             scheduled_at=payload.scheduled_at,
+    #         )
+    #         session.add(assignment)
+    #         assignments.append(assignment)
+
+    #     session.commit()
+    #     _log(session, exam_id, exam.org_id, current_user.id, "students_assigned",
+    #          {"count": len(payload.student_ids)})
+    #     session.commit()
+    #     return assignments
 
     
 

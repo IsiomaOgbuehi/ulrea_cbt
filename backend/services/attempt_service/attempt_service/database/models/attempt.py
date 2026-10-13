@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, JSON
+from sqlalchemy import UniqueConstraint
 
 from attempt_service.database.models.enums import AttemptStatus
 

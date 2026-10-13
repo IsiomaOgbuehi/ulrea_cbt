@@ -10,14 +10,14 @@ router = APIRouter(prefix="/attempts/{attempt_id}/violations", tags=["violations
 
 
 @router.post("", response_model=ViolationCreateResult, status_code=201)
-async def report_violation(
+def report_violation(
     attempt_id: UUID,
     payload: ViolationCreate,
     response: Response,
     session: SessionDep,
     current_user: CurrentUser = StudentOnly,
 ):
-    result: ViolationCreateResult = await ViolationService.create(
+    result: ViolationCreateResult = ViolationService.create(
         session, attempt_id, payload, current_user
     )
     if result.violation is None:
@@ -26,7 +26,7 @@ async def report_violation(
 
 
 @router.get("", response_model=list[ViolationRead])
-async def list_attempt_violations(
+def list_attempt_violations(
     attempt_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = TeacherOrAbove,

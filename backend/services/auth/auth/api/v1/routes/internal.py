@@ -25,29 +25,59 @@ class UserSummaryResponse(BaseModel):
 
 class BulkUserRequest(BaseModel):
     user_ids: list[UUID]
+    org_id: UUID
 
 
-@router.get("/users/{user_id}", response_model=UserSummaryResponse)
-async def get_user_internal(
+# @router.get("/users/{user_id}", response_model=UserSummaryResponse)
+# async def get_user_internal(
+#     user_id: UUID,
+#     session: SessionDep,
+#     _: str = Depends(verify_internal_secret),
+# ):
+    
+#     user, membership = session.exec(
+#         select(UserModel, OrgMembership)
+#         .join(
+#             OrgMembership,
+#             OrgMembership.user_id == UserModel.id,
+#             isouter=True,
+#         )
+#         .where(UserModel.id == user_id)
+#     ).first()
+    
+#     if not user:
+#         raise HTTPException(status_code=404, detail="User not found.")
+
+#     return UserSummaryResponse(
+#         id=user.id,
+#         firstname=user.firstname,
+#         lastname=user.lastname,
+#         email=user.email,
+#         role=membership.role if membership else None,
+#     )
+
+@router.get(
+    "/users/{user_id}",
+    response_model=UserSummaryResponse,
+)
+def get_user_internal(
     user_id: UUID,
     session: SessionDep,
     _: str = Depends(verify_internal_secret),
 ):
-    # user = session.exec(
-    #     select(UserModel).where(UserModel.id == user_id)
-    # ).first()
-    user, membership = session.exec(
+    result = session.exec(
         select(UserModel, OrgMembership)
-        .join(
+        .outerjoin(
             OrgMembership,
             OrgMembership.user_id == UserModel.id,
-            isouter=True,
         )
         .where(UserModel.id == user_id)
     ).first()
-    
-    if not user:
+
+    if not result:
         raise HTTPException(status_code=404, detail="User not found.")
+
+    user, membership = result
 
     return UserSummaryResponse(
         id=user.id,
@@ -58,43 +88,74 @@ async def get_user_internal(
     )
 
 
-@router.post("/users/bulk", response_model=list[UserSummaryResponse])
-async def get_users_bulk_internal(
+# @router.post("/users/bulk", response_model=list[UserSummaryResponse])
+# async def get_users_bulk_internal(
+#     payload: BulkUserRequest,
+#     session: SessionDep,
+#     _: str = Depends(verify_internal_secret),
+# ):
+#     # users = session.exec(
+#     #     select(UserModel).where(UserModel.id.in_(payload.user_ids))
+#     # ).all()
+
+#     results = session.exec(
+#         select(UserModel, OrgMembership)
+#         .join(
+#             OrgMembership,
+#             OrgMembership.user_id == UserModel.id,
+#             isouter=True,
+#         )
+#         .where(UserModel.id.in_(payload.user_ids))
+#     ).all()
+
+#     return [
+#         UserSummaryResponse(
+#             id=u.id,
+#             firstname=u.firstname,
+#             lastname=u.lastname,
+#             email=u.email,
+#             role=m.role.value if m else None,
+#         )
+#         for u, m in results
+#     ]
+
+@router.post(
+    "/users/bulk",
+    response_model=list[UserSummaryResponse],
+)
+def get_users_bulk_internal(
     payload: BulkUserRequest,
     session: SessionDep,
     _: str = Depends(verify_internal_secret),
 ):
-    # users = session.exec(
-    #     select(UserModel).where(UserModel.id.in_(payload.user_ids))
-    # ).all()
+    if not payload.user_ids:
+        return []
 
     results = session.exec(
         select(UserModel, OrgMembership)
-        .join(
+        .outerjoin(
             OrgMembership,
-            OrgMembership.user_id == UserModel.id,
-            isouter=True,
+            (OrgMembership.user_id == UserModel.id)
+            & (OrgMembership.org_id == payload.org_id),
         )
         .where(UserModel.id.in_(payload.user_ids))
     ).all()
 
     return [
         UserSummaryResponse(
-            id=u.id,
-            firstname=u.firstname,
-            lastname=u.lastname,
-            email=u.email,
-            role=m.role.value if m else None,
+            id=user.id,
+            firstname=user.firstname,
+            lastname=user.lastname,
+            email=user.email,
+            role=membership.role if membership else None,
         )
-        for u, m in results
+        for user, membership in results
     ]
-    # return [UserSummaryResponse.model_validate(u, from_attributes=True) for u in users]
-
 
 
 
 @router.get("/cohorts/{cohort_id}/student_ids")
-async def get_cohort_student_ids_internal(
+def get_cohort_student_ids_internal(
     cohort_id: UUID,
     session: SessionDep,
     x_org_id: UUID = Header(...),

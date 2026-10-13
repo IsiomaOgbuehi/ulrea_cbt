@@ -76,39 +76,43 @@ class ViolationService:
 
 
 
+    @staticmethod
+    def _get_locked_attempt_and_exam(
+        session: Session, attempt_id: UUID, org_id: UUID, student_id: UUID
+    ) -> tuple[AttemptModel, ExamModel]:
+        row = session.exec(
+            select(AttemptModel, ExamModel)
+            .join(ExamModel, col(ExamModel.id) == col(AttemptModel.exam_id))
+            .where(
+                AttemptModel.id == attempt_id,
+                AttemptModel.org_id == org_id,
+                AttemptModel.student_id == student_id,
+            )
+            .with_for_update(of=AttemptModel)  # lock only the attempt row
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Attempt not found.")
+        return row
+
 
     @staticmethod
-    async def create(
+    def create(
         session: Session,
         attempt_id: UUID,
         payload: ViolationCreate,
         current_user: CurrentUser,
     ) -> ViolationCreateResult:
-        # 1. Load AND lock the attempt row (with_for_update inside the helper).
-        #    Concurrent violation requests for the same attempt now queue up here,
-        #    so each one sees the previous one's committed insert when it counts.
-        attempt: AttemptModel = ViolationService._get_attempt_for_student(
+        attempt, exam = ViolationService._get_locked_attempt_and_exam(
             session, attempt_id, current_user.org_id, current_user.id
         )
 
-        exam: ExamModel | None = session.exec(
-            select(ExamModel).where(ExamModel.id == attempt.exam_id)
-        ).first()
-        if not exam:
-            raise HTTPException(status_code=404, detail="Exam not found.")
-
-        # 2. Already closed (terminated, submitted, reset): not an error.
-        #    Late or queued client events just get the final state back.
         if attempt.status != AttemptStatus.STARTED:
             return ViolationService._closed_result(session, attempt, exam)
 
-        # 3. Time may have run out since the last request. This auto-submits and
-        #    commits if so, which also releases the row lock.
-        attempt = await AttemptService._enforce_time_limit(session, attempt)
+        attempt = AttemptService._enforce_time_limit_new(session, attempt, exam)
         if attempt.status != AttemptStatus.STARTED:
             return ViolationService._closed_result(session, attempt, exam)
 
-        # 4. Record the violation (flushed, not yet committed).
         violation = ExamViolation(
             org_id=current_user.org_id,
             exam_id=attempt.exam_id,
@@ -123,22 +127,20 @@ class ViolationService:
         session.add(violation)
         session.flush()
 
-        # 5. Count, including the one just flushed.
         violation_count: int = ViolationService._count_violations(session, attempt_id)
 
-        # 6. Terminate if the limit is reached. _finalize_submission commits,
-        #    which persists the violation, the scores and the TERMINATED status together.
         exam_terminated = False
         if exam.max_violations is not None and violation_count >= exam.max_violations:
-            attempt = await AttemptService._finalize_submission(
-                session, attempt, exam, final_status=AttemptStatus.TERMINATED,
+            attempt = AttemptService._finalize_submission(
+                session, attempt, exam, final_status=AttemptStatus.TERMINATED
             )
             exam_terminated = True
         else:
-            session.commit()  # persists the violation and releases the lock
+            session.commit()
 
-        session.refresh(violation)
-
+        # No session.refresh(violation): flush already populated id/defaults, and
+        # expire_on_commit=False keeps the attributes loaded. If a server-side
+        # default field comes back None in ViolationRead, add the refresh back.
         return ViolationCreateResult(
             violation=ViolationRead.model_validate(violation, from_attributes=True),
             violation_count=violation_count,
@@ -146,20 +148,40 @@ class ViolationService:
             exam_terminated=exam_terminated,
             attempt_status=attempt.status,
         )
-      
 
 
     # @staticmethod
-    # async def create(
+    # def create(
     #     session: Session,
     #     attempt_id: UUID,
     #     payload: ViolationCreate,
-    #     current_user,
+    #     current_user: CurrentUser,
     # ) -> ViolationCreateResult:
-    #     attempt = ViolationService._get_attempt_for_student(
+    #     # 1. Load AND lock the attempt row (with_for_update inside the helper).
+    #     #    Concurrent violation requests for the same attempt now queue up here,
+    #     #    so each one sees the previous one's committed insert when it counts.
+    #     attempt: AttemptModel = ViolationService._get_attempt_for_student(
     #         session, attempt_id, current_user.org_id, current_user.id
     #     )
 
+    #     exam: ExamModel | None = session.exec(
+    #         select(ExamModel).where(ExamModel.id == attempt.exam_id)
+    #     ).first()
+    #     if not exam:
+    #         raise HTTPException(status_code=404, detail="Exam not found.")
+
+    #     # 2. Already closed (terminated, submitted, reset): not an error.
+    #     #    Late or queued client events just get the final state back.
+    #     if attempt.status != AttemptStatus.STARTED:
+    #         return ViolationService._closed_result(session, attempt, exam)
+
+    #     # 3. Time may have run out since the last request. This auto-submits and
+    #     #    commits if so, which also releases the row lock.
+    #     attempt = AttemptService._enforce_time_limit(session, attempt)
+    #     if attempt.status != AttemptStatus.STARTED:
+    #         return ViolationService._closed_result(session, attempt, exam)
+
+    #     # 4. Record the violation (flushed, not yet committed).
     #     violation = ExamViolation(
     #         org_id=current_user.org_id,
     #         exam_id=attempt.exam_id,
@@ -172,28 +194,21 @@ class ViolationService:
     #         occurred_at=payload.occurred_at,
     #     )
     #     session.add(violation)
-    #     session.flush()  # id + defaults populated, visible to the count query below, not yet committed
+    #     session.flush()
 
-    #     violation_count = session.exec(
-    #         select(func.count()).select_from(ExamViolation).where(
-    #             ExamViolation.attempt_id == attempt_id,
-    #         )
-    #     ).one()
+    #     # 5. Count, including the one just flushed.
+    #     violation_count: int = ViolationService._count_violations(session, attempt_id)
 
-    #     exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
-    #     if not exam:
-    #         raise HTTPException(status_code=404, detail="Exam not found.")
-
+    #     # 6. Terminate if the limit is reached. _finalize_submission commits,
+    #     #    which persists the violation, the scores and the TERMINATED status together.
     #     exam_terminated = False
     #     if exam.max_violations is not None and violation_count >= exam.max_violations:
-    #         # Scores whatever was answered so far and closes the attempt —
-    #         # same scoring path as a normal submit, just a different terminal status.
-    #         attempt = await AttemptService._finalize_submission(
+    #         attempt = AttemptService._finalize_submission(
     #             session, attempt, exam, final_status=AttemptStatus.TERMINATED,
     #         )
     #         exam_terminated = True
     #     else:
-    #         session.commit()
+    #         session.commit()  # persists the violation and releases the lock
 
     #     session.refresh(violation)
 
@@ -202,7 +217,9 @@ class ViolationService:
     #         violation_count=violation_count,
     #         max_violations=exam.max_violations,
     #         exam_terminated=exam_terminated,
+    #         attempt_status=attempt.status,
     #     )
+      
 
 
     @staticmethod

@@ -11,6 +11,8 @@ from alembic import command
 import logging
 import time
 
+from auth.utility.password.password_harsher import PasswordHasher
+
 def run_migrations():
     alembic_cfg = Config("alembic.ini")
 
@@ -29,6 +31,7 @@ def run_migrations():
 async def lifespan(app: FastAPI):
     # Run migrations before accepting requests
     # run_migrations()
+    # print(PasswordHasher.create("red"))
 
     # Startup
     try:

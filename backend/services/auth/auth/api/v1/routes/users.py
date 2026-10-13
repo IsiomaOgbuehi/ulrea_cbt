@@ -290,7 +290,7 @@ async def create_student(
 
 ''' BULK STUDENT TEMPLATE ⬇️ '''
 @router.get(AuthRoutes.STUDENT_BULK_TEMPLATE.value)
-async def download_student_template(
+def download_student_template(
     creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
 ):
     """Download Excel template for bulk student creation."""
@@ -349,7 +349,7 @@ async def create_students_bulk(
 
 ''' STAFF FIRST LOGIN SETUP 🔑 '''
 @router.post(AuthRoutes.INIT_STAFF.value, deprecated=True)
-async def staff_first_login_setup(
+def staff_first_login_setup(
     payload: StaffFirstLoginSetup,
     session: SessionDep,
 ):
@@ -403,7 +403,7 @@ async def staff_first_login_setup(
 
 ''' STAFF ACTIVATE 🔑 '''
 @router.post(AuthRoutes.STAFF_ACTIVATE.value)
-async def activate_staff_account(
+def activate_staff_account(
     payload: StaffActivationPayload,
     session: SessionDep,
 ) -> StaffActivateResponse:
@@ -491,7 +491,7 @@ async def activate_staff_account(
 
 ''' STUDENT FIRST LOGIN SETUP 🎓 '''
 @router.post(AuthRoutes.INIT_STUDENT.value)
-async def student_first_login_setup(
+def student_first_login_setup(
     payload: StudentFirstLoginSetup,
     session: SessionDep,
 ):
@@ -550,7 +550,7 @@ async def student_first_login_setup(
 
 ''' STUDENT LOGIN VALIDATE CODE AND SHOW QUESTION 🔐 '''
 @router.post(AuthRoutes.STUDENT_LOGIN_QUESTION.value)
-async def get_student_security_question(
+def get_student_security_question(
     payload: StudentAccessCodeRequest,
     session: SessionDep,
 ):
@@ -595,7 +595,7 @@ async def get_student_security_question(
 
 ''' STUDENT LOGIN 🔐 '''
 @router.post(AuthRoutes.STUDENT_LOGIN.value)
-async def student_login(
+def student_login(
     payload: StudentLoginRequest,
     session: SessionDep,
 ):
@@ -848,7 +848,7 @@ async def forgot_password(
 
 ''' RESET PASSWORD 🔑 '''
 @router.post(AuthRoutes.RESET_PASSWORD.value)
-async def reset_password(
+def reset_password(
     payload: ResetPasswordRequest,
     session: SessionDep,
 ):
@@ -875,7 +875,7 @@ async def reset_password(
 
 ''' STUDENT FORGOT PASSWORD — STEP 1: VERIFY ACCESS CODE 🎓 '''
 @router.post(AuthRoutes.STUDENT_VERIFY_FORGOT_PASSWORD.value)
-async def student_forgot_password_verify(
+def student_forgot_password_verify(
     payload: StudentForgotPasswordRequest,
     session: SessionDep,
 ):
@@ -915,7 +915,7 @@ async def student_forgot_password_verify(
 
 ''' STUDENT FORGOT PASSWORD — STEP 2: RESET SECURITY Q&A 🎓 '''
 @router.post(AuthRoutes.STUDENT_RESET_PASSWORD_QA.value)
-async def student_reset_password(
+def student_reset_password(
     payload: StudentResetPasswordRequest,
     session: SessionDep,
 ):
@@ -998,7 +998,7 @@ async def list_staff(
 
 ''' LIST STUDENTS 🎓 '''
 @router.get("/students", response_model=PaginatedStudentResponse)
-async def list_students(
+def list_students(
     session: SessionDep,
     ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)),
     status: MembershipStatus | None = Query(default=None),
@@ -1028,7 +1028,7 @@ async def list_students(
 ''' EXPORT STUDENT DATA 📊 '''
 # Declare this before any "/students/{student_id}" routes
 @router.get("/students/export")
-async def export_students(
+def export_students(
     session: SessionDep,
     ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
     status: MembershipStatus | None = Query(default=None),
@@ -1055,7 +1055,7 @@ async def export_students(
 
 ''' UPDATE STUDENT ✏️ '''
 @router.patch("/{student_id}", response_model=UserRead)
-async def update_student(
+def update_student(
     student_id: UUID,
     payload: UpdateStudentRequest,
     session: SessionDep,
@@ -1069,7 +1069,7 @@ async def update_student(
 
 ''' MOVE STUDENT TO NEW COHORT 🔀 '''
 @router.put("/{student_id}/cohort")
-async def move_student_cohort(
+def move_student_cohort(
     student_id: UUID,
     payload: MoveCohortRequest,
     session: SessionDep,
@@ -1084,7 +1084,7 @@ async def move_student_cohort(
 
 ''' ADMIN UPDATE STAFF ✏️ '''
 @router.patch("/staff/{user_id}", response_model=UserRead)
-async def admin_update_staff(
+def admin_update_staff(
     user_id: UUID,
     payload: AdminUpdateUserRequest,
     session: SessionDep,
@@ -1099,7 +1099,7 @@ async def admin_update_staff(
 
 ''' DELETE USER 🗑️ '''
 @router.delete("/{user_id}", response_model=DeleteUserResponse)
-async def delete_user(
+def delete_user(
     user_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(AdminOrAbove),

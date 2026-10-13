@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select, func, or_
+from sqlmodel import Session, select, func, or_, col
 
 from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus, TeacherCohortAssignment
 from auth.database.schema.user.user_db import UserModel
@@ -60,6 +60,18 @@ class CohortService:
             member_count=CohortService._member_count(session, cohort.id),
         )
 
+
+    @staticmethod
+    def member_counts(session: Session, cohort_ids: list[UUID]) -> dict[UUID, int]:
+        if not cohort_ids:
+            return {}
+        rows = session.exec(
+            select(CohortMember.cohort_id, func.count(CohortMember.id))
+            .where(col(CohortMember.cohort_id).in_(cohort_ids))
+            .group_by(CohortMember.cohort_id)
+        ).all()
+        return {cid: n for cid, n in rows}
+
     # --------------------------------------------------------
     # CRUD
     # --------------------------------------------------------
@@ -94,21 +106,30 @@ class CohortService:
         session.refresh(cohort)
         return CohortService._to_read(cohort, session)
 
-    @staticmethod
-    def get_all(
-        session: Session,
-        org_id: UUID,
-        status: str | None = None,
-    ) -> list[CohortRead]:
-        # org_id already explicit here — no changes needed
-        query = select(CohortModel).where(CohortModel.org_id == org_id)
-        if status:
-            query = query.where(CohortModel.status == status)
-        else:
-            query = query.where(CohortModel.status != CohortStatus.ARCHIVED)
+    # @staticmethod
+    # def get_all(
+    #     session: Session,
+    #     org_id: UUID,
+    #     status: str | None = None,
+    # ) -> list[CohortRead]:
+    #     # org_id already explicit here — no changes needed
+    #     query = select(CohortModel).where(CohortModel.org_id == org_id)
+    #     if status:
+    #         query = query.where(CohortModel.status == status)
+    #     else:
+    #         query = query.where(CohortModel.status != CohortStatus.ARCHIVED)
 
-        cohorts = session.exec(query).all()
-        return [CohortService._to_read(c, session) for c in cohorts]
+    #     cohorts = session.exec(query).all()
+    #     return [CohortService._to_read(c, session) for c in cohorts]
+
+    @staticmethod
+    def get_all(session: Session, org_id: UUID, status: str | None = None) -> list[CohortRead]:
+        query = select(CohortModel).where(CohortModel.org_id == org_id)
+        query = query.where(CohortModel.status == status) if status \
+            else query.where(CohortModel.status != CohortStatus.ARCHIVED)
+        cohorts = list(session.exec(query).all())
+        counts = CohortService.member_counts(session, [c.id for c in cohorts])
+        return [CohortRead(**c.model_dump(), member_count=counts.get(c.id, 0)) for c in cohorts]
 
     @staticmethod
     def get_by_id(
@@ -417,13 +438,14 @@ class CohortService:
     
     @staticmethod
     def count_members(session: Session, cohort_id: UUID) -> int:
-        return len(
-            session.exec(
-                select(CohortMember).where(
-                    CohortMember.cohort_id == cohort_id
-                )
-            ).all()
-        )
+        return CohortService._member_count(session, cohort_id)
+        # return len(
+        #     session.exec(
+        #         select(CohortMember).where(
+        #             CohortMember.cohort_id == cohort_id
+        #         )
+        #     ).all()
+        # )
     
 
     @staticmethod

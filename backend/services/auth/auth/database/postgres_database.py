@@ -42,5 +42,5 @@ class PostgresDatabase(IDatabase):
         self._engine.dispose()
 
     def get_session(self) -> Iterator[Session]:
-        with Session(self._engine) as session:
+        with Session(self._engine, expire_on_commit=False) as session:
             yield session

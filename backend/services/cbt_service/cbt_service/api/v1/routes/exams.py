@@ -1,5 +1,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
+from starlette.concurrency import run_in_threadpool
+
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import get_current_user, require_roles
@@ -23,7 +25,7 @@ StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 
 ''' CREATE EXAM 📝 '''
 @router.post("", response_model=ExamRead)
-async def create_exam(
+def create_exam(
     payload: ExamCreate,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -34,7 +36,7 @@ async def create_exam(
 
 ''' LIST EXAMS 📋 '''
 @router.get("", response_model=list[ExamRead])
-async def list_exams(
+def list_exams(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
@@ -47,7 +49,7 @@ async def list_exams(
 
 ''' MY ASSIGNED EXAMS 🎓 '''
 @router.get("/my-assignments", response_model=list[MyAssignmentRead])
-async def get_my_assignments(
+def get_my_assignments(
     session: SessionDep,
     current_user: CurrentUser = Depends(StudentOrAbove),
 ):
@@ -56,7 +58,7 @@ async def get_my_assignments(
 
 ''' GET EXAM 🔍 '''
 @router.get("/{exam_id}", response_model=ExamRead)
-async def get_exam(
+def get_exam(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(StudentOrAbove),
@@ -67,7 +69,7 @@ async def get_exam(
 
 ''' UPDATE EXAM ✏️ '''
 @router.patch("/{exam_id}", response_model=ExamRead)
-async def update_exam(
+def update_exam(
     exam_id: UUID,
     payload: ExamUpdate,
     session: SessionDep,
@@ -79,7 +81,7 @@ async def update_exam(
 
 ''' DELETE EXAM 🗑️ '''
 @router.delete("/{exam_id}", response_model=ExamDeleteResponse)
-async def delete_exam(
+def delete_exam(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),   # ← tightened from TeacherOrAbove
@@ -93,7 +95,7 @@ async def delete_exam(
 
 ''' SUBMIT FOR APPROVAL 📤 '''
 @router.post("/{exam_id}/submit", response_model=ExamRead)
-async def submit_for_approval(
+def submit_for_approval(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -104,7 +106,7 @@ async def submit_for_approval(
 
 ''' APPROVE OR REJECT ✅❌ '''
 @router.post("/{exam_id}/approval", response_model=ExamRead)
-async def process_approval(
+def process_approval(
     exam_id: UUID,
     payload: ApprovalAction,
     session: SessionDep,
@@ -120,7 +122,7 @@ async def process_approval(
 
 ''' ADD SECTION 📑 '''
 @router.post("/{exam_id}/sections", response_model=ExamSectionRead)
-async def add_section(
+def add_section(
     exam_id: UUID,
     payload: ExamSectionCreate,
     session: SessionDep,
@@ -132,7 +134,7 @@ async def add_section(
 
 ''' LIST SECTIONS 📋 '''
 @router.get("/{exam_id}/sections", response_model=list[ExamSectionRead])
-async def list_sections(
+def list_sections(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -147,7 +149,7 @@ async def list_sections(
 
 ''' ADD ITEMS TO EXAM ➕ '''
 @router.post("/{exam_id}/items", response_model=list[ExamItemRead])
-async def add_items(
+def add_items(
     exam_id: UUID,
     payload: ExamItemAdd,
     session: SessionDep,
@@ -159,7 +161,7 @@ async def add_items(
 
 ''' LIST EXAM ITEMS 📋 '''
 @router.get("/{exam_id}/items", response_model=list[ExamItemRead])
-async def list_exam_items(
+def list_exam_items(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -170,7 +172,7 @@ async def list_exam_items(
 
 ''' REMOVE ITEM FROM EXAM ➖ '''
 @router.delete("/{exam_id}/items/{exam_item_id}", status_code=204)
-async def remove_item(
+def remove_item(
     exam_id: UUID,
     exam_item_id: UUID,
     session: SessionDep,
@@ -185,7 +187,7 @@ async def remove_item(
 
 ''' ASSIGN STUDENTS 🎓 '''
 @router.post("/{exam_id}/assign", response_model=list[ExamAssignmentRead])
-async def assign_students(
+def assign_students(
     exam_id: UUID,
     payload: AssignStudentsRequest,
     session: SessionDep,
@@ -197,7 +199,7 @@ async def assign_students(
 
 ''' LIST ASSIGNMENTS 📋 '''
 @router.get("/{exam_id}/assignments", response_model=list[ExamAssignmentRead])
-async def list_assignments(
+def list_assignments(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
@@ -212,7 +214,7 @@ async def list_assignments(
 
 ''' AUDIT LOG 📜 '''
 @router.get("/{exam_id}/audit", response_model=list[ExamAuditLogRead])
-async def get_audit_log(
+def get_audit_log(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(AdminOrAbove),
@@ -257,7 +259,8 @@ async def assign_cohort(
             detail="Cohort has no active students."
         )
 
-    assignments = ExamService.assign_cohort(
+    assignments = await run_in_threadpool(
+    ExamService.assign_cohort,
         session=session,
         exam_id=exam_id,
         cohort_id=payload.cohort_id,
@@ -270,7 +273,7 @@ async def assign_cohort(
 
 ''' SUPER ADMIN: OVERRIDE EXAM STATUS 🔧 '''
 @router.patch("/{exam_id}/status-override", response_model=ExamRead)
-async def override_exam_status(
+def override_exam_status(
     exam_id: UUID,
     payload: ExamStatusUpdate,
     session: SessionDep,

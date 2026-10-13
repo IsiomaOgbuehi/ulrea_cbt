@@ -23,7 +23,7 @@ TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 
 ''' CREATE COHORT 📚 '''
 @router.post("", response_model=CohortRead)
-async def create_cohort(
+def create_cohort(
     payload: CohortCreate,
     session: SessionDep,
     ctx: UserContext = Depends(AdminOrAbove),
@@ -33,7 +33,7 @@ async def create_cohort(
 
 ''' LIST COHORTS 📋 '''
 @router.get("", response_model=list[CohortRead])
-async def list_cohorts(
+def list_cohorts(
     session: SessionDep,
     ctx: UserContext = Depends(TeacherOrAbove),
     status: str | None = Query(default=None, description="Filter by status: active, graduated, archived"),
@@ -43,7 +43,7 @@ async def list_cohorts(
 
 ''' MY COHORTS (TEACHER) 🧑‍🏫 '''
 @router.get("/my-cohorts", response_model=list[MyCohortRead])
-async def list_my_cohorts(
+def list_my_cohorts(
     session: SessionDep,
     ctx: UserContext = Depends(TeacherOrAbove),
 ):
@@ -67,7 +67,7 @@ async def list_my_cohorts(
 
 ''' GET COHORT 🔍 '''
 @router.get("/{cohort_id}", response_model=CohortRead)
-async def get_cohort(
+def get_cohort(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(TeacherOrAbove),
@@ -77,7 +77,7 @@ async def get_cohort(
 
 ''' UPDATE COHORT ✏️ '''
 @router.patch("/{cohort_id}", response_model=CohortRead)
-async def update_cohort(
+def update_cohort(
     cohort_id: UUID,
     payload: CohortUpdate,
     session: SessionDep,
@@ -88,7 +88,7 @@ async def update_cohort(
 
 ''' ARCHIVE COHORT 🗄️ '''
 @router.delete("/{cohort_id}", response_model=CohortRead)
-async def archive_cohort(
+def archive_cohort(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(AdminOrAbove),
@@ -98,7 +98,7 @@ async def archive_cohort(
 
 ''' GRADUATE COHORT 🎓 '''
 @router.post("/{cohort_id}/graduate", response_model=CohortRead)
-async def graduate_cohort(
+def graduate_cohort(
     cohort_id: UUID,
     payload: GraduateCohortRequest,
     session: SessionDep,
@@ -135,7 +135,7 @@ async def add_members(
 
 ''' REMOVE MEMBER FROM COHORT ❌ '''
 @router.delete("/{cohort_id}/members/{student_id}", status_code=204)
-async def remove_member(
+def remove_member(
     cohort_id: UUID,
     student_id: UUID,
     session: SessionDep,
@@ -146,7 +146,7 @@ async def remove_member(
 
 ''' VIEW COHORT MEMBERS 👀 '''
 @router.get("/{cohort_id}/members", response_model=PaginatedResponse[CohortMemberRead])
-async def get_members(
+def get_members(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(require_cohort_access),
@@ -170,7 +170,7 @@ async def get_members(
 
 ''' ASSIGN TEACHER TO COHORT 🧑‍🏫➕ '''
 @router.post("/{cohort_id}/teachers", response_model=TeacherCohortAssignmentRead)
-async def assign_teacher(
+def assign_teacher(
     cohort_id: UUID,
     payload: AssignTeacherRequest,
     session: SessionDep,
@@ -188,7 +188,7 @@ async def assign_teacher(
 
 ''' UNASSIGN TEACHER FROM COHORT 🧑‍🏫➖ '''
 @router.delete("/{cohort_id}/teachers/{teacher_id}", status_code=204)
-async def unassign_teacher(
+def unassign_teacher(
     cohort_id: UUID,
     teacher_id: UUID,
     session: SessionDep,
@@ -201,7 +201,7 @@ async def unassign_teacher(
 
 ''' LIST TEACHERS ASSIGNED TO COHORT 📋 '''
 @router.get("/{cohort_id}/teachers", response_model=list[TeacherCohortAssignmentRead])
-async def list_cohort_teachers(
+def list_cohort_teachers(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(require_cohort_access),

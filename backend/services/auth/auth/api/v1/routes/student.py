@@ -52,7 +52,7 @@ async def student_signup(
 
 ''' DISCOVER PUBLIC ORGS 🔍 '''
 @router.get("/organizations", response_model=dict)
-async def discover_organizations(
+def discover_organizations(
     session: SessionDep,
     query: str | None = Query(default=None),
     category: str | None = Query(default=None),
@@ -92,7 +92,7 @@ async def discover_organizations(
 
 ''' MY ORGANIZATIONS 🏫 '''
 @router.get("/my-organizations")
-async def my_organizations(
+def my_organizations(
     session: SessionDep,
     ctx: UserContext = Depends(get_user_context),
 ):
@@ -119,7 +119,7 @@ async def my_organizations(
 
 ''' SUBSCRIBE TO ORG ✅ '''
 @router.post("/organizations/subscribe")
-async def subscribe_to_org(
+def subscribe_to_org(
     payload: OrgSubscribeRequest,
     session: SessionDep,
     user: UserModel = Depends(get_provisional_or_authenticated_user),  # ← accepts provisional token
@@ -139,7 +139,7 @@ async def subscribe_to_org(
 
 ''' UNSUBSCRIBE FROM ORG ❌ '''
 @router.delete("/organizations/{org_id}/unsubscribe", status_code=204)
-async def unsubscribe_from_org(
+def unsubscribe_from_org(
     org_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(get_user_context),
