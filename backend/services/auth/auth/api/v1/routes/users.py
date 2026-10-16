@@ -12,7 +12,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole, Verifica
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentCreatedResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentChangeSecurityQARequest, StudentCreatedResponse, StudentCredentialResetRequest, StudentCredentialResetResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -499,8 +499,14 @@ def student_first_login_setup(
         select(UserModel).where(UserModel.access_code == payload.access_code)
     ).first()
 
-    if not user:                                # ← early return
-        raise HTTPException(status_code=404, detail="User Not Found.")
+    if user is None:
+      raise HTTPException(status_code=404, detail="User Not Found.")
+    
+    if not user.is_first_login:
+        raise HTTPException(status_code=400, detail="Setup already completed. Proceed to Login")
+
+    # if not user:                                # ← early return
+    #     raise HTTPException(status_code=404, detail="User Not Found.")
 
     membership = session.exec(
         select(OrgMembership).where(
@@ -513,8 +519,8 @@ def student_first_login_setup(
     if not user or membership.role != UserRole.STUDENT:
         raise HTTPException(status_code=404, detail="Invalid access code.")
 
-    if not user.is_first_login:
-        raise HTTPException(status_code=400, detail="Setup already completed.")
+    # if not user.is_first_login:
+    #     raise HTTPException(status_code=400, detail="Setup already completed.")
 
     user.favorite_question = payload.favorite_question
     user.favorite_answer_hash = PasswordHasher.create(payload.favorite_answer)
@@ -546,6 +552,50 @@ def student_first_login_setup(
         refresh_token=refresh,
         detail="Setup complete."
     )
+
+
+''' ADMIN RESET STUDENT CREDENTIALS 🔄 '''
+@router.post(
+    "/students/{student_id}/reset-credentials",
+    response_model=StudentCredentialResetResponse,
+)
+def admin_reset_student_credentials(
+    student_id: UUID,
+    session: SessionDep,
+    payload: StudentCredentialResetRequest | None = None,
+    ctx: UserContext = Depends(AdminOrAbove),
+) -> StudentCredentialResetResponse:
+    """Admin issues a temporary security answer for a student who forgot theirs."""
+    requested: str | None = payload.temp_answer if payload else None
+
+    user, temp_answer, was_generated = UserManagementService.admin_reset_student_credentials(
+        session=session, student_id=student_id, org_id=ctx.membership.org_id, temp_answer=requested
+    )
+    logging.info(
+        "Student credentials reset: student=%s by admin=%s org=%s",
+        user.id, ctx.user.id, ctx.membership.org_id,
+    )
+    return StudentCredentialResetResponse(
+        detail="Credentials reset. Share the temporary answer with the student; "
+               "it will not be shown again.",
+        student_id=user.id,
+        access_code=user.access_code,
+        temporary_answer=temp_answer,
+        was_generated=was_generated,
+    )
+
+
+''' STUDENT CHANGE OWN SECURITY Q&A 🔐 '''
+@router.post("/students/me/security-qa")
+def change_my_security_qa(
+    payload: StudentChangeSecurityQARequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_roles(UserRole.STUDENT)),
+) -> dict[str, str]:
+    UserManagementService.change_student_security_qa(
+        session=session, user=ctx.user, payload=payload,
+    )
+    return {"detail": "Security question and answer updated."}
 
 
 ''' STUDENT LOGIN VALIDATE CODE AND SHOW QUESTION 🔐 '''
@@ -602,6 +652,9 @@ def student_login(
     user = session.exec(
         select(UserModel).where(UserModel.access_code == payload.access_code)
     ).first()
+
+    if user is None:
+      raise HTTPException(status_code=404, detail="User Not Found.")
 
     membership = session.exec(
         select(OrgMembership).where(

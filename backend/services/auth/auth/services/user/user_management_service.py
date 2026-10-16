@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole, VerificationMethod
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
-from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, StudentCreatedResponse, UpdateStudentRequest
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, StudentChangeSecurityQARequest, StudentCreatedResponse, UpdateStudentRequest
 from auth.utility.password.password_harsher import PasswordHasher
 from auth.services.subscription_service import SubscriptionService
 from auth.services.membership_service import MembershipService
@@ -72,6 +72,16 @@ class UserManagementService:
     @staticmethod
     def _generate_temp_password(length: int = 12) -> str:
         alphabet = string.ascii_letters + string.digits + "!@#$"
+        return "".join(secrets.choice(alphabet) for _ in range(length))
+
+    # --------------------------------------------------------
+    # STUDENT CREDENTIALS
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _generate_temp_answer(length: int = 8) -> str:
+        # Same unambiguous alphabet as access codes; easy to read out and type.
+        alphabet = "abcdefghjkmnpqrstuvwxyz2346789"
         return "".join(secrets.choice(alphabet) for _ in range(length))
 
     # --------------------------------------------------------
@@ -1190,3 +1200,72 @@ class UserManagementService:
             user_id=user_id,
             action=action,
         )
+
+
+
+    @staticmethod
+    def admin_reset_student_credentials(
+        session: Session,
+        student_id: UUID,
+        org_id: UUID,
+        temp_answer: str | None = None,
+    ) -> tuple[UserModel, str, bool]:
+        """Replace a student's security Q&A with a temporary answer.
+
+        Uses the admin-supplied temp_answer if given, otherwise generates one.
+        Returns (user, temp_answer, was_generated).
+        """
+        membership: OrgMembership | None = session.exec(
+            select(OrgMembership).where(
+                OrgMembership.user_id == student_id,
+                OrgMembership.org_id == org_id,
+                OrgMembership.role == UserRole.STUDENT,
+            )
+        ).first()
+
+        if membership is None:
+            raise HTTPException(status_code=404, detail="Student not found in this organization.")
+
+        user: UserModel | None = session.get(UserModel, student_id)
+        
+        if user is None:
+            raise HTTPException(status_code=404, detail="Student not found.")
+
+        if user.is_first_login:
+            raise HTTPException(
+                status_code=400,
+                detail="This student hasn't completed first-time setup. "
+                       "Share their access code instead.",
+            )
+        if membership.status != MembershipStatus.ACTIVE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only active students can be reset. This student's status is "
+                       f"'{membership.status.value}'.",
+            )
+
+        was_generated: bool = not temp_answer
+        answer: str = temp_answer or UserManagementService._generate_temp_answer()
+
+        user.favorite_question = "Enter the temporary answer given to you by your administrator"
+        user.favorite_answer_hash = PasswordHasher.create(answer)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user, answer, was_generated
+
+
+    @staticmethod
+    def change_student_security_qa(
+        session: Session, user: UserModel, payload: StudentChangeSecurityQARequest
+    ) -> None:
+        if not user.favorite_answer_hash or not PasswordHasher.verify(
+            payload.current_answer, user.favorite_answer_hash
+        ):
+            # 400, not 401: a 401 may make the frontend log the student out.
+            raise HTTPException(status_code=400, detail="Current answer is incorrect.")
+
+        user.favorite_question = payload.new_favorite_question.strip()
+        user.favorite_answer_hash = PasswordHasher.create(payload.new_favorite_answer)
+        session.add(user)
+        session.commit()

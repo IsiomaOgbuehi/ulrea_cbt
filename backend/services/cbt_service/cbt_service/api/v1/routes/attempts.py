@@ -215,11 +215,11 @@ def get_attempt_status(
 async def export_exam_attempts_to_excel(
     exam_id: UUID,
     session: SessionDep,
-    ctx=Depends(TeacherOrAbove),
+    ctx: CurrentUser = Depends(TeacherOrAbove),
 ):
     """Download all attempts for an exam as an Excel workbook."""
 
-    org_id = ctx.membership.org_id
+    org_id = ctx.org_id
 
     # Load data with synchronous database operations.
     export_data = await run_in_threadpool(

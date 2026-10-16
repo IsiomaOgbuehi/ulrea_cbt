@@ -2,6 +2,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
+from cbt_service.database.models.exam import ExamAssignment
+from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRead
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import get_current_user, require_roles
@@ -22,6 +24,16 @@ AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
 StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STUDENT)
 
+# new
+StaffViewer = require_roles(
+    UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.SUPERVISOR
+)
+Approver = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.SUPERVISOR)
+AnyExamRole = require_roles(
+    UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER,
+    UserRole.SUPERVISOR, UserRole.STUDENT,
+)
+
 
 ''' CREATE EXAM 📝 '''
 @router.post("", response_model=ExamRead)
@@ -38,7 +50,7 @@ def create_exam(
 @router.get("", response_model=list[ExamRead])
 def list_exams(
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(StaffViewer),
 ):
     rows = ExamService.get_all(session, current_user)
     return [
@@ -61,7 +73,7 @@ def get_my_assignments(
 def get_exam(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(StudentOrAbove),
+    current_user: CurrentUser = Depends(AnyExamRole),
 ):
     exam = ExamService.get_by_id(session, exam_id, current_user)
     return ExamRead.model_validate(exam, from_attributes=True)
@@ -110,7 +122,7 @@ def process_approval(
     exam_id: UUID,
     payload: ApprovalAction,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(Approver),
 ):
     exam = ExamService.process_approval(session, exam_id, payload, current_user)
     return ExamRead.model_validate(exam, from_attributes=True)
@@ -164,7 +176,7 @@ def add_items(
 def list_exam_items(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(StaffViewer),
 ):
     items = ExamService.get_items(session, exam_id, current_user)
     return [ExamItemRead.model_validate(i, from_attributes=True) for i in items]
@@ -185,15 +197,47 @@ def remove_item(
 # STUDENT ASSIGNMENT
 # --------------------------------------------------------
 
+# ''' ASSIGN STUDENTS 🎓 '''
+# @router.post("/{exam_id}/assign", response_model=list[ExamAssignmentRead])
+# def assign_students(
+#     exam_id: UUID,
+#     payload: AssignStudentsRequest,
+#     session: SessionDep,
+#     current_user: CurrentUser = Depends(TeacherOrAbove),
+# ):
+#     assignments = ExamService.assign_students(session, exam_id, payload, current_user)
+#     return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
+
 ''' ASSIGN STUDENTS 🎓 '''
 @router.post("/{exam_id}/assign", response_model=list[ExamAssignmentRead])
-def assign_students(
+async def assign_students(
     exam_id: UUID,
     payload: AssignStudentsRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
-):
-    assignments = ExamService.assign_students(session, exam_id, payload, current_user)
+) -> list[ExamAssignmentRead]:
+    unique_ids: list[UUID] = list(dict.fromkeys(payload.student_ids))
+
+    auth_client = AuthClient(redis_client)
+    try:
+        valid_ids: set[UUID] = set(
+            await auth_client.filter_student_ids(unique_ids, current_user.org_id)
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not verify students with auth service.")
+
+    invalid: list[str] = [str(s) for s in unique_ids if s not in valid_ids]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Some IDs are not active students in your organisation.",
+                    "invalid_student_ids": invalid},
+        )
+
+    assignments: list[ExamAssignment] = await run_in_threadpool(
+        ExamService.assign_students,
+        session=session, exam_id=exam_id, payload=payload, current_user=current_user,
+    )
     return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
 
 
@@ -243,21 +287,13 @@ async def assign_cohort(
     # Fetch student IDs from auth service
     auth_client = AuthClient(redis_client)
     try:
-        student_ids = await auth_client.get_cohort_student_ids(
-            cohort_id=payload.cohort_id,
-            org_id=current_user.org_id,
+        student_ids: list[UUID] = await auth_client.get_cohort_student_ids(
+            cohort_id=payload.cohort_id, org_id=current_user.org_id,
         )
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(
-            status_code=502,
-            detail="Could not fetch cohort members from auth service."
-        )
-
-    if not student_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="Cohort has no active students."
-        )
+        raise HTTPException(status_code=502, detail="Could not fetch cohort members from auth service.")
 
     assignments = await run_in_threadpool(
     ExamService.assign_cohort,
@@ -291,3 +327,21 @@ def override_exam_status(
         current_user=current_user,
     )
     return ExamRead.model_validate(exam, from_attributes=True)
+
+
+
+''' LIST EXAM QUESTIONS WITH CONTENT 🧐 '''
+@router.get("/{exam_id}/questions", response_model=list[ExamItemDetailRead])
+def list_exam_questions(
+    exam_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(StaffViewer),
+):
+    rows = ExamService.get_items_with_content(session, exam_id, current_user)
+    return [
+        ExamItemDetailRead(
+            **ExamItemRead.model_validate(exam_item, from_attributes=True).model_dump(),
+            item=ItemRead.model_validate(item, from_attributes=True),
+        )
+        for exam_item, item in rows
+    ]

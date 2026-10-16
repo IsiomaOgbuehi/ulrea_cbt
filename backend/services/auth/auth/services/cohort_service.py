@@ -2,6 +2,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select, func, or_, col
+from sqlalchemy.exc import IntegrityError
 
 from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus, TeacherCohortAssignment
 from auth.database.schema.user.user_db import UserModel
@@ -255,72 +256,154 @@ class CohortService:
     # MEMBERSHIP
     # --------------------------------------------------------
 
+
     @staticmethod
     def add_members(
         session: Session,
         cohort_id: UUID,
         payload: AddMembersRequest,
         actor: UserModel,
-        org_id: UUID,           # ← explicit, was actor.org_id
+        org_id: UUID,
     ) -> AddMembersResponse:
-        cohort = CohortService._get_cohort(session, cohort_id, org_id)
+        cohort: CohortModel = CohortService._get_cohort(session, cohort_id, org_id)
         CohortService._assert_active(cohort)
 
-        added = []
-        already_in = []
-        not_found = []
+        # dedupe while preserving order
+        unique_ids: list[UUID] = list(dict.fromkeys(payload.student_ids))
+
+        # Query 1: all org memberships for the requested users
+        memberships: dict[UUID, OrgMembership] = {
+            m.user_id: m
+            for m in session.exec(
+                select(OrgMembership).where(
+                    OrgMembership.org_id == org_id,
+                    col(OrgMembership.user_id).in_(unique_ids),
+                )
+            ).all()
+        }
+
+        # Query 2: students already in this cohort
+        existing_ids: set[UUID] = set(
+            session.exec(
+                select(CohortMember.student_id).where(
+                    CohortMember.cohort_id == cohort_id,
+                    col(CohortMember.student_id).in_(unique_ids),
+                )
+            ).all()
+        )
+
+        new_members: list[CohortMember] = []
+        already_in: list[UUID] = []
         skipped: list[SkippedMember] = []
 
-        for student_id in payload.student_ids:
-            # Verify student belongs to this org via OrgMembership — not UserModel
-            membership: OrgMembership | None = session.exec(
-                select(OrgMembership).where(
-                    OrgMembership.user_id == student_id,
-                    OrgMembership.org_id == org_id,
-                )
-            ).first()
+        for student_id in unique_ids:
+            membership: OrgMembership | None = memberships.get(student_id)
 
             if membership is None:
                 skipped.append(SkippedMember(student_id=student_id, reason="not_in_org"))
-                continue
-            if membership.role != UserRole.STUDENT:
+            elif membership.role != UserRole.STUDENT:
                 skipped.append(SkippedMember(student_id=student_id, reason="not_a_student"))
-                continue
-            if membership.status not in (MembershipStatus.ACTIVE, MembershipStatus.PENDING):
+            elif membership.status not in (MembershipStatus.ACTIVE, MembershipStatus.PENDING):
                 skipped.append(
                     SkippedMember(student_id=student_id, reason=f"inactive:{membership.status}")
                 )
-                continue
-
-            existing = session.exec(
-                select(CohortMember).where(
-                    CohortMember.cohort_id == cohort_id,
-                    CohortMember.student_id == student_id,
+            elif student_id in existing_ids:
+                already_in.append(student_id)
+            else:
+                new_members.append(
+                    CohortMember(
+                        cohort_id=cohort_id,
+                        student_id=student_id,
+                        org_id=org_id,
+                        added_by=actor.id,
+                    )
                 )
-            ).first()
 
-            if existing:
-                already_in.append(str(student_id))
-                continue
-
-            member = CohortMember(
-                cohort_id=cohort_id,
-                student_id=student_id,
-                org_id=org_id,
-                added_by=actor.id,
-            )
-            session.add(member)
-            added.append(str(student_id))
-
-        session.commit()
+        if new_members:
+            try:
+                session.add_all(new_members)
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Some students were added to this cohort by another request. Please retry.",
+                )
 
         return AddMembersResponse(
-            added=len(added),
+            added=len(new_members),
             already_members=len(already_in),
-            not_found=len(not_found),
+            not_found=0,
             skipped=skipped,
             cohort_id=cohort_id,
         )
+
+    # @staticmethod
+    # def add_members(
+    #     session: Session,
+    #     cohort_id: UUID,
+    #     payload: AddMembersRequest,
+    #     actor: UserModel,
+    #     org_id: UUID,           # ← explicit, was actor.org_id
+    # ) -> AddMembersResponse:
+    #     cohort = CohortService._get_cohort(session, cohort_id, org_id)
+    #     CohortService._assert_active(cohort)
+
+    #     added = []
+    #     already_in = []
+    #     not_found = []
+    #     skipped: list[SkippedMember] = []
+
+    #     for student_id in payload.student_ids:
+    #         # Verify student belongs to this org via OrgMembership — not UserModel
+    #         membership: OrgMembership | None = session.exec(
+    #             select(OrgMembership).where(
+    #                 OrgMembership.user_id == student_id,
+    #                 OrgMembership.org_id == org_id,
+    #             )
+    #         ).first()
+
+    #         if membership is None:
+    #             skipped.append(SkippedMember(student_id=student_id, reason="not_in_org"))
+    #             continue
+    #         if membership.role != UserRole.STUDENT:
+    #             skipped.append(SkippedMember(student_id=student_id, reason="not_a_student"))
+    #             continue
+    #         if membership.status not in (MembershipStatus.ACTIVE, MembershipStatus.PENDING):
+    #             skipped.append(
+    #                 SkippedMember(student_id=student_id, reason=f"inactive:{membership.status}")
+    #             )
+    #             continue
+
+    #         existing = session.exec(
+    #             select(CohortMember).where(
+    #                 CohortMember.cohort_id == cohort_id,
+    #                 CohortMember.student_id == student_id,
+    #             )
+    #         ).first()
+
+    #         if existing:
+    #             already_in.append(str(student_id))
+    #             continue
+
+    #         member = CohortMember(
+    #             cohort_id=cohort_id,
+    #             student_id=student_id,
+    #             org_id=org_id,
+    #             added_by=actor.id,
+    #         )
+    #         session.add(member)
+    #         added.append(str(student_id))
+
+    #     session.commit()
+
+    #     return AddMembersResponse(
+    #         added=len(added),
+    #         already_members=len(already_in),
+    #         not_found=len(not_found),
+    #         skipped=skipped,
+    #         cohort_id=cohort_id,
+    #     )
 
     @staticmethod
     def remove_member(

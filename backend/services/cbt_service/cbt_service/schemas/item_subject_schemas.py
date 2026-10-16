@@ -3,6 +3,7 @@ from uuid import UUID
 from datetime import datetime
 from typing import Generic, TypeVar
 
+from cbt_service.schemas.exam_schemas import ExamItemRead
 from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemSource, ItemType, ItemStatus, SubjectStatus
 from cbt_service.database.models.enums.enums import UserRole
 
@@ -271,3 +272,8 @@ class ItemForDisplayRead(BaseModel):
     item_type: ItemType
     options: list[dict] | None = None
     marks: float
+
+
+class ExamItemDetailRead(ExamItemRead):
+    """Exam-item link plus the full question content, for reviewers."""
+    item: ItemRead

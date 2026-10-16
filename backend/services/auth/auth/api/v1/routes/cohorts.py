@@ -1,5 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query
+from fastapi.concurrency import run_in_threadpool
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.user.enums import UserRole
@@ -121,8 +122,15 @@ async def add_members(
     payload: AddMembersRequest,
     session: SessionDep,
     ctx: UserContext = Depends(AdminOrAbove),
-):
-    result = CohortService.add_members(session=session, cohort_id=cohort_id, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
+) -> AddMembersResponse:
+    result: AddMembersResponse = await run_in_threadpool(
+        CohortService.add_members,
+        session=session,
+        cohort_id=cohort_id,
+        payload=payload,
+        actor=ctx.user,
+        org_id=ctx.membership.org_id,
+    )
 
     # Invalidate exam service cache after membership change
     try:

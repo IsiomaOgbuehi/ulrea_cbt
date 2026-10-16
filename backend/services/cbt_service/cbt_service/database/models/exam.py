@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, JSON, DateTime
+from sqlalchemy import UniqueConstraint
 
 from .enums.exam_enum import AssignmentStatus, ExamAction, ExamStatus
 
@@ -90,6 +91,9 @@ class ExamAssignment(SQLModel, table=True):
     Assigns a student to an exam. Created by teacher/admin.
     """
     __tablename__ = "exam_assignments"
+    __table_args__ = (
+        UniqueConstraint("exam_id", "student_id", name="uq_exam_assignments_exam_student"),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     exam_id: UUID = Field(foreign_key="exams.id", index=True, nullable=False)

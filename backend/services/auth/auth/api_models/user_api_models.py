@@ -1,6 +1,6 @@
 from sqlmodel import Field
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 from .token import TokenBase
 
@@ -250,3 +250,41 @@ class DeleteUserResponse(BaseModel):
     detail: str
     user_id: UUID
     action: DeleteAction  # "deleted" | "membership_removed"
+
+
+class StudentChangeSecurityQARequest(BaseModel):
+    current_answer: str = Field(min_length=1, max_length=200)
+    new_favorite_question: str = Field(min_length=3, max_length=200)
+    new_favorite_answer: str = Field(min_length=2, max_length=100)
+
+    @field_validator("new_favorite_question")
+    @classmethod
+    def _strip_question(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("Security question must be at least 3 characters.")
+        return value
+
+
+class StudentCredentialResetRequest(BaseModel):
+    temp_answer: str | None = Field(default=None, max_length=100)
+
+    @field_validator("temp_answer")
+    @classmethod
+    def _clean_temp_answer(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None  # blank means "generate one for me"
+        if len(value) < 4:
+            raise ValueError("Temporary answer must be at least 4 characters.")
+        return value
+
+
+class StudentCredentialResetResponse(BaseModel):
+    detail: str
+    student_id: UUID
+    access_code: str | None
+    temporary_answer: str
+    was_generated: bool

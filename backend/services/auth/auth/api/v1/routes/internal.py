@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Header, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
-from sqlmodel import select
+from sqlmodel import col, select
 from auth.database.schema.user.user_db import UserModel
 from auth.database.database import SessionDep
 from auth.core.settings import settings
 from auth.services.cohort_service import CohortService
 from auth.database.schema.membership.membership_db import OrgMembership
-from auth.database.schema.user.enums import UserRole
+from auth.database.schema.user.enums import MembershipStatus, UserRole
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -28,33 +28,10 @@ class BulkUserRequest(BaseModel):
     org_id: UUID
 
 
-# @router.get("/users/{user_id}", response_model=UserSummaryResponse)
-# async def get_user_internal(
-#     user_id: UUID,
-#     session: SessionDep,
-#     _: str = Depends(verify_internal_secret),
-# ):
-    
-#     user, membership = session.exec(
-#         select(UserModel, OrgMembership)
-#         .join(
-#             OrgMembership,
-#             OrgMembership.user_id == UserModel.id,
-#             isouter=True,
-#         )
-#         .where(UserModel.id == user_id)
-#     ).first()
-    
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found.")
+class FilterStudentsRequest(BaseModel):
+    user_ids: list[UUID] = Field(max_length=500)
+    org_id: UUID
 
-#     return UserSummaryResponse(
-#         id=user.id,
-#         firstname=user.firstname,
-#         lastname=user.lastname,
-#         email=user.email,
-#         role=membership.role if membership else None,
-#     )
 
 @router.get(
     "/users/{user_id}",
@@ -87,37 +64,6 @@ def get_user_internal(
         role=membership.role if membership else None,
     )
 
-
-# @router.post("/users/bulk", response_model=list[UserSummaryResponse])
-# async def get_users_bulk_internal(
-#     payload: BulkUserRequest,
-#     session: SessionDep,
-#     _: str = Depends(verify_internal_secret),
-# ):
-#     # users = session.exec(
-#     #     select(UserModel).where(UserModel.id.in_(payload.user_ids))
-#     # ).all()
-
-#     results = session.exec(
-#         select(UserModel, OrgMembership)
-#         .join(
-#             OrgMembership,
-#             OrgMembership.user_id == UserModel.id,
-#             isouter=True,
-#         )
-#         .where(UserModel.id.in_(payload.user_ids))
-#     ).all()
-
-#     return [
-#         UserSummaryResponse(
-#             id=u.id,
-#             firstname=u.firstname,
-#             lastname=u.lastname,
-#             email=u.email,
-#             role=m.role.value if m else None,
-#         )
-#         for u, m in results
-#     ]
 
 @router.post(
     "/users/bulk",
@@ -164,3 +110,27 @@ def get_cohort_student_ids_internal(
     """Called by exam service to get student IDs for cohort assignment."""
     student_ids = CohortService.get_active_student_ids(session, cohort_id, x_org_id)
     return [str(i) for i in student_ids]
+
+
+
+@router.post("/students/filter", response_model=list[UUID])
+def filter_active_students_internal(
+    payload: FilterStudentsRequest,
+    session: SessionDep,
+    _: str = Depends(verify_internal_secret),
+) -> list[UUID]:
+    """Return the subset of user_ids that are ACTIVE students in org_id."""
+    if not payload.user_ids:
+        return []
+
+    valid_ids: list[UUID] = list(
+        session.exec(
+            select(OrgMembership.user_id).where(
+                OrgMembership.org_id == payload.org_id,
+                col(OrgMembership.user_id).in_(payload.user_ids),
+                OrgMembership.role == UserRole.STUDENT,
+                OrgMembership.status == MembershipStatus.ACTIVE,
+            )
+        ).all()
+    )
+    return list(dict.fromkeys(valid_ids))

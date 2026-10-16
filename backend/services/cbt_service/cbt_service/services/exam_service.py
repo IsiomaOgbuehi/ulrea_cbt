@@ -1,9 +1,13 @@
+import logging
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete, col, func
 from sqlalchemy import or_, and_
+from typing import Any
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectAssignment, SubjectModel
 from cbt_service.database.models.attempt import AttemptModel
 from cbt_service.database.models.exam import (
@@ -27,6 +31,9 @@ def _log(session: Session, exam_id: UUID, org_id: UUID, actor_id: UUID, action: 
     )
     session.add(entry)
 
+logger: logging.Logger = logging.getLogger(__name__)
+_ASSIGN_CHUNK_SIZE: int = 1000  # keeps each statement far below the driver's bind-parameter cap
+
 
 class ExamService:
 
@@ -48,28 +55,52 @@ class ExamService:
 
 
     @staticmethod
-    def _assert_can_edit(session: Session, exam: ExamModel, current_user: CurrentUser):
-        """Creator, any teacher assigned to the exam's subject, or admin/super_admin can edit a DRAFT exam."""
+    def _assert_can_edit(session: Session, exam: ExamModel, current_user: CurrentUser) -> None:
+        if current_user.role == UserRole.SUPERVISOR:
+            raise HTTPException(status_code=403, detail="Supervisors cannot edit exams.")
         if exam.status not in (ExamStatus.DRAFT, ExamStatus.REJECTED):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Exam cannot be edited in '{exam.status}' status."
-            )
-
+            raise HTTPException(status_code=400, detail=f"Exam cannot be edited in '{exam.status}' status.")
         ExamService._assert_can_view(session, exam, current_user)
 
 
+    # @staticmethod
+    # def _assert_can_view(session: Session, exam: ExamModel, current_user: CurrentUser):
+    #     """
+    #     Creator, any teacher assigned to the exam's subject, or admin/super_admin
+    #     can view the exam and its sections/items/assignments.
+    #     Students are handled separately via ExamAssignment (see get_by_id).
+    #     """
+    #     if current_user.role != UserRole.TEACHER:
+    #         return  # admin/super_admin unrestricted
+
+    #     if exam.created_by == current_user.id:
+    #         return
+
+    #     assignment = session.exec(
+    #         select(SubjectAssignment).where(
+    #             SubjectAssignment.subject_id == exam.subject_id,
+    #             SubjectAssignment.assigned_to == current_user.id,
+    #             SubjectAssignment.org_id == current_user.org_id,
+    #         )
+    #     ).first()
+    #     if not assignment:
+    #         raise HTTPException(status_code=403, detail="You are not assigned to this exam's subject.")
+
     @staticmethod
-    def _assert_can_view(session: Session, exam: ExamModel, current_user: CurrentUser):
+    def _assert_can_view(session: Session, exam: ExamModel, current_user: CurrentUser) -> None:
         """
-        Creator, any teacher assigned to the exam's subject, or admin/super_admin
-        can view the exam and its sections/items/assignments.
+        Admin/super_admin: unrestricted.
+        Teacher: creator, or assigned to the exam's subject.
+        Supervisor: assigned to the exam's subject AND exam is past DRAFT.
         Students are handled separately via ExamAssignment (see get_by_id).
         """
-        if current_user.role != UserRole.TEACHER:
-            return  # admin/super_admin unrestricted
+        if current_user.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
+            return
 
-        if exam.created_by == current_user.id:
+        if current_user.role == UserRole.SUPERVISOR and exam.status == ExamStatus.DRAFT:
+            raise HTTPException(status_code=404, detail="Exam not found.")
+
+        if current_user.role == UserRole.TEACHER and exam.created_by == current_user.id:
             return
 
         assignment = session.exec(
@@ -100,9 +131,15 @@ class ExamService:
         session.refresh(exam)
         return exam
 
+   
+
     # @staticmethod
-    # def get_all(session: Session, current_user: CurrentUser) -> list[ExamModel]:
-    #     query = select(ExamModel).where(ExamModel.org_id == current_user.org_id)
+    # def get_all(session: Session, current_user: CurrentUser) -> list[tuple[ExamModel, str | None]]:
+    #     query = (
+    #         select(ExamModel, SubjectModel.name)
+    #         .join(SubjectModel, SubjectModel.id == ExamModel.subject_id, isouter=True)
+    #         .where(ExamModel.org_id == current_user.org_id)
+    #     )
 
     #     if current_user.role == UserRole.TEACHER:
     #         assigned_subject_ids = select(SubjectAssignment.subject_id).where(
@@ -127,18 +164,23 @@ class ExamService:
             .where(ExamModel.org_id == current_user.org_id)
         )
 
-        if current_user.role == UserRole.TEACHER:
+        if current_user.role in (UserRole.TEACHER, UserRole.SUPERVISOR):
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
                 SubjectAssignment.assigned_to == current_user.id,
                 SubjectAssignment.org_id == current_user.org_id,
             )
-
-            query = query.where(
-                or_(
-                    ExamModel.created_by == current_user.id,
-                    ExamModel.subject_id.in_(assigned_subject_ids),
+            if current_user.role == UserRole.TEACHER:
+                query = query.where(
+                    or_(
+                        ExamModel.created_by == current_user.id,
+                        ExamModel.subject_id.in_(assigned_subject_ids),
+                    )
                 )
-            )
+            else: # SUPERVISOR
+                 query = query.where(
+                    ExamModel.subject_id.in_(assigned_subject_ids),
+                    ExamModel.status != ExamStatus.DRAFT,
+                )
 
         return session.exec(query).all()
 
@@ -247,7 +289,7 @@ class ExamService:
         item_count: int = session.exec(
             select(func.count()).select_from(ExamItem).where(ExamItem.exam_id == exam_id)
         ).one()
-        
+
         if item_count == 0:
             raise HTTPException(status_code=400, detail="Exam must have at least one question before submission.")
 
@@ -265,6 +307,7 @@ class ExamService:
         payload: ApprovalAction, current_user: CurrentUser
     ) -> ExamModel:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)   # <- add (no-op for admins)
 
         if exam.status != ExamStatus.PENDING_APPROVAL:
             raise HTTPException(status_code=400, detail="Only pending exams can be approved or rejected.")
@@ -437,42 +480,85 @@ class ExamService:
         assigned_by: UUID,
         scheduled_at: datetime | None,
         cohort_id: UUID | None = None,
-    ) -> list[ExamAssignment]:
+    ) -> int:
+        """
+        Insert assignments, silently skipping students already assigned.
+        Returns how many rows were actually created. Does not commit.
+        Race-safe: relies on uq_exam_assignments_exam_student.
+        """
         unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
-        existing: dict[UUID, ExamAssignment] = {
-            a.student_id: a
+        created: int = 0
+
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
+
+            # Model instances are transient: never added to the session, only used
+            # to build the rows. id, status and created_at come from the model defaults.
+            models: list[ExamAssignment] = [
+                ExamAssignment(
+                    exam_id=exam_id,
+                    student_id=sid,
+                    org_id=org_id,
+                    assigned_by=assigned_by,
+                    cohort_id=cohort_id,
+                    scheduled_at=scheduled_at,
+                )
+                for sid in chunk
+            ]
+            rows: list[dict[str, Any]] = [m.model_dump() for m in models]
+
+            stmt = (
+                pg_insert(ExamAssignment)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["exam_id", "student_id"])
+                .returning(ExamAssignment.id)
+            )
+            created += len(session.execute(stmt).all())
+
+        return created
+
+
+    @staticmethod
+    def _load_assignments(
+        session: Session, exam_id: UUID, student_ids: list[UUID]
+    ) -> list[ExamAssignment]:
+        """Fresh load after commit: one query per chunk, in the caller's order."""
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        by_student: dict[UUID, ExamAssignment] = {}
+
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
             for a in session.exec(
                 select(ExamAssignment).where(
                     ExamAssignment.exam_id == exam_id,
-                    col(ExamAssignment.student_id).in_(unique_ids),
+                    col(ExamAssignment.student_id).in_(chunk),
                 )
-            ).all()
-        }
-        created: dict[UUID, ExamAssignment] = {}
-        for sid in unique_ids:
-            if sid in existing:
-                continue
-            created[sid] = ExamAssignment(
-                exam_id=exam_id, student_id=sid, cohort_id=cohort_id, org_id=org_id,
-                assigned_by=assigned_by, scheduled_at=scheduled_at,
-            )
-        session.add_all(created.values())
-        return [existing.get(sid) or created[sid] for sid in unique_ids]
+            ).all():
+                by_student[a.student_id] = a
+
+        return [by_student[s] for s in unique_ids if s in by_student]
+
 
     @staticmethod
-    def assign_students(session: Session, exam_id: UUID, payload: AssignStudentsRequest, current_user: CurrentUser) -> list[ExamAssignment]:
-        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+    def assign_students(
+        session: Session, exam_id: UUID,
+        payload: AssignStudentsRequest, current_user: CurrentUser,
+    ) -> list[ExamAssignment]:
+        exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
             raise HTTPException(status_code=400, detail="Students can only be assigned to approved or active exams.")
 
-        assignments = ExamService._bulk_assign(
-            session, exam_id, payload.student_ids, current_user.org_id,
-            current_user.id, payload.scheduled_at,
+        unique_ids: list[UUID] = list(dict.fromkeys(payload.student_ids))
+        actor_id: UUID = UUID(str(current_user.id))
+
+        created: int = ExamService._bulk_assign(
+            session, exam_id, unique_ids, current_user.org_id, actor_id, payload.scheduled_at,
         )
-        _log(session, exam_id, exam.org_id, current_user.id, "students_assigned",
-            {"count": len(payload.student_ids)})
-        session.commit()  # one commit: assignments + audit log together
-        return assignments
+        _log(session, exam_id, exam.org_id, actor_id, "students_assigned",
+            {"requested": len(unique_ids), "created": created})
+        session.commit()  # assignments + audit log together
+
+        return ExamService._load_assignments(session, exam_id, unique_ids)
 
 
     # @staticmethod
@@ -541,62 +627,35 @@ class ExamService:
 
     @staticmethod
     def assign_cohort(
-        session: Session,
-        exam_id: UUID,
-        cohort_id: UUID,
-        scheduled_at: datetime | None,
-        current_user: CurrentUser,
-        student_ids: list[UUID],    # fetched from auth service
+        session: Session, exam_id: UUID, cohort_id: UUID,
+        scheduled_at: datetime | None, current_user: CurrentUser,
+        student_ids: list[UUID],
     ) -> list[ExamAssignment]:
-        """
-        Assign all students in a cohort to an exam.
-        student_ids are fetched from auth service before calling this.
-        """
-        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-
+        exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
-            raise HTTPException(
-                status_code=400,
-                detail="Students can only be assigned to approved or active exams."
-            )
+            raise HTTPException(status_code=400, detail="Students can only be assigned to approved or active exams.")
 
-        assignments = []
-        for student_id in student_ids:
-            existing = session.exec(
-                select(ExamAssignment).where(
-                    ExamAssignment.exam_id == exam_id,
-                    ExamAssignment.student_id == student_id,
-                )
-            ).first()
-            if existing:
-                assignments.append(existing)
-                continue
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        actor_id: UUID = UUID(str(current_user.id))
 
-            assignment = ExamAssignment(
-                exam_id=exam_id,
-                student_id=student_id,
-                cohort_id=cohort_id,            # track which cohort this came from
-                org_id=current_user.org_id,
-                assigned_by=UUID(str(current_user.id)),
-                scheduled_at=scheduled_at,
-            )
-            session.add(assignment)
-            assignments.append(assignment)
-
+        created: int = ExamService._bulk_assign(
+            session, exam_id, unique_ids, current_user.org_id, actor_id, scheduled_at,
+            cohort_id=cohort_id,
+        )
         session.commit()
-        try:
-            _log(session, exam_id, current_user.org_id, UUID(str(current_user.id)),
-                "assigned_to_cohort", {"cohort_id": str(cohort_id), "count": len(student_ids)})
+
+        try:  # an audit failure must not undo the assignments
+            _log(session, exam_id, current_user.org_id, actor_id, "assigned_to_cohort",
+                {"cohort_id": str(cohort_id), "requested": len(unique_ids), "created": created})
             session.commit()
-         
         except Exception:
             session.rollback()
             logger.exception(
-                "Failed to write audit log for cohort_assigned on exam_id=%s cohort_id=%s",
+                "Failed to write audit log for assigned_to_cohort on exam_id=%s cohort_id=%s",
                 exam_id, cohort_id,
             )
 
-        return assignments
+        return ExamService._load_assignments(session, exam_id, unique_ids)
 
 
 
@@ -789,3 +848,25 @@ class ExamService:
         effective_start = assignment.scheduled_at or exam.start_time
         effective_end = assignment.deadline_override or exam.end_time
         return effective_start, effective_end
+
+
+
+
+
+    @staticmethod
+    def get_items_with_content(
+        session: Session, exam_id: UUID, current_user: CurrentUser
+    ) -> list[tuple[ExamItem, ItemModel]]:
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
+
+        rows = session.exec(
+            select(ExamItem, ItemModel)
+            .join(ItemModel, ItemModel.id == ExamItem.item_id)
+            .where(
+                ExamItem.exam_id == exam_id,
+                ItemModel.org_id == current_user.org_id,
+            )
+            .order_by(ExamItem.order)
+        ).all()
+        return list(rows)

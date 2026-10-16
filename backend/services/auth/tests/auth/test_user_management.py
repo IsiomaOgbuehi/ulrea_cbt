@@ -1,14 +1,16 @@
 import jwt as pyjwt
 
+import pytest
 from io import BytesIO
 from openpyxl import Workbook
 from fastapi.testclient import TestClient
 from httpx import Response
 from openpyxl import Workbook, load_workbook 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
 
 from sqlmodel import select, Session
 from ..conftest import engine
@@ -16,6 +18,10 @@ from ..conftest import engine
 from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.membership.membership_db import OrgMembership
+
+from auth.database.schema.user.enums import MembershipStatus
+from auth.services.user.user_management_service import UserManagementService
+from auth.utility.password.password_harsher import PasswordHasher
 
 from tests.conftest import (
     do_signup, do_request_otp, do_verify_otp,
@@ -1140,3 +1146,434 @@ def test_cannot_edit_email_of_activated_staff(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 409, resp.json()
+
+
+
+
+
+
+
+
+
+
+ # ============================================================
+# STUDENT CREDENTIALS: ADMIN RESET + SELF-SERVICE Q&A CHANGE
+# ============================================================
+
+STUDENT_QUESTION = "What is your pet's name?"
+STUDENT_ANSWER = "Fluffy"
+TEMP_QUESTION = "Enter the temporary answer given to you by your administrator"
+STUDENT_LOGIN_URL = "/api/v1/users/student/login"
+STUDENT_QUESTION_URL = "/api/v1/users/student/login/question"
+CHANGE_QA_URL = "/api/v1/users/students/me/security-qa"
+
+VALID_QA_CHANGE: dict[str, str] = {
+    "current_answer": STUDENT_ANSWER,
+    "new_favorite_question": "What city were you born in?",
+    "new_favorite_answer": "Lagos",
+}
+
+
+def _reset_url(student_id: str | UUID) -> str:
+    return f"/api/v1/users/students/{student_id}/reset-credentials"
+
+
+def _create_active_student(
+    client: TestClient, token: str, **overrides: str
+) -> dict[str, str]:
+    """Create a student and complete first-time setup. Returns id, access_code, student token."""
+    created = _create_student(client, token, **overrides)
+    setup = client.post(
+        "/api/v1/users/student/init",
+        json={
+            "access_code": created["access_code"],
+            "favorite_question": STUDENT_QUESTION,
+            "favorite_answer": STUDENT_ANSWER,
+        },
+    )
+    assert setup.status_code == 200, setup.json()
+    return {
+        "id": created["id"],
+        "access_code": created["access_code"],
+        "token": setup.json()["access_token"],
+    }
+
+
+def _staff_token(client: TestClient, super_token: str, payload: dict[str, str]) -> str:
+    created = client.post(
+        "/api/v1/users/staff/create", json=payload, headers=_auth(super_token),
+    )
+    assert created.status_code == 200, created.json()
+    return _activate_staff(client, created.json()["id"], payload["email"])["access_token"]
+
+
+def _student_login(client: TestClient, access_code: str, answer: str) -> Response:
+    return client.post(
+        STUDENT_LOGIN_URL, json={"access_code": access_code, "favorite_answer": answer},
+    )
+
+
+def _get_question(client: TestClient, access_code: str) -> Response:
+    return client.post(STUDENT_QUESTION_URL, json={"access_code": access_code})
+
+
+def _reset(
+    client: TestClient,
+    token: str,
+    student_id: str | UUID,
+    body: dict[str, Any] | None = None,
+) -> Response:
+    if body is None:
+        return client.post(_reset_url(student_id), headers=_auth(token))
+    return client.post(_reset_url(student_id), json=body, headers=_auth(token))
+
+
+def _change_qa(client: TestClient, token: str, **overrides: str) -> Response:
+    return client.post(
+        CHANGE_QA_URL, json={**VALID_QA_CHANGE, **overrides}, headers=_auth(token),
+    )
+
+
+# ------------------------------------------------------------
+# Admin reset: success paths
+# ------------------------------------------------------------
+
+def test_admin_reset_generates_temp_answer(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, token, student["id"])
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["was_generated"] is True
+    assert data["student_id"] == student["id"]
+    assert data["access_code"] == student["access_code"]  # access code is untouched
+    temp_answer: str = data["temporary_answer"]
+    assert len(temp_answer) >= 6
+
+    login = _student_login(client, student["access_code"], temp_answer)
+    assert login.status_code == 200, login.text
+    assert "access_token" in login.json()
+
+    # The old answer is dead
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 401
+
+    # The student now sees the placeholder question
+    question = _get_question(client, student["access_code"])
+    assert question.status_code == 200, question.text
+    assert question.json()["favorite_question"] == TEMP_QUESTION
+
+
+def test_admin_reset_with_supplied_temp_answer(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, token, student["id"], {"temp_answer": "blue-door-7"})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["was_generated"] is False
+    assert data["temporary_answer"] == "blue-door-7"
+
+    assert _student_login(client, student["access_code"], "blue-door-7").status_code == 200
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 401
+
+
+def test_supplied_temp_answer_is_trimmed(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, token, student["id"], {"temp_answer": "  blue-door-7  "})
+    assert response.status_code == 200, response.text
+    assert response.json()["temporary_answer"] == "blue-door-7"
+    assert _student_login(client, student["access_code"], "blue-door-7").status_code == 200
+
+
+def test_temp_answer_is_case_sensitive(client: TestClient) -> None:
+    """Documents current behaviour: answers are compared exactly as typed."""
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    _reset(client, token, student["id"], {"temp_answer": "BlueDoor7"})
+
+    assert _student_login(client, student["access_code"], "bluedoor7").status_code == 401
+    assert _student_login(client, student["access_code"], "BlueDoor7").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, {}, {"temp_answer": None}, {"temp_answer": ""}, {"temp_answer": "   "}],
+    ids=["no-body", "empty-object", "null", "empty-string", "whitespace"],
+)
+def test_blank_or_missing_temp_answer_is_generated(
+    client: TestClient, body: dict[str, Any] | None
+) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, token, student["id"], body)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["was_generated"] is True
+    assert data["temporary_answer"]
+    assert _student_login(
+        client, student["access_code"], data["temporary_answer"]
+    ).status_code == 200
+
+
+def test_each_reset_generates_a_new_answer(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    first: str = _reset(client, token, student["id"]).json()["temporary_answer"]
+    second: str = _reset(client, token, student["id"]).json()["temporary_answer"]
+
+    assert first != second
+    assert _student_login(client, student["access_code"], first).status_code == 401
+    assert _student_login(client, student["access_code"], second).status_code == 200
+
+
+def test_temp_answer_is_stored_hashed(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    _reset(client, token, student["id"], {"temp_answer": "blue-door-7"})
+
+    with Session(engine) as session:
+        user = session.get(UserModel, UUID(student["id"]))
+        assert user is not None
+        assert user.favorite_answer_hash
+        assert user.favorite_answer_hash != "blue-door-7"
+        assert PasswordHasher.verify("blue-door-7", user.favorite_answer_hash)
+        assert user.favorite_question == TEMP_QUESTION
+        assert user.is_first_login is False  # reset must not push them back into setup
+
+
+# ------------------------------------------------------------
+# Admin reset: validation and state errors
+# ------------------------------------------------------------
+
+def test_too_short_temp_answer_is_rejected(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, token, student["id"], {"temp_answer": "abc"})
+    assert response.status_code == 422, response.text
+
+    # Nothing changed
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+
+
+def test_reset_unknown_student_returns_404(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    response = _reset(client, token, uuid4())
+    assert response.status_code == 404, response.text
+
+
+def test_reset_rejects_non_student_target(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    teacher = _create_pending_teacher(client, token)
+
+    response = _reset(client, token, teacher["id"])
+    assert response.status_code == 404, response.text
+
+
+def test_reset_before_first_time_setup_is_rejected(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    created = _create_student(client, token)  # no /student/init
+
+    response = _reset(client, token, created["id"])
+    assert response.status_code == 400, response.text
+    assert "first-time setup" in response.json()["detail"]
+
+
+def test_reset_rejects_inactive_membership(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    with Session(engine) as session:
+        membership = session.exec(
+            select(OrgMembership).where(OrgMembership.user_id == UUID(student["id"]))
+        ).first()
+        assert membership is not None
+        membership.status = MembershipStatus.ARCHIVED
+        session.add(membership)
+        session.commit()
+
+    response = _reset(client, token, student["id"])
+    assert response.status_code == 400, response.text
+    assert "first-time" not in response.json()["detail"]  # needs fix #1
+
+
+def test_reset_is_scoped_to_the_admins_organization(client: TestClient) -> None:
+    """A different org_id must not find the student (service-level: avoids a second signup)."""
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    with Session(engine) as session:
+        with pytest.raises(HTTPException) as excinfo:
+            UserManagementService.admin_reset_student_credentials(
+                session, UUID(student["id"]), uuid4(),
+            )
+    assert excinfo.value.status_code == 404
+
+    # Nothing changed
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+
+
+# ------------------------------------------------------------
+# Admin reset: authorization
+# ------------------------------------------------------------
+
+def test_plain_admin_can_reset_student_credentials(client: TestClient) -> None:
+    super_token = get_super_admin_token(client)
+    student = _create_active_student(client, super_token)
+    admin_token = _staff_token(client, super_token, ADMIN_PAYLOAD)
+
+    response = _reset(client, admin_token, student["id"])
+    assert response.status_code == 200, response.text
+
+
+def test_teacher_cannot_reset_student_credentials(client: TestClient) -> None:
+    super_token = get_super_admin_token(client)
+    student = _create_active_student(client, super_token)
+    teacher_token = _staff_token(client, super_token, TEACHER_PAYLOAD)
+
+    response = _reset(client, teacher_token, student["id"])
+    assert response.status_code == 403, response.text
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+
+
+def test_student_cannot_reset_credentials(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _reset(client, student["token"], student["id"])
+    assert response.status_code == 403, response.text
+
+
+def test_reset_requires_authentication(client: TestClient) -> None:
+    response = client.post(_reset_url(uuid4()))
+    assert response.status_code == 401, response.text
+
+
+# ------------------------------------------------------------
+# Student self-service Q&A change
+# ------------------------------------------------------------
+
+def test_student_can_change_own_security_qa(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _change_qa(client, student["token"])
+    assert response.status_code == 200, response.text
+    assert response.json() == {"detail": "Security question and answer updated."}
+
+    assert _student_login(client, student["access_code"], "Lagos").status_code == 200
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 401
+    question = _get_question(client, student["access_code"])
+    assert question.json()["favorite_question"] == "What city were you born in?"
+
+
+def test_change_qa_with_wrong_current_answer_is_rejected(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _change_qa(client, student["token"], current_answer="Wrong")
+    assert response.status_code == 400, response.text  # 400, not 401: must not log the student out
+    assert response.json()["detail"] == "Current answer is incorrect."
+
+    # Nothing changed
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+    assert _get_question(client, student["access_code"]).json()["favorite_question"] == STUDENT_QUESTION
+
+
+def test_change_qa_trims_the_question(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _change_qa(
+        client, student["token"], new_favorite_question="  What city were you born in?  ",
+    )
+    assert response.status_code == 200, response.text
+    question = _get_question(client, student["access_code"])
+    assert question.json()["favorite_question"] == "What city were you born in?"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
+        {"current_answer": "", "new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
+        {"current_answer": STUDENT_ANSWER, "new_favorite_answer": "Lagos"},
+        {"current_answer": STUDENT_ANSWER, "new_favorite_question": "ab", "new_favorite_answer": "Lagos"},
+        {"current_answer": STUDENT_ANSWER, "new_favorite_question": "What city?", "new_favorite_answer": "a"},
+        {"current_answer": STUDENT_ANSWER, "new_favorite_question": "What city?", "new_favorite_answer": "x" * 101},
+    ],
+    ids=[
+        "missing-current", "empty-current", "missing-question",
+        "question-too-short", "answer-too-short", "answer-too-long",
+    ],
+)
+def test_change_qa_rejects_invalid_payloads(
+    client: TestClient, payload: dict[str, str]
+) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = client.post(CHANGE_QA_URL, json=payload, headers=_auth(student["token"]))
+    assert response.status_code == 422, response.text
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+
+
+def test_change_qa_rejects_blank_question(client: TestClient) -> None:
+    """Needs fix #2: '   ' must not pass min_length and then be stored as ''."""
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+
+    response = _change_qa(client, student["token"], new_favorite_question="   ")
+    assert response.status_code == 422, response.text
+    assert _get_question(client, student["access_code"]).json()["favorite_question"] == STUDENT_QUESTION
+
+
+def test_student_can_change_qa_after_admin_reset(client: TestClient) -> None:
+    """End-to-end: forgot answer -> admin reset -> student logs in -> sets their own."""
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    _reset(client, token, student["id"], {"temp_answer": "blue-door-7"})
+
+    login = _student_login(client, student["access_code"], "blue-door-7")
+    assert login.status_code == 200, login.text
+    fresh_token: str = login.json()["access_token"]
+
+    response = _change_qa(client, fresh_token, current_answer="blue-door-7")
+    assert response.status_code == 200, response.text
+
+    assert _student_login(client, student["access_code"], "Lagos").status_code == 200
+    assert _student_login(client, student["access_code"], "blue-door-7").status_code == 401
+
+
+def test_change_qa_does_not_affect_other_students(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    first = _create_active_student(client, token)
+    second = _create_active_student(
+        client, token,
+        firstname="Diana", lastname="Okafor",
+        phone="+1000000004", institution_id="STU/2024/002",
+    )
+
+    assert _change_qa(client, first["token"]).status_code == 200
+
+    # The other student's credentials are untouched
+    assert _student_login(client, second["access_code"], STUDENT_ANSWER).status_code == 200
+    assert _get_question(client, second["access_code"]).json()["favorite_question"] == STUDENT_QUESTION
+
+
+def test_teacher_cannot_change_student_qa(client: TestClient) -> None:
+    super_token = get_super_admin_token(client)
+    teacher_token = _staff_token(client, super_token, TEACHER_PAYLOAD)
+
+    response = _change_qa(client, teacher_token)
+    assert response.status_code == 403, response.text
+
+
+def test_change_qa_requires_authentication(client: TestClient) -> None:
+    response = client.post(CHANGE_QA_URL, json=VALID_QA_CHANGE)
+    assert response.status_code == 401, response.text

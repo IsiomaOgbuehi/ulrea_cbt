@@ -79,9 +79,18 @@ async def handle_unverified_user(user: UserModel):
 
 def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
     user = authenticate_user(session, username, password)
+
     if user is None:
         raise HTTPException(status_code=401, detail="Incorrect username or password",
                             headers={"WWW-Authenticate": "Bearer"})
+
+    # Ensure user is valid and is an actual object, not a boolean (False)
+    if not user:
+        raise HTTPException(
+            status_code=401, 
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
     # one query for both the membership and its org (was up to 3 queries)
     rows: list[tuple[OrgMembership, OrganizationModel]] = list(session.exec(
@@ -89,6 +98,7 @@ def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
         .join(OrganizationModel, OrganizationModel.id == OrgMembership.org_id)
         .where(OrgMembership.user_id == user.id)
     ).all())
+    
     pending = next((m for m, _ in rows if m.status == MembershipStatus.PENDING), None)
     active = next(((m, o) for m, o in rows if m.status == MembershipStatus.ACTIVE), None)
 

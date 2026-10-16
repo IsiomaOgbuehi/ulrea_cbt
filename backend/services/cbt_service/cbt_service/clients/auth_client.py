@@ -6,86 +6,6 @@ from cbt_service.core.settings import settings
 from cbt_service.schemas.item_subject_schemas import UserSummary
 
 
-# class AuthClient:
-#     """
-#     Internal HTTP client for calling the auth service.
-#     Uses Redis to cache user lookups for 5 minutes.
-#     """
-
-#     def __init__(self, redis_client, base_url: str = None):
-#         self.base_url = base_url or settings.AUTH_SERVICE_URL
-#         self.redis = redis_client
-
-#     async def get_user(self, user_id: UUID) -> UserSummary | None:
-#         cache_key = f"user_cache:{user_id}"
-
-#         # Check cache first
-#         cached = await self.redis.get(cache_key)
-#         if cached:
-#             return UserSummary(**json.loads(cached))
-
-#         # Call auth service
-#         try:
-#             async with httpx.AsyncClient() as client:
-#                 response = await client.get(
-#                     f"{self.base_url}/internal/users/{user_id}",
-#                     headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
-#                     timeout=5.0,
-#                 )
-#                 if response.status_code == 200:
-#                     user = UserSummary(**response.json())
-#                     # Cache for 5 minutes
-#                     await self.redis.set(
-#                         cache_key,
-#                         json.dumps(user.model_dump(mode="json")),
-#                         ex=300
-#                     )
-#                     return user
-#                 return None
-#         except httpx.TimeoutException:
-#             return None  # degrade gracefully — return None, not 500
-
-#     async def get_users_bulk(self, user_ids: list[UUID]) -> dict[str, UserSummary]:
-#         """Fetch multiple users in one call — avoids N+1 problem."""
-#         results = {}
-#         uncached_ids = []
-
-#         # Check cache for each
-#         for user_id in user_ids:
-#             cache_key = f"user_cache:{user_id}"
-#             cached = await self.redis.get(cache_key)
-#             if cached:
-#                 results[str(user_id)] = UserSummary(**json.loads(cached))
-#             else:
-#                 uncached_ids.append(user_id)
-
-#         # Fetch uncached in one request
-#         print(f"{self.base_url}/internal/users/bulk")
-#         if uncached_ids:
-#             try:
-#                 async with httpx.AsyncClient() as client:
-#                     response = await client.post(
-#                         f"{self.base_url}/internal/users/bulk",
-#                         json={"user_ids": [str(i) for i in uncached_ids]},
-#                         headers={
-#                             "X-Internal-Secret": settings.INTERNAL_SECRET
-#                         },
-#                         timeout=5.0,
-#                     )
-#                     if response.status_code == 200:
-#                         for user_data in response.json():
-#                             user = UserSummary(**user_data)
-#                             results[str(user.id)] = user
-#                             # Cache each result
-#                             await self.redis.set(
-#                                 f"user_cache:{user.id}",
-#                                 json.dumps(user.model_dump(mode="json")),
-#                                 ex=300
-#                             )
-#             except httpx.TimeoutException:
-#                 pass  # return whatever we have from cache
-
-#         return results
 
 class AuthClient:
     """
@@ -99,7 +19,7 @@ class AuthClient:
     """
 
     CACHE_TTL_SECONDS = 300
-    REQUEST_TIMEOUT_SECONDS = 5.0
+    REQUEST_TIMEOUT_SECONDS = 7.0
 
     def __init__(self, redis_client, base_url: str | None = None):
         self.base_url = (
@@ -131,7 +51,7 @@ class AuthClient:
                 timeout=self.REQUEST_TIMEOUT_SECONDS
             ) as client:
                 response = await client.get(
-                    f"{self.base_url}/internal/users/{user_id}",
+                    f"{self.base_url}/api/v1/internal/users/{user_id}",
                     headers={
                         "X-Internal-Secret": settings.INTERNAL_SECRET,
                     },
@@ -161,7 +81,7 @@ class AuthClient:
     async def get_users_bulk(
         self,
         user_ids: list[UUID],
-        org_id: UUID | None = None,
+        org_id: UUID
     ) -> dict[str, UserSummary]:
         """
         Fetch multiple users in one request.
@@ -219,7 +139,7 @@ class AuthClient:
                 timeout=self.REQUEST_TIMEOUT_SECONDS
             ) as client:
                 response = await client.post(
-                    f"{self.base_url}/internal/users/bulk",
+                    f"{self.base_url}/api/v1/internal/users/bulk",
                     json=payload,
                     headers={
                         "X-Internal-Secret": settings.INTERNAL_SECRET,
@@ -317,3 +237,34 @@ class AuthClient:
         so the exam service doesn't use stale student IDs.
         """
         await self.redis.delete(f"cohort_students:{cohort_id}")
+
+
+    async def filter_student_ids(
+        self,
+        student_ids: list[UUID],
+        org_id: UUID,
+    ) -> list[UUID]:
+        """
+        Return the subset of student_ids that are active students in org_id.
+        Raises on any auth-service failure, so the caller can tell
+        "service unavailable" (502) apart from "no valid students" (422).
+        Deliberately not cached: membership changes should apply immediately.
+        """
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        if not unique_ids:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=self.REQUEST_TIMEOUT_SECONDS) as client:
+                response: httpx.Response = await client.post(
+                    f"{self.base_url}/api/v1/internal/students/filter",
+                    json={
+                        "user_ids": [str(i) for i in unique_ids],
+                        "org_id": str(org_id),
+                    },
+                    headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                )
+                response.raise_for_status()
+                return [UUID(i) for i in response.json()]
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError("Could not verify students with auth service.") from exc
