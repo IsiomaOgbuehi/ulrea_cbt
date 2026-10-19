@@ -1,13 +1,18 @@
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select, col
+from sqlmodel import Session, select, col, func, not_
 
+from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
 from cbt_service.schemas.item_subject_schemas import SubjectCreate, SubjectUpdate, CurrentUser
-from cbt_service.database.models.enums.item_subject_enums import SubjectStatus
+from cbt_service.database.models.enums.item_subject_enums import ItemStatus, SubjectStatus
 from cbt_service.database.models.enums.enums import UserRole
 
+
+def _escape_like(term: str) -> str:
+        """Treat %, _ and \\ in user input literally inside an ILIKE pattern."""
+        return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 class SubjectService:
 
@@ -24,26 +29,98 @@ class SubjectService:
         session.refresh(subject)
         return subject
 
+    # @staticmethod
+    # def get_all(session: Session, current_user: CurrentUser) -> list[SubjectModel]:
+    #     """
+    #     Admin/Super Admin see all subjects in their org.
+    #     Teachers only see subjects assigned to them.
+    #     """
+    #     query = select(SubjectModel).where(
+    #         SubjectModel.org_id == current_user.org_id,
+    #         SubjectModel.status == SubjectStatus.ACTIVE,
+    #     )
+
+    #     if current_user.role == UserRole.TEACHER:
+    #         # Join to assignments — teacher only sees assigned subjects
+    #         assigned_subject_ids = select(SubjectAssignment.subject_id).where(
+    #             SubjectAssignment.assigned_to == current_user.id,
+    #             SubjectAssignment.org_id == current_user.org_id,
+    #         )
+    #         query = query.where(SubjectModel.id.in_(assigned_subject_ids))
+
+    #     return session.exec(query).all()
+
     @staticmethod
-    def get_all(session: Session, current_user: CurrentUser) -> list[SubjectModel]:
+    def get_all(
+        session: Session,
+        current_user: CurrentUser,
+        status: SubjectStatus | None = None,
+        has_items: bool | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[tuple[SubjectModel, int]], int]:
         """
-        Admin/Super Admin see all subjects in their org.
-        Teachers only see subjects assigned to them.
+        Admin/Super Admin see all subjects in their org; teachers only their assigned ones.
+        Returns ([(subject, active_item_count), ...] for the requested page, total matches).
         """
         query = select(SubjectModel).where(
             SubjectModel.org_id == current_user.org_id,
-            SubjectModel.status == SubjectStatus.ACTIVE,
+            SubjectModel.status == (status or SubjectStatus.ACTIVE),
         )
 
         if current_user.role == UserRole.TEACHER:
-            # Join to assignments — teacher only sees assigned subjects
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
                 SubjectAssignment.assigned_to == current_user.id,
                 SubjectAssignment.org_id == current_user.org_id,
             )
-            query = query.where(SubjectModel.id.in_(assigned_subject_ids))
+            query = query.where(col(SubjectModel.id).in_(assigned_subject_ids))
 
-        return session.exec(query).all()
+        if search and search.strip():
+            pattern: str = f"%{_escape_like(search.strip())}%"
+            query = query.where(col(SubjectModel.name).ilike(pattern, escape="\\"))
+
+        if has_items is not None:
+            has_active_items = (
+                select(ItemModel.id)
+                .where(
+                    ItemModel.subject_id == SubjectModel.id,
+                    ItemModel.org_id == current_user.org_id,
+                    ItemModel.status == ItemStatus.ACTIVE,
+                )
+                .exists()
+            )
+            query = query.where(has_active_items if has_items else not_(has_active_items))
+
+        # 1. Total matches, before limit/offset.
+        total: int = session.exec(select(func.count()).select_from(query.subquery())).one()
+
+        # 2. The requested page. The id tiebreaker keeps page boundaries stable
+        #    when two subjects share a name.
+        subjects: list[SubjectModel] = list(
+            session.exec(
+                query
+                .order_by(col(SubjectModel.name), col(SubjectModel.id))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
+        )
+
+        # 3. Active item counts for this page's subjects only.
+        counts: dict[UUID, int] = {}
+        if subjects:
+            rows = session.exec(
+                select(ItemModel.subject_id, func.count())
+                .where(
+                    ItemModel.org_id == current_user.org_id,
+                    ItemModel.status == ItemStatus.ACTIVE,
+                    col(ItemModel.subject_id).in_([s.id for s in subjects]),
+                )
+                .group_by(ItemModel.subject_id)
+            ).all()
+            counts = {subject_id: int(n) for subject_id, n in rows}
+
+        return [(s, counts.get(s.id, 0)) for s in subjects], total
 
     @staticmethod
     def get_by_id(session: Session, subject_id: UUID, current_user: CurrentUser) -> SubjectModel:

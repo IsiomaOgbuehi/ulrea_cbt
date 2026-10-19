@@ -119,6 +119,7 @@ class AttemptDetailRead(BaseModel):
 class CohortAttemptSummary(BaseModel):
     id: UUID
     student_id: UUID
+    student_name: str | None = None
     status: str
     submitted_at: datetime | None
     final_score: float | None

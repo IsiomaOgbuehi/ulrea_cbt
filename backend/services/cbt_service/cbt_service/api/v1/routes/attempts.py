@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import select
 from starlette.concurrency import run_in_threadpool
 
+from cbt_service.schemas.exam_schemas import UserSummary
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.services.violation.violation_service import ViolationService
@@ -150,15 +151,42 @@ def get_attempt_exam(
 
 
 
+# ''' COHORT ATTEMPTS 📊 '''
+# @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
+# def get_cohort_attempts(
+#     exam_id: UUID,
+#     cohort_id: UUID,
+#     session: SessionDep,
+#     current_user: CurrentUser = Depends(TeacherOrAbove),
+# ):
+#     return AttemptService.get_cohort_attempts(session, exam_id, cohort_id, current_user)
+
 ''' COHORT ATTEMPTS 📊 '''
 @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
-def get_cohort_attempts(
+async def get_cohort_attempts(
     exam_id: UUID,
     cohort_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
-):
-    return AttemptService.get_cohort_attempts(session, exam_id, cohort_id, current_user)
+) -> list[CohortAttemptSummary]:
+    summaries: list[CohortAttemptSummary] = await run_in_threadpool(
+        AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
+    )
+    if not summaries:
+        return summaries
+
+    auth_client = AuthClient(redis_client)
+    users: dict[str, UserSummary] = await auth_client.get_users_bulk(
+        [s.student_id for s in summaries],
+        org_id=current_user.org_id,
+    )
+
+    enriched: list[CohortAttemptSummary] = []
+    for s in summaries:
+        user: UserSummary | None = users.get(str(s.student_id))
+        name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
+        enriched.append(s.model_copy(update={"student_name": name}))
+    return enriched
 
 
 ''' ATTEMPT DETAIL (STAFF VIEW) 🔍 '''

@@ -1,8 +1,10 @@
 # exam_service/tests/test_exams.py
 import pytest
-from uuid import uuid4
+from uuid import uuid4, UUID
+
 from sqlmodel import Session, select
 from cbt_service.database.models.exam import ExamAssignment
+from cbt_service.clients.auth_client import AuthClient
 from .conftest import engine, STUDENT_ID
 
 from .attempt_conftest import start_attempt
@@ -20,23 +22,41 @@ def test_teacher_can_create_exam(client, teacher_headers):
     assert exam["total_marks"] == 0.0
 
 
-def test_teacher_only_sees_own_exams(client, teacher_headers, admin_headers):
+def test_teacher_only_sees_own_exams(client, teacher_headers, admin_headers) -> None:
     create_exam(client, teacher_headers, title="Teacher Exam")
     create_exam(client, admin_headers, title="Admin Exam")
 
     response = client.get("/api/v1/exams", headers=teacher_headers)
     assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["title"] == "Teacher Exam"
+    data = response.json()
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["title"] == "Teacher Exam"
 
 
-def test_admin_sees_all_exams(client, teacher_headers, admin_headers):
+def test_admin_sees_all_exams(client, teacher_headers, admin_headers) -> None:
     create_exam(client, teacher_headers)
     create_exam(client, admin_headers)
 
     response = client.get("/api/v1/exams", headers=admin_headers)
     assert response.status_code == 200
-    assert len(response.json()) == 2
+    data = response.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+    
+
+def test_list_exams_paginates_and_filters(client, teacher_headers) -> None:
+    for title in ("Algebra Mid", "Biology Mid", "Algebra Final"):
+        create_exam(client, teacher_headers, title=title)  # adjust to your helper's signature
+
+    page = client.get("/api/v1/exams?page=1&page_size=2", headers=teacher_headers).json()
+    assert page["total"] == 3 and len(page["items"]) == 2 and page["total_pages"] == 2
+
+    hit = client.get("/api/v1/exams?search=algebra", headers=teacher_headers).json()
+    assert hit["total"] == 2
+
+    draft = client.get("/api/v1/exams?status=draft", headers=teacher_headers).json()
+    assert draft["total"] == 3
 
 
 def test_teacher_cannot_edit_other_teachers_exam(client, teacher_headers):
@@ -181,7 +201,7 @@ def test_remove_item_updates_total_marks(client, teacher_headers):
 # STUDENT ASSIGNMENT
 # ============================================================
 
-def test_students_can_only_be_assigned_to_approved_exam(client, teacher_headers, admin_headers):
+def test_students_can_only_be_assigned_to_approved_exam(client, teacher_headers, admin_headers, all_students_valid: None) -> None:
     exam = create_exam(client, teacher_headers)
 
     response = client.post(
@@ -192,7 +212,19 @@ def test_students_can_only_be_assigned_to_approved_exam(client, teacher_headers,
     assert response.status_code == 400
 
 
-def test_assign_students_to_approved_exam(client, teacher_headers, admin_headers):
+def create_approved_exam(client, teacher_headers, admin_headers) -> dict:
+    exam = create_exam(client, teacher_headers)
+    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
+    client.post(
+        f"/api/v1/exams/{exam['id']}/approval",
+        json={"action": "approved"},
+        headers=admin_headers,
+    )
+    return exam
+
+
+def test_assign_students_to_approved_exam(client, teacher_headers, admin_headers, all_students_valid: None) -> None:
     exam = create_exam(client, teacher_headers)
     add_items(client, teacher_headers, exam["id"], [uuid4()])
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
@@ -206,6 +238,41 @@ def test_assign_students_to_approved_exam(client, teacher_headers, admin_headers
     )
     assert response.status_code == 200
     assert len(response.json()) == 3
+
+
+
+def test_assign_rejects_students_not_in_org(
+    client, teacher_headers, admin_headers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _none_valid(self: AuthClient, student_ids: list[UUID], org_id: UUID) -> list[UUID]:
+        return []
+
+    monkeypatch.setattr(AuthClient, "filter_student_ids", _none_valid)
+
+    exam = create_approved_exam(client, teacher_headers, admin_headers)
+    response = client.post(
+        f"/api/v1/exams/{exam['id']}/assign",
+        json={"student_ids": [str(uuid4())]},
+        headers=teacher_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_assign_returns_502_when_auth_service_down(
+    client, teacher_headers, admin_headers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _boom(self: AuthClient, student_ids: list[UUID], org_id: UUID) -> list[UUID]:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(AuthClient, "filter_student_ids", _boom)
+
+    exam = create_approved_exam(client, teacher_headers, admin_headers)
+    response = client.post(
+        f"/api/v1/exams/{exam['id']}/assign",
+        json={"student_ids": [str(uuid4())]},
+        headers=teacher_headers,
+    )
+    assert response.status_code == 502
 
 
 # ============================================================
@@ -393,3 +460,33 @@ def test_deleting_exam_with_attempts_archives_instead(client, admin_headers, stu
 def test_delete_nonexistent_exam_returns_404(client, admin_headers):
     response = client.delete(f"/api/v1/exams/{uuid4()}", headers=admin_headers)
     assert response.status_code == 404
+
+
+
+def test_assign_cohort_draft_exam_fails_before_auth_call(
+    client, teacher_headers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _boom(self: AuthClient, cohort_id: UUID, org_id: UUID) -> list[UUID]:
+        raise AssertionError("auth service must not be called for a draft exam")
+
+    monkeypatch.setattr(AuthClient, "get_cohort_student_ids", _boom)
+
+    exam = create_exam(client, teacher_headers)
+    response = client.post(
+        f"/api/v1/exams/{exam['id']}/assign_cohort",
+        json={"cohort_id": str(uuid4())},
+        headers=teacher_headers,
+    )
+    assert response.status_code == 400
+
+
+# def test_assign_forbidden_for_unassigned_teacher(
+#     client, teacher_headers, admin_headers, other_teacher_headers
+# ) -> None:
+#     exam = create_approved_exam(client, teacher_headers, admin_headers)
+#     response = client.post(
+#         f"/api/v1/exams/{exam['id']}/assign",
+#         json={"student_ids": [str(uuid4())]},
+#         headers=other_teacher_headers,
+#     )
+#     assert response.status_code == 403

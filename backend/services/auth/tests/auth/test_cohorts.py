@@ -220,7 +220,7 @@ def test_admin_can_create_cohort(client):
     assert "id" in data
 
 
-def test_admin_can_list_cohorts(client):
+def test_admin_can_list_cohorts(client) -> None:
     """Admin sees all cohorts in the org."""
     token = get_super_admin_token(client)
     _create_cohort(client, token, COHORT_PAYLOAD)
@@ -228,12 +228,14 @@ def test_admin_can_list_cohorts(client):
 
     resp = client.get("/api/v1/cohorts", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, resp.json()
-    names = [c["name"] for c in resp.json()]
+    data = resp.json()
+    names = [c["name"] for c in data["items"]]
+    assert data["total"] == len(data["items"]) == 2
     assert "JSS 1A" in names
     assert "JSS 1B" in names
 
 
-def test_admin_can_filter_cohorts_by_status(client):
+def test_admin_can_filter_cohorts_by_status(client) -> None:
     """Status query param filters returned cohorts."""
     token = get_super_admin_token(client)
     _create_cohort(client, token)
@@ -243,7 +245,9 @@ def test_admin_can_filter_cohorts_by_status(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200, resp.json()
-    for cohort in resp.json():
+    data = resp.json()
+    assert data["total"] >= 1                      # a vacuous loop over [] would pass without this
+    for cohort in data["items"]:
         assert cohort["status"] == "active"
 
 

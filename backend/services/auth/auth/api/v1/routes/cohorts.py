@@ -13,6 +13,7 @@ from auth.utility.redis.redis_client import redis_client
 from auth.dependencies.auth_dependencies import get_user_context, require_cohort_access
 from auth.services.user.user_context import UserContext
 from auth.services.teacher_cohort_service import TeacherCohortService
+from auth.database.schema.cohort.enum import CohortStatus
 from .users import require_roles
 
 router = APIRouter(prefix="/cohorts", tags=["cohorts"])
@@ -32,14 +33,37 @@ def create_cohort(
     return CohortService.create(session=session, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
 
 
+# ''' LIST COHORTS 📋 '''
+# @router.get("", response_model=list[CohortRead])
+# def list_cohorts(
+#     session: SessionDep,
+#     ctx: UserContext = Depends(TeacherOrAbove),
+#     status: str | None = Query(default=None, description="Filter by status: active, graduated, archived"),
+# ):
+#     return CohortService.get_all(session, ctx.membership.org_id, status)
+
+
 ''' LIST COHORTS 📋 '''
-@router.get("", response_model=list[CohortRead])
+@router.get("", response_model=PaginatedResponse[CohortRead])
 def list_cohorts(
     session: SessionDep,
     ctx: UserContext = Depends(TeacherOrAbove),
-    status: str | None = Query(default=None, description="Filter by status: active, graduated, archived"),
-):
-    return CohortService.get_all(session, ctx.membership.org_id, status)
+    status: CohortStatus | None = Query(default=None, description="active, graduated or archived; default excludes archived"),
+    search: str | None = Query(default=None, max_length=100, description="Matches cohort name"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> PaginatedResponse[CohortRead]:
+    cohorts, total = CohortService.get_all(
+        session, ctx.membership.org_id,
+        status=status, search=search, page=page, page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=cohorts,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+    )
 
 
 ''' MY COHORTS (TEACHER) 🧑‍🏫 '''

@@ -3,10 +3,11 @@ from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete, col, func
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, desc
 from typing import Any
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from cbt_service.services.item.utils.search import escape_like
 from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectAssignment, SubjectModel
 from cbt_service.database.models.attempt import AttemptModel
@@ -113,6 +114,29 @@ class ExamService:
         if not assignment:
             raise HTTPException(status_code=403, detail="You are not assigned to this exam's subject.")
 
+
+
+    @staticmethod
+    def assert_assignable(session: Session, exam_id: UUID, current_user: CurrentUser) -> None:
+        """
+        Cheap pre-check, run before any network call:
+        1. the exam exists in the caller's org (404 otherwise),
+        2. the caller may access it: admins always, teachers if they created it or
+        are assigned to its subject (403 otherwise),
+        3. the exam is in a status that accepts assignments (400 otherwise).
+        The access check comes before the status check so an unauthorised caller
+        can't learn an exam's status.
+        """
+        exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
+        if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
+            raise HTTPException(
+                status_code=400,
+                detail="Students can only be assigned to approved or active exams.",
+            )
+        # Release the DB connection so it isn't held during the auth-service call.
+        session.close()
+
     # --------------------------------------------------------
     # EXAM CRUD
     # --------------------------------------------------------
@@ -141,28 +165,38 @@ class ExamService:
     #         .where(ExamModel.org_id == current_user.org_id)
     #     )
 
-    #     if current_user.role == UserRole.TEACHER:
+    #     if current_user.role in (UserRole.TEACHER, UserRole.SUPERVISOR):
     #         assigned_subject_ids = select(SubjectAssignment.subject_id).where(
     #             SubjectAssignment.assigned_to == current_user.id,
     #             SubjectAssignment.org_id == current_user.org_id,
     #         )
-
-    #         query = query.where(
-    #             or_(
-    #                 ExamModel.created_by == current_user.id,
-    #                 ExamModel.subject_id.in_(assigned_subject_ids),
+    #         if current_user.role == UserRole.TEACHER:
+    #             query = query.where(
+    #                 or_(
+    #                     ExamModel.created_by == current_user.id,
+    #                     ExamModel.subject_id.in_(assigned_subject_ids),
+    #                 )
     #             )
-    #         )
+    #         else: # SUPERVISOR
+    #              query = query.where(
+    #                 ExamModel.subject_id.in_(assigned_subject_ids),
+    #                 ExamModel.status != ExamStatus.DRAFT,
+    #             )
 
     #     return session.exec(query).all()
 
+
     @staticmethod
-    def get_all(session: Session, current_user: CurrentUser) -> list[tuple[ExamModel, str | None]]:
-        query = (
-            select(ExamModel, SubjectModel.name)
-            .join(SubjectModel, SubjectModel.id == ExamModel.subject_id, isouter=True)
-            .where(ExamModel.org_id == current_user.org_id)
-        )
+    def get_all(
+        session: Session,
+        current_user: CurrentUser,
+        status: ExamStatus | None = None,
+        subject_id: UUID | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[tuple[ExamModel, str | None]], int]:
+        conditions: list = [ExamModel.org_id == current_user.org_id]
 
         if current_user.role in (UserRole.TEACHER, UserRole.SUPERVISOR):
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
@@ -170,19 +204,38 @@ class ExamService:
                 SubjectAssignment.org_id == current_user.org_id,
             )
             if current_user.role == UserRole.TEACHER:
-                query = query.where(
+                conditions.append(
                     or_(
                         ExamModel.created_by == current_user.id,
-                        ExamModel.subject_id.in_(assigned_subject_ids),
+                        col(ExamModel.subject_id).in_(assigned_subject_ids),
                     )
                 )
-            else: # SUPERVISOR
-                 query = query.where(
-                    ExamModel.subject_id.in_(assigned_subject_ids),
-                    ExamModel.status != ExamStatus.DRAFT,
-                )
+            else:  # SUPERVISOR: assigned subjects only, never drafts
+                conditions.append(col(ExamModel.subject_id).in_(assigned_subject_ids))
+                conditions.append(ExamModel.status != ExamStatus.DRAFT)
 
-        return session.exec(query).all()
+        if status is not None:
+            conditions.append(ExamModel.status == status)
+        if subject_id is not None:
+            conditions.append(ExamModel.subject_id == subject_id)
+        if search and search.strip():
+            pattern: str = f"%{escape_like(search.strip())}%"
+            conditions.append(col(ExamModel.title).ilike(pattern, escape="\\"))
+
+        total: int = session.exec(
+            select(func.count()).select_from(ExamModel).where(*conditions)
+        ).one()
+
+        rows = session.exec(
+            select(ExamModel, SubjectModel.name)
+            .join(SubjectModel, SubjectModel.id == ExamModel.subject_id, isouter=True)
+            .where(*conditions)
+            .order_by(desc(col(ExamModel.updated_at)), col(ExamModel.id))  # id keeps page boundaries stable
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+
+        return [(exam, subject_name) for exam, subject_name in rows], total
 
    
     @staticmethod

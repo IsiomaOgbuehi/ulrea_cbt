@@ -123,6 +123,7 @@ class AssignStudentsRequest(BaseModel):
 
 class ExamAssignmentRead(BaseModel):
     id: UUID
+    student_name: str | None = None
     exam_id: UUID
     student_id: UUID
     org_id: UUID

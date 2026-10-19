@@ -21,6 +21,7 @@ class ViolationRead(BaseModel):
     exam_id: UUID
     attempt_id: UUID
     student_id: UUID
+    student_name: str | None = None
     violation_type: ViolationType
     severity: ViolationSeverity
     description: str | None

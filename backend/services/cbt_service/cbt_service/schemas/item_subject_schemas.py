@@ -35,6 +35,10 @@ class SubjectRead(BaseModel):
     updated_at: datetime
 
 
+class SubjectListRead(SubjectRead):
+    item_count: int = 0
+
+
 class SubjectAssignRequest(BaseModel):
     user_ids: list[UUID]    # assign multiple staff at once
 

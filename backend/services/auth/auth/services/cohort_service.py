@@ -15,6 +15,11 @@ from auth.database.schema.cohort.cohort_api_models import (
 from auth.services.user.user_context import UserContext
 
 
+def escape_like(term: str) -> str:
+        """Treat %, _ and \\ in user input literally inside an ILIKE pattern."""
+        return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class CohortService:
 
     # --------------------------------------------------------
@@ -107,30 +112,59 @@ class CohortService:
         session.refresh(cohort)
         return CohortService._to_read(cohort, session)
 
-    # @staticmethod
-    # def get_all(
-    #     session: Session,
-    #     org_id: UUID,
-    #     status: str | None = None,
-    # ) -> list[CohortRead]:
-    #     # org_id already explicit here — no changes needed
-    #     query = select(CohortModel).where(CohortModel.org_id == org_id)
-    #     if status:
-    #         query = query.where(CohortModel.status == status)
-    #     else:
-    #         query = query.where(CohortModel.status != CohortStatus.ARCHIVED)
+    
 
-    #     cohorts = session.exec(query).all()
-    #     return [CohortService._to_read(c, session) for c in cohorts]
+    # @staticmethod
+    # def get_all(session: Session, org_id: UUID, status: str | None = None) -> list[CohortRead]:
+    #     query = select(CohortModel).where(CohortModel.org_id == org_id)
+    #     query = query.where(CohortModel.status == status) if status \
+    #         else query.where(CohortModel.status != CohortStatus.ARCHIVED)
+    #     cohorts = list(session.exec(query).all())
+    #     counts = CohortService.member_counts(session, [c.id for c in cohorts])
+    #     return [CohortRead(**c.model_dump(), member_count=counts.get(c.id, 0)) for c in cohorts]
+
 
     @staticmethod
-    def get_all(session: Session, org_id: UUID, status: str | None = None) -> list[CohortRead]:
-        query = select(CohortModel).where(CohortModel.org_id == org_id)
-        query = query.where(CohortModel.status == status) if status \
-            else query.where(CohortModel.status != CohortStatus.ARCHIVED)
-        cohorts = list(session.exec(query).all())
-        counts = CohortService.member_counts(session, [c.id for c in cohorts])
-        return [CohortRead(**c.model_dump(), member_count=counts.get(c.id, 0)) for c in cohorts]
+    def get_all(
+        session: Session,
+        org_id: UUID,
+        status: CohortStatus | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[CohortRead], int]:
+        conditions: list = [CohortModel.org_id == org_id]
+
+        # Default hides archived cohorts, as before.
+        conditions.append(
+            CohortModel.status == status if status is not None
+            else CohortModel.status != CohortStatus.ARCHIVED
+        )
+
+        if search and search.strip():
+            pattern: str = f"%{escape_like(search.strip())}%"
+            conditions.append(col(CohortModel.name).ilike(pattern, escape="\\"))
+
+        total: int = session.exec(
+            select(func.count()).select_from(CohortModel).where(*conditions)
+        ).one()
+
+        cohorts: list[CohortModel] = list(
+            session.exec(
+                select(CohortModel)
+                .where(*conditions)
+                .order_by(col(CohortModel.name), col(CohortModel.id))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
+        )
+
+        counts: dict[UUID, int] = CohortService.member_counts(session, [c.id for c in cohorts])
+        return (
+            [CohortRead(**c.model_dump(), member_count=counts.get(c.id, 0)) for c in cohorts],
+            total,
+        )
+
 
     @staticmethod
     def get_by_id(

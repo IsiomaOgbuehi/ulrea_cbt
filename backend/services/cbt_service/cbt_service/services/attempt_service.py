@@ -440,6 +440,38 @@ class AttemptService:
         return items
 
 
+    # @staticmethod
+    # def get_cohort_attempts(
+    #     session: Session,
+    #     exam_id: UUID,
+    #     cohort_id: UUID,
+    #     current_user: CurrentUser,
+    # ) -> list[CohortAttemptSummary]:
+    #     attempts = session.exec(
+    #         select(AttemptModel).where(
+    #             AttemptModel.exam_id == exam_id,
+    #             AttemptModel.org_id == current_user.org_id,
+    #         )
+    #     ).all()
+
+    #     # Filter to the cohort via assignment lookup, since AttemptModel stores assignment_id
+    #     assignment_ids = {a.assignment_id for a in attempts}
+    #     cohort_assignments = session.exec(
+    #         select(ExamAssignment.id).where(
+    #             ExamAssignment.id.in_(assignment_ids),
+    #             ExamAssignment.cohort_id == cohort_id,
+    #         )
+    #     ).all()
+    #     cohort_assignment_ids = set(cohort_assignments)
+
+    #     return [
+    #         CohortAttemptSummary(
+    #             id=a.id, student_id=a.student_id, status=a.status,
+    #             submitted_at=a.submitted_at, final_score=a.final_score,
+    #             percentage=a.percentage, passed=a.passed,
+    #         )
+    #         for a in attempts if a.assignment_id in cohort_assignment_ids
+    #     ]
     @staticmethod
     def get_cohort_attempts(
         session: Session,
@@ -447,31 +479,35 @@ class AttemptService:
         cohort_id: UUID,
         current_user: CurrentUser,
     ) -> list[CohortAttemptSummary]:
-        attempts = session.exec(
-            select(AttemptModel).where(
-                AttemptModel.exam_id == exam_id,
-                AttemptModel.org_id == current_user.org_id,
-            )
-        ).all()
+        exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user)
 
-        # Filter to the cohort via assignment lookup, since AttemptModel stores assignment_id
-        assignment_ids = {a.assignment_id for a in attempts}
-        cohort_assignments = session.exec(
-            select(ExamAssignment.id).where(
-                ExamAssignment.id.in_(assignment_ids),
-                ExamAssignment.cohort_id == cohort_id,
-            )
-        ).all()
-        cohort_assignment_ids = set(cohort_assignments)
+        attempts: list[AttemptModel] = list(
+            session.exec(
+                select(AttemptModel)
+                .join(ExamAssignment, ExamAssignment.id == AttemptModel.assignment_id)
+                .where(
+                    AttemptModel.exam_id == exam_id,
+                    AttemptModel.org_id == current_user.org_id,
+                    ExamAssignment.cohort_id == cohort_id,
+                )
+            ).all()
+        )
 
-        return [
+        summaries: list[CohortAttemptSummary] = [
             CohortAttemptSummary(
                 id=a.id, student_id=a.student_id, status=a.status,
                 submitted_at=a.submitted_at, final_score=a.final_score,
                 percentage=a.percentage, passed=a.passed,
             )
-            for a in attempts if a.assignment_id in cohort_assignment_ids
+            for a in attempts
         ]
+
+        # Done with the DB: return the connection to the pool now, so it isn't
+        # held while the router waits on the auth service.
+        session.close()
+        return summaries
+    
 
     @staticmethod
     def _get_items_for_scoring(session: Session, item_ids: list[UUID]) -> dict[UUID, dict[str, Any]]: # list[ItemForScoringRead]:

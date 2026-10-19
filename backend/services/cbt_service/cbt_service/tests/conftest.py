@@ -5,9 +5,11 @@ from sqlmodel import Session, SQLModel, select
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
+from uuid import UUID
 
 from cbt_service.main import app
 from cbt_service.database.database import database
+from cbt_service.clients.auth_client import AuthClient
 
 # ============================================================
 # TEST DATABASE
@@ -157,6 +159,14 @@ def mock_auth_client(monkeypatch):
         "cbt_service.clients.auth_client.AuthClient.get_users_bulk",
         fake_get_users_bulk,
     )
+
+@pytest.fixture
+def all_students_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend every submitted ID is an active student in the caller's org."""
+    async def _all_valid(self: AuthClient, student_ids: list[UUID], org_id: UUID) -> list[UUID]:
+        return list(dict.fromkeys(student_ids))
+
+    monkeypatch.setattr(AuthClient, "filter_student_ids", _all_valid)
 
 # ============================================================
 # HELPERS

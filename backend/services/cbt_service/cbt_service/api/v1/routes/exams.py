@@ -1,9 +1,10 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
+from cbt_service.database.models.enums.exam_enum import ExamStatus
 from cbt_service.database.models.exam import ExamAssignment
-from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRead
+from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRead, PaginatedResponse
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import get_current_user, require_roles
@@ -12,7 +13,7 @@ from cbt_service.schemas.exam_schemas import (
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
-    ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate
+    ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate, UserSummary
 )
 from cbt_service.services.exam_service import ExamService
 from cbt_service.database.models.enums.enums import UserRole
@@ -46,17 +47,44 @@ def create_exam(
     return ExamRead.model_validate(exam, from_attributes=True)
 
 
+# ''' LIST EXAMS 📋 '''
+# @router.get("", response_model=list[ExamRead])
+# def list_exams(
+#     session: SessionDep,
+#     current_user: CurrentUser = Depends(StaffViewer),
+# ):
+#     rows = ExamService.get_all(session, current_user)
+#     return [
+#         ExamRead.model_validate({**exam.model_dump(), "subject_name": subject_name})
+#         for exam, subject_name in rows
+#     ]
+
 ''' LIST EXAMS 📋 '''
-@router.get("", response_model=list[ExamRead])
+@router.get("", response_model=PaginatedResponse[ExamRead])
 def list_exams(
     session: SessionDep,
     current_user: CurrentUser = Depends(StaffViewer),
-):
-    rows = ExamService.get_all(session, current_user)
-    return [
-        ExamRead.model_validate({**exam.model_dump(), "subject_name": subject_name})
-        for exam, subject_name in rows
-    ]
+    status: ExamStatus | None = Query(default=None),
+    subject_id: UUID | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=100, description="Matches exam title"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> PaginatedResponse[ExamRead]:
+    rows, total = ExamService.get_all(
+        session, current_user,
+        status=status, subject_id=subject_id, search=search,
+        page=page, page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=[
+            ExamRead.model_validate({**exam.model_dump(), "subject_name": subject_name})
+            for exam, subject_name in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+    )
 
 
 ''' MY ASSIGNED EXAMS 🎓 '''
@@ -216,6 +244,10 @@ async def assign_students(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ) -> list[ExamAssignmentRead]:
+    # 1. Cheap DB check first: 404 / 400 return immediately, no network call.
+    await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
+
+    # 2. Only now ask the auth service whether the IDs are valid students.
     unique_ids: list[UUID] = list(dict.fromkeys(payload.student_ids))
 
     auth_client = AuthClient(redis_client)
@@ -243,13 +275,30 @@ async def assign_students(
 
 ''' LIST ASSIGNMENTS 📋 '''
 @router.get("/{exam_id}/assignments", response_model=list[ExamAssignmentRead])
-def list_assignments(
+async def list_assignments(
     exam_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
-    assignments = ExamService.get_assignments(session, exam_id, current_user)
-    return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
+    assignments: list[ExamAssignmentRead] = await run_in_threadpool(
+    ExamService.get_assignments, session, exam_id, current_user)
+
+    if not assignments:
+            return assignments
+
+    auth_client = AuthClient(redis_client)
+    users: dict[str, UserSummary] = await auth_client.get_users_bulk(
+        [s.student_id for s in assignments],
+        org_id=current_user.org_id,
+    )
+
+    enriched: list[ExamAssignmentRead] = []
+    for assignment in assignments:
+        user: UserSummary | None = users.get(str(assignment.student_id))
+        name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
+        enriched.append(assignment.model_copy(update={"student_name": name}))
+
+    return enriched
 
 
 # --------------------------------------------------------
@@ -284,17 +333,24 @@ async def assign_cohort(
     Fetches student list from auth service.
     Graduated cohorts cannot be assigned new exams.
     """
-    # Fetch student IDs from auth service
+    # 1. Cheap DB checks first: 404 / 403 / 400 return before any network call.
+    await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
+
+    # 2. Fetch the cohort's student IDs from the auth service.
     auth_client = AuthClient(redis_client)
     try:
         student_ids: list[UUID] = await auth_client.get_cohort_student_ids(
             cohort_id=payload.cohort_id, org_id=current_user.org_id,
         )
     except HTTPException:
-        raise
+        raise   # 400 graduated / 404 not found / 502 from the client: pass through
     except Exception:
         raise HTTPException(status_code=502, detail="Could not fetch cohort members from auth service.")
 
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="Cohort has no active students.")
+
+    # 3. Do the assignment.
     assignments = await run_in_threadpool(
     ExamService.assign_cohort,
         session=session,

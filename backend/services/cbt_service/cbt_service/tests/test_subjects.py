@@ -4,10 +4,31 @@ from uuid import uuid4
 import jwt
 from fastapi.testclient import TestClient
 
+from cbt_service.api.v1.routes.items import create_item
+
 from .conftest import (
     create_subject, assign_teacher,
     SUPER_ADMIN_ID, ADMIN_ID, TEACHER_ID, ORG_ID, TEST_SECRET
 )
+
+
+def make_item(client, headers: dict[str, str], subject_id: str) -> dict:
+    """Create one active question via the API."""
+    response = client.post(
+        f"/api/v1/subjects/{subject_id}/items",
+        json={
+            "question_text": "What is 2 + 2?",
+            "item_type": "mcq_single",
+            "options": [
+                {"key": "A", "text": "3"},
+                {"key": "B", "text": "4"},
+            ],
+            "correct_answers": ["B"],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_admin_can_create_subject(client, admin_headers):
@@ -32,18 +53,20 @@ def test_teacher_cannot_create_subject(client, teacher_headers):
     assert response.status_code == 403
 
 
-def test_admin_can_list_all_subjects(client, admin_headers):
+def test_admin_can_list_all_subjects(client, admin_headers) -> None:
     create_subject(client, admin_headers, "Math")
     create_subject(client, admin_headers, "Physics")
 
     response = client.get("/api/v1/subjects", headers=admin_headers)
     assert response.status_code == 200
-    assert len(response.json()) == 2
+    data = response.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
 
 
-def test_teacher_only_sees_assigned_subjects(client, admin_headers, teacher_headers):
+def test_teacher_only_sees_assigned_subjects(client, admin_headers, teacher_headers) -> None:
     math = create_subject(client, admin_headers, "Math")
-    physics = create_subject(client, admin_headers, "Physics")
+    create_subject(client, admin_headers, "Physics")
 
     # Assign teacher to math only
     assign_teacher(client, admin_headers, math["id"], TEACHER_ID)
@@ -51,8 +74,9 @@ def test_teacher_only_sees_assigned_subjects(client, admin_headers, teacher_head
     response = client.get("/api/v1/subjects", headers=teacher_headers)
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 1
-    assert data[0]["name"] == "Math"
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["name"] == "Math"
 
 
 def test_teacher_cannot_view_unassigned_subject(client, admin_headers, teacher_headers):
@@ -83,17 +107,72 @@ def test_admin_can_update_subject(client, admin_headers):
     assert response.json()["name"] == "New Name"
 
 
-def test_admin_can_archive_subject(client, admin_headers):
+def test_admin_can_archive_subject(client, admin_headers) -> None:
     subject = create_subject(client, admin_headers, "To Archive")
 
     response = client.delete(f"/api/v1/subjects/{subject['id']}", headers=admin_headers)
     assert response.status_code == 200
     assert response.json()["status"] == "archived"
 
-    # Archived subject no longer appears in list
+    # Archived subject no longer appears in the default (active) list
     list_response = client.get("/api/v1/subjects", headers=admin_headers)
-    names = [s["name"] for s in list_response.json()]
+    names = [s["name"] for s in list_response.json()["items"]]
     assert "To Archive" not in names
+
+
+
+def test_list_subjects_paginates(client, admin_headers) -> None:
+    for name in ("Algebra", "Biology", "Chemistry"):
+        create_subject(client, admin_headers, name)
+
+    page1 = client.get("/api/v1/subjects?page=1&page_size=2", headers=admin_headers).json()
+    page2 = client.get("/api/v1/subjects?page=2&page_size=2", headers=admin_headers).json()
+
+    assert page1["total"] == 3
+    assert page1["total_pages"] == 2
+    assert [s["name"] for s in page1["items"]] == ["Algebra", "Biology"]  # sorted by name
+    assert [s["name"] for s in page2["items"]] == ["Chemistry"]
+
+
+def test_list_subjects_search_is_case_insensitive_and_literal(client, admin_headers) -> None:
+    create_subject(client, admin_headers, "Algebra")
+    create_subject(client, admin_headers, "Biology")
+
+    hit = client.get("/api/v1/subjects?search=ALG", headers=admin_headers).json()
+    assert [s["name"] for s in hit["items"]] == ["Algebra"]
+
+    # '%' must match literally, not act as a wildcard that returns everything
+    wildcard = client.get("/api/v1/subjects?search=%25", headers=admin_headers).json()
+    assert wildcard["total"] == 0
+
+
+def test_list_subjects_status_filter_shows_archived(client, admin_headers) -> None:
+    subject = create_subject(client, admin_headers, "Old Subject")
+    client.delete(f"/api/v1/subjects/{subject['id']}", headers=admin_headers)
+
+    archived = client.get("/api/v1/subjects?status=archived", headers=admin_headers).json()
+    assert "Old Subject" in [s["name"] for s in archived["items"]]
+
+
+def test_list_subjects_returns_item_count_and_has_items_filter(client, admin_headers) -> None:
+    with_items = create_subject(client, admin_headers, "Has Items")
+    create_subject(client, admin_headers, "Empty")
+    make_item(client, admin_headers, with_items["id"])  # adjust to your item helper
+
+    data = client.get("/api/v1/subjects", headers=admin_headers).json()
+    counts = {s["name"]: s["item_count"] for s in data["items"]}
+    assert counts == {"Has Items": 1, "Empty": 0}
+
+    only_with = client.get("/api/v1/subjects?has_items=true", headers=admin_headers).json()
+    assert [s["name"] for s in only_with["items"]] == ["Has Items"]
+
+    only_empty = client.get("/api/v1/subjects?has_items=false", headers=admin_headers).json()
+    assert [s["name"] for s in only_empty["items"]] == ["Empty"]
+
+
+def test_list_subjects_rejects_invalid_paging(client, admin_headers) -> None:
+    assert client.get("/api/v1/subjects?page=0", headers=admin_headers).status_code == 422
+    assert client.get("/api/v1/subjects?page_size=101", headers=admin_headers).status_code == 422
 
 
 def test_admin_can_assign_multiple_staff(client, admin_headers):

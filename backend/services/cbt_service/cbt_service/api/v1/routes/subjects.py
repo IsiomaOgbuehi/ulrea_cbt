@@ -1,14 +1,15 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.concurrency import run_in_threadpool
 from sqlmodel import select
+from cbt_service.database.models.enums.item_subject_enums import SubjectStatus
 from cbt_service.database.models.subject import SubjectModel
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep
 from cbt_service.dependencies import require_roles
 from cbt_service.schemas.item_subject_schemas import (
-    SubjectAssignmentEnriched, SubjectCreate, SubjectSummary, SubjectUpdate, SubjectRead,
+    PaginatedResponse, SubjectAssignmentEnriched, SubjectCreate, SubjectListRead, SubjectSummary, SubjectUpdate, SubjectRead,
     SubjectAssignRequest, SubjectAssignmentRead, CurrentUser
 )
 from cbt_service.services.item.subject_service import SubjectService
@@ -32,14 +33,44 @@ def create_subject(
     return SubjectRead.model_validate(subject, from_attributes=True)
 
 
+# ''' LIST SUBJECTS 📋 '''
+# @router.get("", response_model=list[SubjectRead])
+# def list_subjects(
+#     session: SessionDep,
+#     current_user: CurrentUser = Depends(TeacherOrAbove),
+# ):
+#     subjects = SubjectService.get_all(session, current_user)
+#     return [SubjectRead.model_validate(s, from_attributes=True) for s in subjects]
+
 ''' LIST SUBJECTS 📋 '''
-@router.get("", response_model=list[SubjectRead])
+@router.get("", response_model=PaginatedResponse[SubjectListRead])
 def list_subjects(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
-):
-    subjects = SubjectService.get_all(session, current_user)
-    return [SubjectRead.model_validate(s, from_attributes=True) for s in subjects]
+    status: SubjectStatus | None = Query(default=None, description="Defaults to active"),
+    has_items: bool | None = Query(default=None, description="true: only subjects with items; false: only empty ones"),
+    search: str | None = Query(default=None, max_length=100),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> PaginatedResponse[SubjectListRead]:
+    rows, total = SubjectService.get_all(
+        session, current_user,
+        status=status, has_items=has_items, search=search,
+        page=page, page_size=page_size,
+    )
+    return PaginatedResponse(
+        items=[
+            SubjectListRead(
+                **SubjectRead.model_validate(subject, from_attributes=True).model_dump(),
+                item_count=count,
+            )
+            for subject, count in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+    )
 
 
 ''' GET SUBJECT BY ID 🔍 '''
