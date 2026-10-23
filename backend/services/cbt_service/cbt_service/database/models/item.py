@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON, DateTime
+from sqlalchemy import Column, JSON, DateTime, Index
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .enums.item_subject_enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
@@ -21,6 +21,15 @@ class ItemModel(SQLModel, table=True):
     Numeric:     options=null, correct_answer=["42.5"]
     """
     __tablename__ = "items"
+    __table_args__ = (
+        # Serves item listing/counts: filter subject_id + org_id + status,
+        # sort by created_at (Postgres scans it backwards for DESC).
+        # Created in migration 2fabab7d6959.
+        Index(
+            "ix_items_subject_org_status_created",
+            "subject_id", "org_id", "status", "created_at",
+        ),
+    )
 
     # ----------------------------------------------------------------
     # Identity / Ownership

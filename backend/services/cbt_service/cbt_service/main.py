@@ -4,7 +4,7 @@ from alembic.config import Config
 from alembic import command
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 from cbt_service.core.http_client import close_http_client, get_http_client
 from cbt_service.core.redis.redis_client import redis_client
@@ -60,7 +60,7 @@ def run_migrations():
 #         logging.warning(f"Redis shutdown failed: {e}")
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- STARTUP ----
     # Run migrations before accepting requests
     # run_migrations()

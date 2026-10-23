@@ -476,6 +476,34 @@ def test_status_requires_authentication(
     assert response.status_code in (401, 403)
 
 
+def test_status_uses_a_single_select(
+    client: TestClient, student_headers: dict[str, str]
+) -> None:
+    """The heartbeat is polled by every student during an exam, so it must stay
+    at one SELECT (attempt + exam + violation count) per poll."""
+    from sqlalchemy import event
+
+    set_max_violations(EXAM_ID, max_violations=3)
+    attempt = start_attempt(client, student_headers)
+    report_violation(client, student_headers, attempt["id"])
+
+    selects: list[str] = []
+
+    def _record(conn, cursor, statement: str, *args: object) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        response = get_status(client, student_headers, attempt["id"])
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["violation_count"] == 1
+    assert len(selects) == 1, selects
+
+
 def test_status_unknown_attempt_returns_404(
     client: TestClient, student_headers: dict[str, str]
 ) -> None:

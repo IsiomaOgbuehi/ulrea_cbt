@@ -3,6 +3,7 @@ from sqlmodel import SQLModel
 from auth.api.v1.routes import auth, users, internal, cohorts, student, exam_subscriptions, platform_subscriptions
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import database_engine
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from redis.asyncio import Redis
 from auth.utility.redis.redis_client import redis_client
@@ -28,7 +29,7 @@ def run_migrations():
     raise RuntimeError("Migration failed after retries")
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Run migrations before accepting requests
     # run_migrations()
     # print(PasswordHasher.create("red"))

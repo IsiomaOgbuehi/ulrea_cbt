@@ -1,15 +1,13 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from sqlmodel import select
 from starlette.concurrency import run_in_threadpool
 
 from cbt_service.schemas.exam_schemas import UserSummary
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.clients.auth_client import AuthClient
-from cbt_service.services.violation.violation_service import ViolationService
 from cbt_service.database.models.exam import ExamModel
-from cbt_service.database.database import SessionDep
+from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
 from cbt_service.schemas.attempt_schemas import (
     AttemptDetailRead,
@@ -172,6 +170,8 @@ async def get_cohort_attempts(
     summaries: list[CohortAttemptSummary] = await run_in_threadpool(
         AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
     )
+    # DB work done: free the connection before the auth-service call.
+    await release_connection(session)
     if not summaries:
         return summaries
 
@@ -222,20 +222,8 @@ def get_attempt_status(
     current_user: CurrentUser = Depends(StudentOrAbove),
 ) -> AttemptStatusRead:
     """Lightweight poll: status, time left, and violation count. Enforces expiry."""
-    # get_attempt checks ownership and auto-submits if time has run out
-    attempt = AttemptService.get_attempt(session, attempt_id, current_user.id)
-    exam = session.exec(
-        select(ExamModel).where(ExamModel.id == attempt.exam_id)
-    ).first()
-    read: AttemptRead = AttemptService._to_attempt_read(session, attempt)
-
-    return AttemptStatusRead(
-        status=attempt.status,
-        remaining_seconds=read.remaining_seconds,
-        violation_count=ViolationService._count_violations(session, attempt_id),
-        max_violations=exam.max_violations if exam else None,
-        server_time=read.server_time,
-    )
+    # Single query; checks ownership and auto-submits if time has run out.
+    return AttemptService.get_attempt_status(session, attempt_id, current_user.id)
 
 
 
@@ -256,6 +244,9 @@ async def export_exam_attempts_to_excel(
         exam_id,
         org_id,
     )
+    # DB work done: free the connection before the auth-service call
+    # and the workbook build.
+    await release_connection(session)
 
     # Fetch student profiles in one request to the auth service.
     auth_client = AuthClient(redis_client)

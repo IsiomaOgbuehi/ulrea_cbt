@@ -6,7 +6,7 @@ from cbt_service.database.models.enums.item_subject_enums import SubjectStatus
 from cbt_service.database.models.subject import SubjectModel
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.core.redis.redis_client import redis_client
-from cbt_service.database.database import SessionDep
+from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import require_roles
 from cbt_service.schemas.item_subject_schemas import (
     PaginatedResponse, SubjectAssignmentEnriched, SubjectCreate, SubjectListRead, SubjectSummary, SubjectUpdate, SubjectRead,
@@ -147,6 +147,8 @@ async def get_subject_assignments(
     subject, assignments = await run_in_threadpool(
         SubjectService.get_assignments_with_subject, session, subject_id, current_user
     )
+    # DB work done: free the connection before the auth-service call.
+    await release_connection(session)
 
     # Collect all user IDs we need — avoids N+1
     user_ids: set[UUID] = set()
@@ -184,7 +186,7 @@ async def get_subjects_by_staff(
     include_archived: bool = False,
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ) -> list[SubjectRead]:
-    subjects = SubjectService.get_by_assigned_user(
+    subjects = await run_in_threadpool(SubjectService.get_by_assigned_user,
         session, user_id, current_user, include_archived
     )
     return [SubjectRead.model_validate(s, from_attributes=True) for s in subjects]

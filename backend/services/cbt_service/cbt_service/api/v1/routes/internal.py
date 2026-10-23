@@ -1,5 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from cbt_service.database.database import SessionDep
 from cbt_service.services.item.subject_service import SubjectService
@@ -22,5 +23,6 @@ async def get_assigned_user_ids(
     subject_id: UUID,
     org_id: UUID,
     session: SessionDep,
-):
-    return SubjectService.get_assigned_user_ids(session=session, subject_id=subject_id, org_id=org_id)
+) -> list[UUID]:
+    user_ids: list[UUID] = await run_in_threadpool(SubjectService.get_assigned_user_ids, session=session, subject_id=subject_id, org_id=org_id)
+    return user_ids

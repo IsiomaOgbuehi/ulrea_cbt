@@ -6,7 +6,7 @@ from cbt_service.database.models.enums.exam_enum import ExamStatus
 from cbt_service.database.models.exam import ExamAssignment
 from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRead, PaginatedResponse
 from cbt_service.core.redis.redis_client import redis_client
-from cbt_service.database.database import SessionDep
+from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user, require_roles
 from cbt_service.schemas.exam_schemas import (
     AssignCohortRequest, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
@@ -246,6 +246,8 @@ async def assign_students(
 ) -> list[ExamAssignmentRead]:
     # 1. Cheap DB check first: 404 / 400 return immediately, no network call.
     await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
+    # Free the connection while we wait on the auth service; step 3 checks out a new one.
+    await release_connection(session)
 
     # 2. Only now ask the auth service whether the IDs are valid students.
     unique_ids: list[UUID] = list(dict.fromkeys(payload.student_ids))
@@ -282,6 +284,8 @@ async def list_assignments(
 ):
     assignments: list[ExamAssignmentRead] = await run_in_threadpool(
     ExamService.get_assignments, session, exam_id, current_user)
+    # DB work done: free the connection before the auth-service call.
+    await release_connection(session)
 
     if not assignments:
             return assignments
@@ -335,6 +339,8 @@ async def assign_cohort(
     """
     # 1. Cheap DB checks first: 404 / 403 / 400 return before any network call.
     await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
+    # Free the connection while we wait on the auth service; step 3 checks out a new one.
+    await release_connection(session)
 
     # 2. Fetch the cohort's student IDs from the auth service.
     auth_client = AuthClient(redis_client)

@@ -36,6 +36,7 @@ from cbt_service.schemas.attempt_schemas import (
     SaveResponseRequest,
     ManualReviewRequest,
     AttemptRead,
+    AttemptStatusRead,
     ResponseRead,
     CurrentUser,
 )
@@ -300,6 +301,58 @@ class AttemptService:
             raise HTTPException(status_code=404, detail="Attempt not found.")
         return AttemptService._enforce_time_limit(session, attempt)
         # return attempt
+
+    @staticmethod
+    def get_attempt_status(
+        session: Session, attempt_id: UUID, student_id: UUID
+    ) -> AttemptStatusRead:
+        """
+        Heartbeat poll. Loads the attempt, its exam and the live violation
+        count in ONE query (previously 5 round trips, 3 of them for the same
+        exam row). Still enforces expiry: an attempt past its deadline is
+        auto-submitted, exactly as get_attempt() does.
+        """
+        # Violations count for this attempt, computed inside the same query.
+        # (Inline rather than ViolationService._count_violations to avoid a
+        # circular import: violation_service imports this module.)
+        violation_count = (
+            select(func.count())
+            .select_from(ExamViolation)
+            .where(
+                ExamViolation.attempt_id == AttemptModel.id,
+                col(ExamViolation.cleared_at).is_(None),
+            )
+            .correlate(AttemptModel)
+            .scalar_subquery()
+        )
+
+        row = session.exec(
+            select(AttemptModel, ExamModel, violation_count)
+            .outerjoin(ExamModel, col(ExamModel.id) == AttemptModel.exam_id)
+            .where(
+                AttemptModel.id == attempt_id,
+                AttemptModel.student_id == student_id,  # ownership: 404 otherwise
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Attempt not found.")
+
+        attempt: AttemptModel = row[0]
+        exam: ExamModel | None = row[1]
+        count: int = row[2]
+
+        if exam is not None:
+            # Only writes (auto-submit) when the deadline has passed.
+            attempt = AttemptService._enforce_time_limit_new(session, attempt, exam)
+
+        read: AttemptRead = AttemptService._to_attempt_read_new(attempt, exam)
+        return AttemptStatusRead(
+            status=attempt.status,
+            remaining_seconds=read.remaining_seconds,
+            violation_count=count,
+            max_violations=exam.max_violations if exam else None,
+            server_time=read.server_time,
+        )
 
     @staticmethod
     def get_responses(session: Session, attempt_id: UUID, user_id: UUID) -> list[ResponseModel]:
