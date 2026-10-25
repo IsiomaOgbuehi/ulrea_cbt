@@ -4,13 +4,17 @@ from alembic.config import Config
 from alembic import command
 import logging
 import time
+from pathlib import Path
 from collections.abc import AsyncGenerator
 
+from fastapi.staticfiles import StaticFiles
+
 from cbt_service.core.http_client import close_http_client, get_http_client
+from cbt_service.core.settings import settings
 from cbt_service.core.redis.redis_client import redis_client
 
 from cbt_service.database.database import database_engine as engine
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -112,3 +116,13 @@ app.include_router(internal.router)
 # Violations
 app.include_router(violations.router, prefix="/api/v1")
 app.include_router(exam_violations.router, prefix="/api/v1")
+
+# Uploaded media (question / option images)
+app.include_router(uploads.router, prefix="/api/v1")
+
+# Local storage: serve MEDIA_ROOT from this app. In production prefer letting
+# nginx serve the folder (MEDIA_SERVE_LOCAL=false); see MEDIA_STORAGE.md.
+if settings.STORAGE_BACKEND == "local" and settings.MEDIA_SERVE_LOCAL:
+    media_root: Path = Path(settings.MEDIA_ROOT)
+    media_root.mkdir(parents=True, exist_ok=True)
+    app.mount(settings.MEDIA_URL_PATH, StaticFiles(directory=media_root), name="media")
