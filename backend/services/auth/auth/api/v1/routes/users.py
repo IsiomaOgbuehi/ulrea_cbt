@@ -41,6 +41,9 @@ from auth.utility.jwt.token_activation import (
 )
 from auth.clients.cbt_service_client import cbt_service_client
 from auth.utility.redis.redis_client import redis_client
+from auth.core.permissions import P
+from auth.dependencies.auth_dependencies import require_candidate_or, require_permission
+from auth.services.role_service import RoleService
 
 
 router = APIRouter()
@@ -71,7 +74,6 @@ def require_roles(*roles: UserRole):
 
     return _check
 
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 
 
 
@@ -100,7 +102,7 @@ def _get_active_membership(session: SessionDep, user_id: UUID) -> OrgMembership:
 async def create_staff_user(
     payload: CreateStaffUser,
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.STAFF_MANAGE)),
 ):
     PlatformSubscriptionService.assert_can_add_staff(session, ctx.membership.org_id)
     
@@ -110,6 +112,13 @@ async def create_staff_user(
         payload=payload,
         org_id=ctx.membership.org_id,
     )
+
+    if payload.role_key and payload.role_key != payload.role.value:
+        # Same checks as giving the role later (no admins unless owner, nothing beyond your own).
+        RoleService.assign(
+            session, ctx.membership.org_id, user.id, payload.role_key,
+            ctx.user.id, ctx.membership.role, ctx.grants(),
+        )
 
     org = session.exec(
         select(OrganizationModel).where(OrganizationModel.id == ctx.membership.org_id)
@@ -132,6 +141,8 @@ async def create_staff_user(
 
         return StaffCreatedResponse(
             **UserReadResponse.model_validate(user, from_attributes=True).model_dump(),
+            org_id=ctx.membership.org_id,
+            role=payload.role,
             temporary_password="",  # signal to frontend
             is_existing_user=True,
         )
@@ -178,7 +189,7 @@ async def update_pending_staff_email(
     user_id: UUID,
     payload: UpdateStaffEmailRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.STAFF_MANAGE)),
 ) -> ResendActivationResponse:
     user, changed = UserManagementService.update_pending_staff_email(
         session=session, ctx=ctx, user_id=user_id, new_email=payload.email
@@ -231,12 +242,7 @@ async def update_pending_staff_email(
 async def create_student(
     payload: CreateStudent,
     session: SessionDep,
-    ctx: UserContext = Depends(
-        require_roles(
-            UserRole.SUPER_ADMIN,
-            UserRole.ADMIN,
-        )
-    ),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
     # ← ADD THIS: check plan limits before creating
     PlatformSubscriptionService.assert_can_add_student(session, ctx.membership.org_id)
@@ -291,7 +297,7 @@ async def create_student(
 ''' BULK STUDENT TEMPLATE ⬇️ '''
 @router.get(AuthRoutes.STUDENT_BULK_TEMPLATE.value)
 def download_student_template(
-    creator: UserModel = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    creator: UserModel = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
     """Download Excel template for bulk student creation."""
     file_bytes = generate_student_template()
@@ -306,7 +312,7 @@ def download_student_template(
 @router.post(AuthRoutes.CREATE_STUDENTS_BULK.value, response_model=BulkStudentResult)
 async def create_students_bulk(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
     file: UploadFile = File(...),
     cohort_id: UUID | None = None,
 ):
@@ -392,7 +398,10 @@ def staff_first_login_setup(
     session.commit()
     session.refresh(user)
 
-    token = create_access_token(user.id, membership.org_id, membership.role)
+    token = create_access_token(
+        user.id, membership.org_id, membership.role,
+        perms=RoleService.token_perms(session, membership),
+    )
     refresh = create_refresh_token(user.id)
 
     return StaffFirstLoginResponse(
@@ -471,7 +480,9 @@ def activate_staff_account(
         org_id: UUID = active_membership.org_id if active_membership else user.id  # fallback
         role = active_membership.role if active_membership else None
 
-        access_token = create_access_token(user.id, org_id, role)
+        access_token = create_access_token(
+            user.id, org_id, role, perms=RoleService.token_perms(session, active_membership),
+        )
         refresh_token = create_refresh_token(user.id)
 
         return StaffActivateResponse(
@@ -544,7 +555,10 @@ def student_first_login_setup(
     session.refresh(user)
 
     # Issue tokens immediately after setup
-    token = create_access_token(user.id, membership.org_id, membership.role)
+    token = create_access_token(
+        user.id, membership.org_id, membership.role,
+        perms=RoleService.token_perms(session, membership),
+    )
     refresh = create_refresh_token(user.id)
 
     return StudentFirstLoginResponse(
@@ -563,7 +577,7 @@ def admin_reset_student_credentials(
     student_id: UUID,
     session: SessionDep,
     payload: StudentCredentialResetRequest | None = None,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ) -> StudentCredentialResetResponse:
     """Admin issues a temporary security answer for a student who forgot theirs."""
     requested: str | None = payload.temp_answer if payload else None
@@ -681,7 +695,10 @@ def student_login(
         raise HTTPException(status_code=401, detail="Invalid access code or answer.")
 
     
-    token = create_access_token(user.id, membership.org_id, membership.role)
+    token = create_access_token(
+        user.id, membership.org_id, membership.role,
+        perms=RoleService.token_perms(session, membership),
+    )
     refresh = create_refresh_token(user.id)
 
         
@@ -769,7 +786,7 @@ async def resend_staff_activation(
 async def admin_resend_staff_activation(
     user_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.STAFF_MANAGE)),
 ):
     """Admin resends activation to a specific staff member by user_id."""
     user = session.get(UserModel, user_id)
@@ -1006,7 +1023,10 @@ def student_reset_password(
     session.commit()
     session.refresh(user)
 
-    token = create_access_token(user.id, membership.org_id, membership.role)
+    token = create_access_token(
+        user.id, membership.org_id, membership.role,
+        perms=RoleService.token_perms(session, membership),
+    )
     refresh = create_refresh_token(user.id)
 
     return StudentFirstLoginResponse(
@@ -1022,7 +1042,7 @@ def student_reset_password(
 @router.get("/staff", response_model=PaginatedStaffResponse)
 async def list_staff(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.STAFF_VIEW)),
     cohort_id: UUID | None = Query(default=None),
     subject_id: UUID | None = Query(default=None),  # un-commented
     name: str | None = Query(default=None, description="Search by staff first/last name"),
@@ -1053,7 +1073,7 @@ async def list_staff(
 @router.get("/students", response_model=PaginatedStudentResponse)
 def list_students(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_VIEW)),
     status: MembershipStatus | None = Query(default=None),
     cohort_id: UUID | None = Query(default=None),
     name: str | None = Query(default=None, description="Search by student first/last name"),
@@ -1083,7 +1103,7 @@ def list_students(
 @router.get("/students/export")
 def export_students(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
     status: MembershipStatus | None = Query(default=None),
     cohort_id: UUID | None = Query(default=None),
     name: str | None = Query(default=None),
@@ -1112,7 +1132,7 @@ def update_student(
     student_id: UUID,
     payload: UpdateStudentRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
     user = UserManagementService.update_student(
         session=session, student_id=student_id, payload=payload, org_id=ctx.membership.org_id,
@@ -1126,7 +1146,7 @@ def move_student_cohort(
     student_id: UUID,
     payload: MoveCohortRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
     return CohortService.change_student_cohort(
         session=session, student_id=student_id, new_cohort_id=payload.cohort_id,
@@ -1141,7 +1161,7 @@ def admin_update_staff(
     user_id: UUID,
     payload: AdminUpdateUserRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.STAFF_MANAGE)),
 ):
     """Fix a wrong email/name for a staff member — works for any org role, not just teachers."""
     user = UserManagementService.admin_update_user(
@@ -1155,12 +1175,23 @@ def admin_update_staff(
 def delete_user(
     user_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.STAFF_MANAGE, P.CANDIDATES_MANAGE)),
     force: bool = Query(
         default=False,
         description="Permanently delete an already-activated user. Super admin only — use with caution, see docs.",
     ),
 ):
+    # Removing a candidate needs "Manage candidates"; removing staff needs "Manage staff".
+    target: OrgMembership | None = session.exec(
+        select(OrgMembership).where(
+            OrgMembership.user_id == user_id,
+            OrgMembership.org_id == ctx.membership.org_id,
+        )
+    ).first()
+    if target is not None:
+        needed: P = P.CANDIDATES_MANAGE if target.role == UserRole.STUDENT else P.STAFF_MANAGE
+        if not ctx.can(needed):
+            raise HTTPException(status_code=403, detail="Insufficient permissions.")
     return UserManagementService.delete_user(
         session=session,
         user_id=user_id,

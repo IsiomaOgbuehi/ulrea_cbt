@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from sqlmodel import SQLModel
-from auth.api.v1.routes import auth, users, internal, cohorts, student, exam_subscriptions, platform_subscriptions
+from auth.api.v1.routes import auth, users, internal, cohorts, student, exam_subscriptions, platform_subscriptions, roles
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import database_engine
 from collections.abc import AsyncGenerator
@@ -57,3 +57,4 @@ app.include_router(cohorts.router, prefix=AuthRoutes.API_VERSION.value)
 app.include_router(student.router, prefix=AuthRoutes.API_VERSION.value)
 app.include_router(exam_subscriptions.router, prefix=AuthRoutes.API_VERSION.value)
 app.include_router(platform_subscriptions.router, prefix=AuthRoutes.API_VERSION.value)
+app.include_router(roles.router, prefix=AuthRoutes.API_VERSION.value)

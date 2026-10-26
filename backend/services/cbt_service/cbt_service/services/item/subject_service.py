@@ -8,6 +8,7 @@ from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
 from cbt_service.schemas.item_subject_schemas import SubjectCreate, SubjectUpdate, CurrentUser
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus, SubjectStatus
 from cbt_service.database.models.enums.enums import UserRole
+from cbt_service.core.permissions import P
 
 
 def _escape_like(term: str) -> str:
@@ -69,7 +70,7 @@ class SubjectService:
             SubjectModel.status == (status or SubjectStatus.ACTIVE),
         )
 
-        if current_user.role == UserRole.TEACHER:
+        if current_user.reach(P.SUBJECTS_VIEW) != "all":
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
                 SubjectAssignment.assigned_to == current_user.id,
                 SubjectAssignment.org_id == current_user.org_id,
@@ -134,8 +135,8 @@ class SubjectService:
         if not subject:
             raise HTTPException(status_code=404, detail="Subject not found.")
 
-        # Teachers must be assigned to view
-        if current_user.role == UserRole.TEACHER:
+        # Without org-wide reach, only assigned subjects are visible
+        if current_user.reach(P.SUBJECTS_VIEW) != "all":
             assignment = session.exec(
                 select(SubjectAssignment).where(
                     SubjectAssignment.subject_id == subject_id,
@@ -335,8 +336,7 @@ class SubjectService:
         Return all subjects assigned to `user_id` within the caller's org.
         Admins/Super Admins can query any user; everyone else can only query themselves.
         """
-        is_admin: bool = current_user.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN)
-        if not is_admin and user_id != current_user.id:
+        if not current_user.can(P.STAFF_VIEW) and user_id != current_user.id:
             raise HTTPException(
                 status_code=403,
                 detail="You can only view your own subject assignments.",

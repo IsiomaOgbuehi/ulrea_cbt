@@ -12,6 +12,9 @@ class OrgMembership(SQLModel, table=True):
     user_id: UUID = Field(foreign_key="users.id", index=True, nullable=False)
     org_id: UUID = Field(foreign_key="organizations.id", index=True, nullable=False)
     role: UserRole = Field(nullable=False)
+    # Set when the member holds a custom role (role is then "staff"); NULL
+    # means the built-in role named by `role`.
+    role_id: UUID | None = Field(default=None, foreign_key="org_roles.id", index=True)
     status: MembershipStatus = Field(default=MembershipStatus.ACTIVE, index=True)
     join_type: MembershipJoinType = Field(default=MembershipJoinType.INVITED, index=True)
     institution_id: str | None = Field(default=None)

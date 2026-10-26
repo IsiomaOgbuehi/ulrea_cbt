@@ -3,19 +3,17 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPExcep
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from cbt_service.database.database import SessionDep
-from cbt_service.dependencies import require_roles
 from cbt_service.schemas.item_subject_schemas import (
     ItemCreate, ItemStatusUpdate, ItemUpdate, ItemRead, BulkUploadResult, CurrentUser, PaginatedResponse
 )
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.bulk_upload_service import BulkUploadService, read_upload_within_limit
 from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemStatus, ItemType
-from cbt_service.database.models.enums.enums import UserRole
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/subjects/{subject_id}/items", tags=["questions items"])
 
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
 
 
 ''' CREATE ITEM ➕ '''
@@ -24,7 +22,7 @@ def create_item(
     subject_id: UUID,
     payload: ItemCreate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
 ):
     item = ItemService.create(session, subject_id, payload, current_user)
     return ItemService.to_reads(session, [item])[0]
@@ -35,7 +33,7 @@ def create_item(
 def list_items(
     subject_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_VIEW)),
     status: ItemStatus | None = Query(default=None),
     difficulty: ItemDifficulty | None = Query(default=None),
     type: ItemType | None = Query(default=None),
@@ -71,7 +69,7 @@ def get_item(
     subject_id: UUID,
     item_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_VIEW)),
 ):
     item = ItemService.get_by_id(session, item_id, current_user)
     return ItemService.to_reads(session, [item])[0]
@@ -84,7 +82,7 @@ def update_item(
     item_id: UUID,
     payload: ItemUpdate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
 ):
     item = ItemService.update(session, item_id, payload, current_user)
     return ItemService.to_reads(session, [item])[0]
@@ -97,7 +95,7 @@ def update_item_status(
     item_id: UUID,
     payload: ItemStatusUpdate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
 ):
     item = ItemService.update_status(session, item_id, payload.status, current_user)
     return ItemService.to_reads(session, [item])[0]
@@ -109,7 +107,7 @@ def delete_item(
     subject_id: UUID,
     item_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
 ):
     ItemService.delete(session, item_id, current_user)
 
@@ -118,7 +116,7 @@ def delete_item(
 @router.get("/bulk/template", tags=["bulk-upload"])
 def download_template(
     subject_id: UUID,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_VIEW)),
 ):
     """Download the Excel template for bulk question upload."""
     file_bytes = BulkUploadService.generate_template()
@@ -134,7 +132,7 @@ def download_template(
 async def bulk_upload_items(
     subject_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
     file: UploadFile = File(...),
     bank_id: UUID | None = Form(default=None),
     period_id: UUID | None = Form(default=None),

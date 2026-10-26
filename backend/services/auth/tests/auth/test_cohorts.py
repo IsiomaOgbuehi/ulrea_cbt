@@ -316,12 +316,26 @@ def test_teacher_cannot_create_cohort(client):
 
 
 def test_teacher_cannot_list_all_cohorts(client):
-    """LIST /cohorts is admin-only — teacher is rejected."""
+    """Teachers only see the cohorts they're assigned to, not every cohort."""
     token = get_super_admin_token(client)
+    _create_cohort(client, token)
     _, teacher_token = _create_and_activate_teacher(client, token)
 
     resp = client.get("/api/v1/cohorts", headers={"Authorization": f"Bearer {teacher_token}"})
-    assert resp.status_code == 403, resp.json()
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["total"] == 0
+
+
+def test_teacher_lists_only_assigned_cohorts(client):
+    token = get_super_admin_token(client)
+    cohort_id = _create_cohort(client, token)["id"]
+    _create_cohort(client, token, {**COHORT_PAYLOAD, "name": "Another cohort"})
+    teacher_id, teacher_token = _create_and_activate_teacher(client, token)
+    _assign_teacher(client, token, cohort_id, teacher_id)
+
+    resp = client.get("/api/v1/cohorts", headers={"Authorization": f"Bearer {teacher_token}"})
+    assert resp.status_code == 200, resp.json()
+    assert [c["id"] for c in resp.json()["items"]] == [cohort_id]
 
 
 # ============================================================

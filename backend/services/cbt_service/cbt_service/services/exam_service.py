@@ -3,12 +3,13 @@ from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete, col, func
-from sqlalchemy import or_, and_, desc
+from sqlalchemy import or_, and_, desc, false
 from typing import Any
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from cbt_service.services.item.utils.search import escape_like
 from cbt_service.database.models.item import ItemModel
+from cbt_service.database.models.enums.exam_enum import ExamAction
 from cbt_service.database.models.subject import SubjectAssignment, SubjectModel
 from cbt_service.database.models.attempt import AttemptModel
 from cbt_service.database.models.exam import (
@@ -24,18 +25,27 @@ from cbt_service.schemas.exam_schemas import (
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus
 from sqlalchemy import exists
 
 
-def _log(session: Session, exam_id: UUID, org_id: UUID, actor_id: UUID, action: str, metadata: dict = None):
+def _log(
+    session: Session,
+    exam_id: UUID,
+    org_id: UUID,
+    actor_id: UUID,
+    action: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     entry = ExamAuditLog(
         exam_id=exam_id,
         org_id=org_id,
         actor_id=actor_id,
-        action=action,
-        metadata=metadata,
+        # Always the value ("created"), never the enum name.
+        action=action.value if isinstance(action, ExamAction) else str(action),
+        extra_data=metadata,     # was passed as `metadata`, which the model silently ignored
     )
     session.add(entry)
 
@@ -64,11 +74,11 @@ class ExamService:
 
     @staticmethod
     def _assert_can_edit(session: Session, exam: ExamModel, current_user: CurrentUser) -> None:
-        if current_user.role == UserRole.SUPERVISOR:
-            raise HTTPException(status_code=403, detail="Supervisors cannot edit exams.")
+        if not current_user.can(P.EXAMS_EDIT):
+            raise HTTPException(status_code=403, detail="You don't have permission to edit exams.")
         if exam.status not in (ExamStatus.DRAFT, ExamStatus.REJECTED):
             raise HTTPException(status_code=400, detail=f"Exam cannot be edited in '{exam.status}' status.")
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_EDIT)
 
 
     # @staticmethod
@@ -95,21 +105,28 @@ class ExamService:
     #         raise HTTPException(status_code=403, detail="You are not assigned to this exam's subject.")
 
     @staticmethod
-    def _assert_can_view(session: Session, exam: ExamModel, current_user: CurrentUser) -> None:
+    def _assert_can_view(
+        session: Session, exam: ExamModel, current_user: CurrentUser, perm: P = P.EXAMS_VIEW
+    ) -> None:
         """
-        Admin/super_admin: unrestricted.
-        Teacher: creator, or assigned to the exam's subject.
-        Supervisor: assigned to the exam's subject AND exam is past DRAFT.
-        Students are handled separately via ExamAssignment (see get_by_id).
+        Whether the user may act on this exam under `perm`, by its reach:
+        - all:      any exam in the organisation
+        - assigned: exams they created, or in subjects they're assigned to
+        - own:      only exams they created
+        Drafts are only visible to people who can edit exams (so approvers never
+        see work in progress). Students are handled separately (see get_by_id).
         """
-        if current_user.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
-            return
+        reach = current_user.reach(perm)
+        if reach is None:
+            raise HTTPException(status_code=403, detail="Insufficient permissions.")
 
-        if current_user.role == UserRole.SUPERVISOR and exam.status == ExamStatus.DRAFT:
+        if exam.status == ExamStatus.DRAFT and not current_user.can(P.EXAMS_EDIT):
             raise HTTPException(status_code=404, detail="Exam not found.")
 
-        if current_user.role == UserRole.TEACHER and exam.created_by == current_user.id:
+        if reach == "all" or exam.created_by == current_user.id:
             return
+        if reach == "own":
+            raise HTTPException(status_code=403, detail="You can only do this on exams you created.")
 
         assignment = session.exec(
             select(SubjectAssignment).where(
@@ -135,7 +152,7 @@ class ExamService:
         can't learn an exam's status.
         """
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
         if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
             raise HTTPException(
                 status_code=400,
@@ -211,21 +228,25 @@ class ExamService:
         """Who may see what, plus the list filters (everything except the phase)."""
         conditions: list[Any] = [ExamModel.org_id == current_user.org_id]
 
-        if current_user.role in (UserRole.TEACHER, UserRole.SUPERVISOR):
+        # Same rules as _assert_can_view, as query conditions.
+        reach = current_user.reach(P.EXAMS_VIEW)
+        if reach == "own":
+            conditions.append(ExamModel.created_by == current_user.id)
+        elif reach == "assigned":
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
                 SubjectAssignment.assigned_to == current_user.id,
                 SubjectAssignment.org_id == current_user.org_id,
             )
-            if current_user.role == UserRole.TEACHER:
-                conditions.append(
-                    or_(
-                        ExamModel.created_by == current_user.id,
-                        col(ExamModel.subject_id).in_(assigned_subject_ids),
-                    )
+            conditions.append(
+                or_(
+                    ExamModel.created_by == current_user.id,
+                    col(ExamModel.subject_id).in_(assigned_subject_ids),
                 )
-            else:  # SUPERVISOR: assigned subjects only, never drafts
-                conditions.append(col(ExamModel.subject_id).in_(assigned_subject_ids))
-                conditions.append(ExamModel.status != ExamStatus.DRAFT)
+            )
+        elif reach is None:
+            conditions.append(false())
+        if not current_user.can(P.EXAMS_EDIT):
+            conditions.append(ExamModel.status != ExamStatus.DRAFT)
 
         if status is not None:
             conditions.append(ExamModel.status == status)
@@ -439,8 +460,9 @@ class ExamService:
         if exam.status not in (ExamStatus.DRAFT, ExamStatus.REJECTED):
             raise HTTPException(status_code=400, detail="Only draft or rejected exams can be submitted.")
 
-        if current_user.role == UserRole.TEACHER and exam.created_by != current_user.id:
+        if current_user.reach(P.EXAMS_SUBMIT) == "own" and exam.created_by != current_user.id:
             raise HTTPException(status_code=403, detail="You can only submit your own exams.")
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_SUBMIT)
 
         # Must have at least one item
         # item_count = len(session.exec(
@@ -468,7 +490,7 @@ class ExamService:
         payload: ApprovalAction, current_user: CurrentUser
     ) -> ExamModel:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)   # <- add (no-op for admins)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_APPROVE)
 
         if exam.status != ExamStatus.PENDING_APPROVAL:
             raise HTTPException(status_code=400, detail="Only pending exams can be approved or rejected.")
@@ -892,7 +914,7 @@ class ExamService:
     @staticmethod
     def get_assignments(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamAssignment]:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
         return session.exec(
             select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
         ).all()

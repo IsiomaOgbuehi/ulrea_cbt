@@ -41,6 +41,7 @@ from cbt_service.schemas.attempt_schemas import (
     CurrentUser,
 )
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
+from cbt_service.core.permissions import P
 
 
 @dataclass
@@ -259,6 +260,7 @@ class AttemptService:
         response_id: UUID,
         payload: ManualReviewRequest,
         reviewer_id: UUID,
+        current_user: CurrentUser | None = None,
     ) -> ResponseModel:
         resp = session.exec(
             select(ResponseModel).where(ResponseModel.id == response_id)
@@ -266,6 +268,19 @@ class AttemptService:
 
         if not resp:
             raise HTTPException(status_code=404, detail="Response not found.")
+
+        if current_user is not None:
+            # Only answers to exams the marker can reach, in their own organisation.
+            owner = session.exec(
+                select(AttemptModel).where(
+                    AttemptModel.id == resp.attempt_id,
+                    AttemptModel.org_id == current_user.org_id,
+                )
+            ).first()
+            if owner is None:
+                raise HTTPException(status_code=404, detail="Response not found.")
+            exam_for_check: ExamModel = ExamService._get_exam(session, owner.exam_id, current_user.org_id)
+            ExamService._assert_can_view(session, exam_for_check, current_user, P.RESULTS_MARK)
 
         resp.marks_awarded = payload.marks_awarded
         resp.is_correct = payload.marks_awarded > 0
@@ -533,7 +548,7 @@ class AttemptService:
         current_user: CurrentUser,
     ) -> list[CohortAttemptSummary]:
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.RESULTS_VIEW)
 
         attempts: list[AttemptModel] = list(
             session.exec(
@@ -587,6 +602,10 @@ class AttemptService:
         ).first()
         if not attempt:
             raise HTTPException(status_code=404, detail="Attempt not found.")
+        ExamService._assert_can_view(
+            session, ExamService._get_exam(session, attempt.exam_id, current_user.org_id),
+            current_user, P.RESULTS_VIEW,
+        )
 
         responses = session.exec(
             select(ResponseModel).where(ResponseModel.attempt_id == attempt_id)
@@ -956,6 +975,7 @@ class AttemptService:
         session: Session,
         exam_id: UUID,
         org_id: UUID,
+        current_user: CurrentUser | None = None,
     ) -> ExamExportData:
         """Load the exam, attempts, and responses using SQLModel."""
 
@@ -971,6 +991,8 @@ class AttemptService:
                 status_code=404,
                 detail="Exam not found.",
             )
+        if current_user is not None:
+            ExamService._assert_can_view(session, exam, current_user, P.RESULTS_EXPORT)
 
         sections = ExamService.get_sections_with_items_internal(
             session,

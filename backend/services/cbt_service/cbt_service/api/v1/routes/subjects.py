@@ -7,19 +7,17 @@ from cbt_service.database.models.subject import SubjectModel
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep, release_connection
-from cbt_service.dependencies import require_roles
 from cbt_service.schemas.item_subject_schemas import (
     PaginatedResponse, SubjectAssignmentEnriched, SubjectCreate, SubjectListRead, SubjectSummary, SubjectUpdate, SubjectRead,
     SubjectAssignRequest, SubjectAssignmentRead, CurrentUser
 )
 from cbt_service.services.item.subject_service import SubjectService
-from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.core.route_paths.item_subjects_routes import ItemBankRoutes
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/subjects", tags=["subjects"])
 
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
 
 
 ''' CREATE SUBJECT 📚 '''
@@ -27,7 +25,7 @@ TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 def create_subject(
     payload: SubjectCreate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_MANAGE)),
 ):
     subject = SubjectService.create(session, payload, current_user)
     return SubjectRead.model_validate(subject, from_attributes=True)
@@ -46,7 +44,7 @@ def create_subject(
 @router.get("", response_model=PaginatedResponse[SubjectListRead])
 def list_subjects(
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_VIEW)),
     status: SubjectStatus | None = Query(default=None, description="Defaults to active"),
     has_items: bool | None = Query(default=None, description="true: only subjects with items; false: only empty ones"),
     search: str | None = Query(default=None, max_length=100),
@@ -78,7 +76,7 @@ def list_subjects(
 def get_subject(
     subject_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_VIEW)),
 ):
     subject = SubjectService.get_by_id(session, subject_id, current_user)
     return SubjectRead.model_validate(subject, from_attributes=True)
@@ -90,7 +88,7 @@ def update_subject(
     subject_id: UUID,
     payload: SubjectUpdate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_MANAGE)),
 ):
     subject = SubjectService.update(session, subject_id, payload, current_user)
     return SubjectRead.model_validate(subject, from_attributes=True)
@@ -101,7 +99,7 @@ def update_subject(
 def archive_subject(
     subject_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_MANAGE)),
 ):
     subject = SubjectService.archive(session, subject_id, current_user)
     return SubjectRead.model_validate(subject, from_attributes=True)
@@ -113,7 +111,7 @@ def assign_subject(
     subject_id: UUID,
     payload: SubjectAssignRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_ASSIGN_STAFF)),
 ):
     assignments = SubjectService.assign_users(session, subject_id, payload.user_ids, current_user)
     return [SubjectAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
@@ -125,7 +123,7 @@ def unassign_subject(
     subject_id: UUID,
     user_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_ASSIGN_STAFF)),
 ):
     SubjectService.unassign_user(session, subject_id, user_id, current_user)
 
@@ -135,7 +133,7 @@ def unassign_subject(
 async def get_subject_assignments(
     subject_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.SUBJECTS_ASSIGN_STAFF)),
 ):
     # assignments = SubjectService.get_assignments(session, subject_id, current_user)
 
@@ -184,7 +182,7 @@ async def get_subjects_by_staff(
     user_id: UUID,
     session: SessionDep,
     include_archived: bool = False,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_staff()),
 ) -> list[SubjectRead]:
     subjects = await run_in_threadpool(SubjectService.get_by_assigned_user,
         session, user_id, current_user, include_archived

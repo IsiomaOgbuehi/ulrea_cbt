@@ -16,6 +16,7 @@ from cbt_service.schemas.bank_topic_schemas import (
 from cbt_service.schemas.item_subject_schemas import CurrentUser
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.scope_service import ScopeService
+from cbt_service.core.permissions import P
 
 
 def _now() -> datetime:
@@ -58,7 +59,7 @@ class BankService:
 
     @staticmethod
     def create(session: Session, subject_id: UUID, payload: BankCreate, current_user: CurrentUser) -> BankRead:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         bank = QuestionBank(
             org_id=current_user.org_id,
             subject_id=subject_id,
@@ -78,7 +79,7 @@ class BankService:
     def update(
         session: Session, subject_id: UUID, bank_id: UUID, payload: BankUpdate, current_user: CurrentUser
     ) -> BankRead:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         bank = ScopeService.get_bank(session, subject_id, bank_id, current_user.org_id)
         for key, value in payload.model_dump(exclude_unset=True).items():
             if key in ("kind", "status") and value is not None:
@@ -163,7 +164,7 @@ class TopicService:
 
     @staticmethod
     def create(session: Session, subject_id: UUID, payload: TopicCreate, current_user: CurrentUser) -> TopicRead:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         if payload.parent_id is not None:
             TopicService._get(session, subject_id, payload.parent_id, current_user.org_id)
         TopicService._assert_unique_sibling(session, subject_id, payload.parent_id, payload.name)
@@ -184,7 +185,7 @@ class TopicService:
     def update(
         session: Session, subject_id: UUID, topic_id: UUID, payload: TopicUpdate, current_user: CurrentUser
     ) -> TopicRead:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         topic = TopicService._get(session, subject_id, topic_id, current_user.org_id)
         data = payload.model_dump(exclude_unset=True)
 
@@ -213,7 +214,7 @@ class TopicService:
     @staticmethod
     def delete(session: Session, subject_id: UUID, topic_id: UUID, current_user: CurrentUser) -> None:
         """Deletes the topic and untags its questions/exams. Sub-topics must go first."""
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         topic = TopicService._get(session, subject_id, topic_id, current_user.org_id)
         has_children = session.exec(select(Topic.id).where(Topic.parent_id == topic.id)).first()
         if has_children is not None:

@@ -4,7 +4,9 @@ from cbt_service.schemas.attempt_schemas import CurrentUser
 from cbt_service.database.database import SessionDep
 from cbt_service.services.violation.violation_service import ViolationService
 from cbt_service.schemas.violation_schemas import ViolationCreate, ViolationCreateResult, ViolationRead
-from cbt_service.dependencies import StudentOnly, TeacherOrAbove
+from cbt_service.dependencies import StudentOnly
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/attempts/{attempt_id}/violations", tags=["violations"])
 
@@ -29,6 +31,6 @@ def report_violation(
 def list_attempt_violations(
     attempt_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = TeacherOrAbove,
+    current_user: CurrentUser = Depends(require_permission(P.VIOLATIONS_VIEW)),
 ):
     return ViolationService.list_for_attempt(session, attempt_id, current_user)

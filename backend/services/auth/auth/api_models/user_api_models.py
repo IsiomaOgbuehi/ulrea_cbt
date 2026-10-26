@@ -71,6 +71,8 @@ class CreateStaffUser(BaseModel):
     phone: str | None = None
     role: UserRole
     institution_id: str | None = None
+    # Optional custom role (a key from GET /roles); the base role is then staff.
+    role_key: str | None = None
 
 
 class UpdateStaffEmailRequest(BaseModel):
@@ -201,6 +203,8 @@ class StaffListItem(BaseModel):
     lastname: str
     email: str | None
     role: UserRole
+    role_key: str | None = None      # built-in role name, or the custom role's key
+    role_name: str | None = None     # e.g. "Teacher", "HR Officer"
     status: MembershipStatus
     cohort_ids: list[UUID]
     # subject_ids: list[UUID]

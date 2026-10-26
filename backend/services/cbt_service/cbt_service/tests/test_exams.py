@@ -561,3 +561,35 @@ def test_assign_cohort_draft_exam_fails_before_auth_call(
 #         headers=other_teacher_headers,
 #     )
 #     assert response.status_code == 403
+
+def test_audit_log_reads_old_upper_case_actions(client, teacher_headers, admin_headers) -> None:
+    """Rows from when the column was a Postgres enum hold the NAME ("CREATED")."""
+    from cbt_service.database.models.exam import ExamAuditLog
+
+    exam = create_exam(client, teacher_headers)
+    with Session(engine) as session:
+        for legacy in ("CREATED", "ARCHIVED", "EXAM_STATUS_OVERRIDE", "SOMETHING_NEW"):
+            session.add(ExamAuditLog(
+                exam_id=UUID(exam["id"]), org_id=ORG_ID, actor_id=ORG_ID, action=legacy,
+            ))
+        session.commit()
+
+    response = client.get(f"/api/v1/exams/{exam['id']}/audit", headers=admin_headers)
+    assert response.status_code == 200, response.json()
+    actions = [entry["action"] for entry in response.json()]
+    assert actions.count("created") == 2          # the real one + the legacy one
+    assert {"exam_archived", "exam_status_override", "something_new"} <= set(actions)
+
+
+
+def test_audit_log_keeps_details(client) -> None:
+    """_log used to pass details as `metadata`, which the model ignored."""
+    from cbt_service.database.models.exam import ExamAuditLog
+    from cbt_service.services.exam_service import _log
+
+    exam_id = uuid4()
+    with Session(engine) as session:
+        _log(session, exam_id, ORG_ID, ORG_ID, "deleted", {"exam_title": "Maths"})
+        session.commit()
+        row = session.exec(select(ExamAuditLog).where(ExamAuditLog.exam_id == exam_id)).one()
+    assert row.action == "deleted" and row.extra_data == {"exam_title": "Maths"}

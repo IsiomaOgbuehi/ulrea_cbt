@@ -226,12 +226,8 @@ class BulkUploadLogRead(BaseModel):
 # CURRENT USER (shared with auth service via JWT)
 # ============================================================
 
-class CurrentUser(BaseModel):
-    id: UUID
-    org_id: UUID
-    role: UserRole
-    email: str | None = None
-    verified: bool = False
+# Defined in its own module so every schema file can share it.
+from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa: E402
 
 # ============================================================
 # USER INFORMATION (from auth service via internal httpx)

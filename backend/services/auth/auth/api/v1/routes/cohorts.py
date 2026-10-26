@@ -14,13 +14,12 @@ from auth.dependencies.auth_dependencies import get_user_context, require_cohort
 from auth.services.user.user_context import UserContext
 from auth.services.teacher_cohort_service import TeacherCohortService
 from auth.database.schema.cohort.enum import CohortStatus
-from .users import require_roles
+from auth.core.permissions import P
+from auth.dependencies.auth_dependencies import require_candidate_or, require_permission
 
 router = APIRouter(prefix="/cohorts", tags=["cohorts"])
 
 
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF, UserRole.SUPERVISOR)
 
 
 ''' CREATE COHORT 📚 '''
@@ -28,7 +27,7 @@ TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TE
 def create_cohort(
     payload: CohortCreate,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     return CohortService.create(session=session, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
 
@@ -47,7 +46,7 @@ def create_cohort(
 @router.get("", response_model=PaginatedResponse[CohortRead])
 def list_cohorts(
     session: SessionDep,
-    ctx: UserContext = Depends(TeacherOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_VIEW)),
     status: CohortStatus | None = Query(default=None, description="active, graduated or archived; default excludes archived"),
     search: str | None = Query(default=None, max_length=100, description="Matches cohort name"),
     page: int = Query(default=1, ge=1),
@@ -56,6 +55,8 @@ def list_cohorts(
     cohorts, total = CohortService.get_all(
         session, ctx.membership.org_id,
         status=status, search=search, page=page, page_size=page_size,
+        # Without org-wide reach, only the groups this person is assigned to.
+        assigned_to=None if ctx.reach(P.COHORTS_VIEW) == "all" else ctx.user.id,
     )
     return PaginatedResponse(
         items=cohorts,
@@ -70,7 +71,7 @@ def list_cohorts(
 @router.get("/my-cohorts", response_model=list[MyCohortRead])
 def list_my_cohorts(
     session: SessionDep,
-    ctx: UserContext = Depends(TeacherOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_VIEW)),
 ):
     """
     Cohorts the current teacher is assigned to.
@@ -95,7 +96,7 @@ def list_my_cohorts(
 def get_cohort(
     cohort_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(TeacherOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_VIEW)),
 ):
     return CohortService.get_by_id(session=session, cohort_id=cohort_id, ctx=ctx)
 
@@ -106,7 +107,7 @@ def update_cohort(
     cohort_id: UUID,
     payload: CohortUpdate,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     return CohortService.update(session=session, cohort_id=cohort_id, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
 
@@ -116,7 +117,7 @@ def update_cohort(
 def archive_cohort(
     cohort_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     return CohortService.archive(session=session, cohort_id=cohort_id, actor=ctx.user, org_id=ctx.membership.org_id)
 
@@ -127,7 +128,7 @@ def graduate_cohort(
     cohort_id: UUID,
     payload: GraduateCohortRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     """
     Mark a cohort as graduated.
@@ -145,7 +146,7 @@ async def add_members(
     cohort_id: UUID,
     payload: AddMembersRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ) -> AddMembersResponse:
     result: AddMembersResponse = await run_in_threadpool(
         CohortService.add_members,
@@ -171,7 +172,7 @@ def remove_member(
     cohort_id: UUID,
     student_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     CohortService.remove_member(session=session, cohort_id=cohort_id, student_id=student_id, actor=ctx.user, org_id=ctx.membership.org_id)
 
@@ -206,7 +207,7 @@ def assign_teacher(
     cohort_id: UUID,
     payload: AssignTeacherRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     assignment = TeacherCohortService.assign(
         session=session,
@@ -224,7 +225,7 @@ def unassign_teacher(
     cohort_id: UUID,
     teacher_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(AdminOrAbove),
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
 ):
     TeacherCohortService.unassign(
         session=session, cohort_id=cohort_id, teacher_id=teacher_id, org_id=ctx.membership.org_id

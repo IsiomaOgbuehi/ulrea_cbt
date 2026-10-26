@@ -1,13 +1,14 @@
 import secrets
 import string
 from uuid import UUID
-from sqlmodel import Session, select, func, or_, delete
+from sqlmodel import Session, select, func, or_, delete, col
+from auth.database.schema.role.role_db import OrgRole
 from sqlmodel.sql.expression import Select
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from collections.abc import Sequence
 from typing import cast
 from openpyxl.utils import get_column_letter
@@ -26,6 +27,7 @@ from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
 from auth.database.schema.cohort.cohort_db import CohortMember, CohortModel, TeacherCohortAssignment
 from auth.services.teacher_cohort_service import TeacherCohortService
+from auth.services.role_service import SYSTEM_ROLES
 
 
 # Who can create whom
@@ -136,8 +138,9 @@ class UserManagementService:
                     detail="This user is already a member of your organization.",
                 )
 
-            # Auto-add existing user to org
-            new_membership = MembershipService.create_pending_membership(
+            # They already have an account (and a password), so there's nothing to
+            # activate: they're in straight away and can switch to this organisation.
+            membership = MembershipService.create_pending_membership(
                 session=session,
                 user_id=existing_user.id,
                 org_id=org_id,
@@ -145,6 +148,16 @@ class UserManagementService:
                 created_by=ctx.user.id,
                 institution_id=payload.institution_id,
             )
+            # create_pending_membership hands back an old membership if there is one
+            # (e.g. they were removed before): bring it back with the new role.
+            membership.status = MembershipStatus.ACTIVE
+            membership.role = payload.role
+            membership.role_id = None
+            membership.archived_at = None
+            membership.archived_by = None
+            membership.archive_reason = None
+            membership.updated_at = datetime.now(timezone.utc)
+            session.add(membership)
             session.commit()
             return existing_user, None, True
 
@@ -1025,13 +1038,25 @@ class UserManagementService:
     @staticmethod
     def to_read_list(session: Session, rows: list[tuple[UserModel, OrgMembership]], org_id: UUID) -> list[dict]:
         results = []
+        # Custom role names in one query.
+        role_ids = {m.role_id for _, m in rows if m.role_id is not None}
+        custom: dict[UUID, OrgRole] = (
+            {r.id: r for r in session.exec(select(OrgRole).where(col(OrgRole.id).in_(role_ids))).all()}
+            if role_ids else {}
+        )
         for user, membership in rows:
+            base: str = membership.role.value if isinstance(membership.role, UserRole) else str(membership.role)
+            role_row = custom.get(membership.role_id) if membership.role_id else None
             results.append({
                 "id": user.id,
                 "firstname": user.firstname,
                 "lastname": user.lastname,
                 "email": user.email,
                 "role": membership.role,
+                "role_key": role_row.key if role_row else base,
+                "role_name": role_row.name if role_row else (
+                    SYSTEM_ROLES[base][0] if base in SYSTEM_ROLES else ("Owner" if base == "super_admin" else base.title())
+                ),
                 "status": membership.status,
                 "cohort_ids": [
                     c.id for c in TeacherCohortService.list_cohorts_for_teacher(session, user.id, org_id)

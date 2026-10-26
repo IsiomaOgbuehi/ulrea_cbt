@@ -11,6 +11,7 @@ from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.services.item.utils.item_answer_utils import normalize_correct_answers, assert_correct_answers_valid
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.schemas.item_subject_schemas import ItemRead
 from sqlmodel import col
@@ -20,8 +21,13 @@ from sqlalchemy import exists
 class ItemService:
 
     @staticmethod
-    def _assert_subject_access(session: Session, subject_id: UUID, current_user: CurrentUser):
-        """Shared guard — ensures subject exists in org and user has access."""
+    def _assert_subject_access(
+        session: Session, subject_id: UUID, current_user: CurrentUser, perm: P = P.QUESTIONS_VIEW
+    ) -> SubjectModel:
+        """
+        Shared guard: the subject exists in the caller's org, and the caller holds
+        `perm` for it (any subject with reach "all", else only assigned ones).
+        """
         subject = session.exec(
             select(SubjectModel).where(
                 SubjectModel.id == subject_id,
@@ -31,7 +37,10 @@ class ItemService:
         if not subject:
             raise HTTPException(status_code=404, detail="Subject not found.")
 
-        if current_user.role == UserRole.TEACHER:
+        reach = current_user.reach(perm)
+        if reach is None:
+            raise HTTPException(status_code=403, detail="Insufficient permissions.")
+        if reach != "all":
             assignment = session.exec(
                 select(SubjectAssignment).where(
                     SubjectAssignment.subject_id == subject_id,
@@ -50,7 +59,7 @@ class ItemService:
         payload: ItemCreate,
         current_user: CurrentUser,
     ) -> ItemModel:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, payload.bank_id, current_user.org_id)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, subject_id, payload.topic_ids, current_user.org_id
@@ -155,6 +164,7 @@ class ItemService:
         session: Session,
         item_id: UUID,
         current_user: CurrentUser,
+        perm: P = P.QUESTIONS_VIEW,
     ) -> ItemModel:
         item = session.exec(
             select(ItemModel).where(
@@ -167,7 +177,7 @@ class ItemService:
             raise HTTPException(status_code=404, detail="Item not found.")
 
         # Check subject access
-        ItemService._assert_subject_access(session, item.subject_id, current_user)
+        ItemService._assert_subject_access(session, item.subject_id, current_user, perm)
         return item
 
     @staticmethod
@@ -177,7 +187,7 @@ class ItemService:
         payload: ItemUpdate,
         current_user: CurrentUser,
     ) -> ItemModel:
-        item = ItemService.get_by_id(session, item_id, current_user)
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
 
         update_data = payload.model_dump(exclude_unset=True)
 
@@ -228,7 +238,7 @@ class ItemService:
         new_status: ItemStatus,
         current_user: CurrentUser,
     ) -> ItemModel:
-        item = ItemService.get_by_id(session, item_id, current_user)
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
 
         if item.status == new_status:
             return item  # no-op, avoid a pointless write + updated_at churn

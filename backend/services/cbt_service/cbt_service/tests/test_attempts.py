@@ -25,7 +25,8 @@ from cbt_service.database.models.enums.exam_enum import (
 from .helpers import report_violation, set_max_violations
 
 
-TEACHER_ID = uuid4()
+# The exam is created by the signed-in teacher, so they may mark its answers.
+from .conftest import TEACHER_ID  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

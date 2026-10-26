@@ -29,6 +29,7 @@ from cbt_service.schemas.item_subject_schemas import BulkUploadResult, CurrentUs
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.core.permissions import P
 from cbt_service.services.item.utils.item_answer_utils import (
     assert_correct_answers_valid,
     build_true_false_options,
@@ -436,7 +437,7 @@ class BulkUploadService:
 
         # Same guard every other item endpoint uses: subject must exist in the
         # caller's org, and teachers must be assigned to it.
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, bank_id, current_user.org_id)
         PeriodScope.validate(session, period_id, current_user.org_id)
         topic_lookup: dict[str, UUID] | None = None  # loaded only if a row has topics

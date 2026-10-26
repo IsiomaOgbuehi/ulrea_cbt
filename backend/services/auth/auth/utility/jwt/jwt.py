@@ -11,7 +11,13 @@ JWT_ALGORITHM = settings.JWT_ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = float(settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 REFRESH_TOKEN_EXPIRE_DAYS = int(settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-def create_access_token(subject: UUID, org_id: UUID, role: str) -> Token:
+def create_access_token(
+    subject: UUID, org_id: UUID, role: str, perms: dict[str, str] | None = None
+) -> Token:
+    """
+    perms: the member's effective permissions ({"exams.view": "assigned", ...}),
+    read by other services so they don't need to ask this one.
+    """
     jti = str(uuid4())
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=ACCESS_TOKEN_EXPIRE_MINUTES
@@ -25,6 +31,8 @@ def create_access_token(subject: UUID, org_id: UUID, role: str) -> Token:
         'exp': expires_at,
         'type': 'access',
     }
+    if perms is not None:
+        payload['perms'] = perms
 
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -34,15 +42,18 @@ def create_access_token(subject: UUID, org_id: UUID, role: str) -> Token:
         expires_at=expires_at
     )
 
-def create_refresh_token(subject: UUID) -> str:
+def create_refresh_token(subject: UUID, org_id: UUID | None = None) -> str:
+    """org_id: keep refreshing into this organisation (people can belong to several)."""
     expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
-    payload = {
+    payload: dict[str, object] = {
         'sub': str(subject),
         'jti': str(uuid4()),  # unique id so it can be blacklisted individually
         'exp': expires_at,
         'type': 'refresh',   # distinguish from access token
     }
+    if org_id is not None:
+        payload['org_id'] = str(org_id)
 
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
