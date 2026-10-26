@@ -213,3 +213,38 @@ def add_items(client, headers, exam_id, item_ids):
     )
     assert response.status_code == 200, response.json()
     return response.json()
+
+
+def seed_items(
+    subject_id,
+    count: int = 1,
+    org_id: UUID = ORG_ID,
+    status: str = "active",
+) -> list[UUID]:
+    """
+    Insert `count` real questions in `subject_id` (creating the subject row if
+    needed) and return their ids. Exams only accept questions from their own
+    subject and organisation, so tests use this instead of made-up ids.
+    """
+    from cbt_service.database.models.item import ItemModel
+    from cbt_service.database.models.subject import SubjectModel
+    from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
+
+    sid = UUID(str(subject_id))
+    ids: list[UUID] = []
+    with Session(engine) as session:
+        if session.get(SubjectModel, sid) is None:
+            session.add(SubjectModel(id=sid, org_id=org_id, name=f"Subject {sid.hex[:6]}", created_by=uuid4()))
+        for n in range(count):
+            item = ItemModel(
+                org_id=org_id,
+                subject_id=sid,
+                created_by=uuid4(),
+                question_text=f"Seeded question {n + 1}",
+                item_type=ItemType.SHORT_ANSWER,
+                status=ItemStatus(status),
+            )
+            session.add(item)
+            ids.append(item.id)
+        session.commit()
+    return ids

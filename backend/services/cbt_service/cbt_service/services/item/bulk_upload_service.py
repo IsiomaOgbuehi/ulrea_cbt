@@ -23,9 +23,12 @@ from fastapi import HTTPException, UploadFile
 from sqlmodel import Session
 
 from cbt_service.database.models.item import ItemModel, BulkUploadLog
+from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.enums.item_subject_enums import ItemType, ItemSource
 from cbt_service.schemas.item_subject_schemas import BulkUploadResult, CurrentUser
 from cbt_service.services.item.item_service import ItemService
+from cbt_service.services.item.scope_service import ScopeService
+from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.item.utils.item_answer_utils import (
     assert_correct_answers_valid,
     build_true_false_options,
@@ -46,7 +49,7 @@ REQUIRED_COLUMNS = {"question_text", "item_type"}
 OPTIONAL_COLUMNS = {
     "option_a", "option_b", "option_c", "option_d", "option_e",
     "correct_answers", "explanation", "marks", "negative_marks",
-    "tags", "difficulty",
+    "tags", "difficulty", "topics",
 }
 
 VALID_TYPES = {t.value for t in ItemType}
@@ -381,12 +384,12 @@ class BulkUploadService:
             "question_text", "item_type",
             "option_a", "option_b", "option_c", "option_d", "option_e",
             "correct_answers", "explanation",
-            "marks", "negative_marks", "tags", "difficulty",
+            "marks", "negative_marks", "tags", "difficulty", "topics",
         ]
         ws.append(headers)
 
         examples = [
-            ["What is 2+2?", "mcq_single", "3", "4", "5", "6", "", "B", "Basic math", 1, 0, "math", "easy"],
+            ["What is 2+2?", "mcq_single", "3", "4", "5", "6", "", "B", "Basic math", 1, 0, "math", "easy", ""],
             ["Prime numbers?", "mcq_multi", "2", "3", "4", "5", "", "A,B,D", "", 2, 0.5, "math", "medium"],
             ["Sky is blue", "true_false", "True", "False", "", "", "", "True", "", 1, 0, "general", "easy"],
             ["Speed of light?", "numeric", "", "", "", "", "", "299792458", "", 2, 0, "physics", "hard"],
@@ -407,6 +410,7 @@ class BulkUploadService:
             ["negative_marks", "No", "Points deducted for wrong answer. Default: 0"],
             ["tags", "No", "Comma-separated tags e.g. algebra,chapter-3"],
             ["difficulty", "No", "easy | medium | hard"],
+            ["topics", "No", "Topics from this subject, separated by ; e.g. Ethics; Compliance > Anti-money laundering. Must already exist in the subject."],
         ]
         for row in instructions:
             ws_info.append(row)
@@ -426,11 +430,16 @@ class BulkUploadService:
         filename: str,
         subject_id: UUID,
         current_user: CurrentUser,
+        bank_id: UUID | None = None,
+        period_id: UUID | None = None,
     ) -> BulkUploadResult:
 
         # Same guard every other item endpoint uses: subject must exist in the
         # caller's org, and teachers must be assigned to it.
         ItemService._assert_subject_access(session, subject_id, current_user)
+        ScopeService.validate_bank(session, subject_id, bank_id, current_user.org_id)
+        PeriodScope.validate(session, period_id, current_user.org_id)
+        topic_lookup: dict[str, UUID] | None = None  # loaded only if a row has topics
 
         grid = _load_grid(file_bytes)
         if len(grid) < 2:
@@ -456,6 +465,7 @@ class BulkUploadService:
         upload_id = uuid4()
         successful = []
         errors = []
+        topic_links: list[ItemTopic] = []
 
         for row_num, row, pre_error in extracted:
             if pre_error:
@@ -467,18 +477,36 @@ class BulkUploadService:
                 errors.append({"row": row_num, "error": error})
                 continue
 
+            row_topic_ids: list[UUID] = []
+            raw_topics: str = _safe_str(row.get("topics")).strip()
+            if raw_topics:
+                if topic_lookup is None:
+                    topic_lookup = ScopeService.topic_lookup(session, subject_id, current_user.org_id)
+                names: list[str] = [" > ".join(p.strip() for p in t.split(">")) for t in raw_topics.split(";") if t.strip()]
+                unknown: list[str] = [n for n in names if n.casefold() not in topic_lookup]
+                if unknown:
+                    errors.append({"row": row_num, "error": f"Row {row_num}: unknown topic(s): {', '.join(unknown)}"})
+                    continue
+                row_topic_ids = list(dict.fromkeys(topic_lookup[n.casefold()] for n in names))
+
             item = ItemModel(
                 org_id=current_user.org_id,
                 subject_id=subject_id,
                 created_by=current_user.id,
                 source=ItemSource.EXCEL_UPLOAD,
                 bulk_upload_id=upload_id,
+                bank_id=bank_id,
+                period_id=period_id,
                 **cleaned,
             )
             session.add(item)
+            topic_links.extend(ItemTopic(item_id=item.id, topic_id=t) for t in row_topic_ids)
             successful.append(item)
 
         if successful:
+            # Insert the questions first so the topic links' foreign keys resolve.
+            session.flush()
+            session.add_all(topic_links)
             session.commit()
 
         log = BulkUploadLog(

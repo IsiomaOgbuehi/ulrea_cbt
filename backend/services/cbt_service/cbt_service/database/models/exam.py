@@ -17,6 +17,11 @@ class ExamModel(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     org_id: UUID = Field(index=True, nullable=False)
     subject_id: UUID = Field(index=True, nullable=False)        # from item bank service
+    # Optional scope inside the subject: a bank (class/level...) and, via the
+    # exam_topics table, topics. NULL/empty = the whole subject, as before.
+    bank_id: UUID | None = Field(default=None, foreign_key="question_banks.id", index=True)
+    # Optional: the session/term (or year/cycle) the exam is for.
+    period_id: UUID | None = Field(default=None, foreign_key="periods.id", index=True)
     created_by: UUID = Field(nullable=False)                    # teacher user id
     approved_by: UUID | None = Field(default=None)              # admin who approved
     rejected_by: UUID | None = Field(default=None)

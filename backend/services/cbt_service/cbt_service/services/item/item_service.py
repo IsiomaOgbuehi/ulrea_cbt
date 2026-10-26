@@ -9,6 +9,12 @@ from cbt_service.schemas.item_subject_schemas import ItemCreate, ItemUpdate, Cur
 from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.services.item.utils.item_answer_utils import normalize_correct_answers, assert_correct_answers_valid
+from cbt_service.services.item.scope_service import ScopeService
+from cbt_service.services.period_service import PeriodScope
+from cbt_service.database.models.bank_topic import ItemTopic
+from cbt_service.schemas.item_subject_schemas import ItemRead
+from sqlmodel import col
+from sqlalchemy import exists
 
 
 class ItemService:
@@ -45,10 +51,17 @@ class ItemService:
         current_user: CurrentUser,
     ) -> ItemModel:
         ItemService._assert_subject_access(session, subject_id, current_user)
+        ScopeService.validate_bank(session, subject_id, payload.bank_id, current_user.org_id)
+        topic_ids: list[UUID] = ScopeService.validate_topics(
+            session, subject_id, payload.topic_ids, current_user.org_id
+        )
+        PeriodScope.validate(session, payload.period_id, current_user.org_id)
 
         item = ItemModel(
             org_id=current_user.org_id,
             subject_id=subject_id,
+            bank_id=payload.bank_id,
+            period_id=payload.period_id,
             created_by=current_user.id,
             source=ItemSource.MANUAL,
             question_text=payload.question_text,
@@ -63,6 +76,8 @@ class ItemService:
             difficulty=payload.difficulty,
         )
         session.add(item)
+        session.flush()
+        ScopeService.set_item_topics(session, item.id, topic_ids)
         session.commit()
         session.refresh(item)
         return item
@@ -78,6 +93,11 @@ class ItemService:
         search: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        bank_id: UUID | None = None,
+        no_bank: bool = False,
+        topic_id: UUID | None = None,
+        period_id: UUID | None = None,
+        no_period: bool = False,
     ) -> tuple[list[ItemModel], int]:
         ItemService._assert_subject_access(session, subject_id, current_user)
 
@@ -100,6 +120,20 @@ class ItemService:
             query = query.where(ItemModel.item_type == item_type)
         if search:
             query = query.where(ItemModel.question_text.ilike(f"%{search}%"))
+        if no_bank:
+            query = query.where(col(ItemModel.bank_id).is_(None))
+        elif bank_id:
+            query = query.where(ItemModel.bank_id == bank_id)
+        if topic_id:
+            query = query.where(
+                exists().where(ItemTopic.item_id == ItemModel.id, ItemTopic.topic_id == topic_id)
+            )
+        if no_period:
+            query = query.where(col(ItemModel.period_id).is_(None))
+        elif period_id:
+            # A session also matches the questions tagged with its terms.
+            period_ids: list[UUID] = PeriodScope.with_children(session, period_id, current_user.org_id)
+            query = query.where(col(ItemModel.period_id).in_(period_ids))
 
         # Count total matching rows BEFORE applying limit/offset
         total = session.exec(
@@ -147,6 +181,16 @@ class ItemService:
 
         update_data = payload.model_dump(exclude_unset=True)
 
+        new_topic_ids: list[UUID] | None = update_data.pop("topic_ids", None)
+        if new_topic_ids is not None:
+            new_topic_ids = ScopeService.validate_topics(
+                session, item.subject_id, new_topic_ids, current_user.org_id
+            )
+        if "bank_id" in update_data and update_data["bank_id"] != item.bank_id:
+            ScopeService.validate_bank(session, item.subject_id, update_data["bank_id"], current_user.org_id)
+        if "period_id" in update_data and update_data["period_id"] != item.period_id:
+            PeriodScope.validate(session, update_data["period_id"], current_user.org_id)
+
         # Re-validate correct_answers against options whenever either changes —
         # use the incoming value if provided, otherwise fall back to what's
         # already stored, so partial updates can't desync the two.
@@ -166,6 +210,8 @@ class ItemService:
 
         for key, value in update_data.items():
             setattr(item, key, value)
+        if new_topic_ids is not None:
+            ScopeService.set_item_topics(session, item.id, new_topic_ids)
 
         item.version += 1
         item.updated_at = datetime.now(timezone.utc)
@@ -234,6 +280,15 @@ class ItemService:
         ItemService.update_status(session, item_id, ItemStatus.ARCHIVED, current_user)
 
 
+
+    @staticmethod
+    def to_reads(session: Session, items: list[ItemModel]) -> list[ItemRead]:
+        """ItemRead for each item, with topic ids loaded in one query."""
+        topics: dict[UUID, list[UUID]] = ScopeService.topic_ids_by_item(session, [i.id for i in items])
+        return [
+            ItemRead.model_validate({**i.model_dump(), "topic_ids": topics.get(i.id, [])})
+            for i in items
+        ]
 
     @staticmethod
     def get_by_ids_for_scoring(session: Session, item_ids: list[UUID]) -> list[ItemModel]:

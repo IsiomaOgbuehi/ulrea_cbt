@@ -14,7 +14,7 @@ from cbt_service.core.settings import settings
 from cbt_service.core.redis.redis_client import redis_client
 
 from cbt_service.database.database import database_engine as engine
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -104,6 +104,8 @@ app = FastAPI(
 # ITEM AND SUBJECT SERVICES
 app.include_router(subjects.router, prefix="/api/v1")
 app.include_router(items.router, prefix="/api/v1")
+app.include_router(banks_topics.router, prefix="/api/v1")
+app.include_router(periods.router, prefix="/api/v1")
 
 
 # Exam AND ATTEMPT SERVICES

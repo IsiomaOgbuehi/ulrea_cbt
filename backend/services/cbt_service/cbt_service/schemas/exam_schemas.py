@@ -1,4 +1,5 @@
-from pydantic import BaseModel, model_validator
+from enum import Enum
+from pydantic import BaseModel, Field, model_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,10 @@ class ExamCreate(BaseModel):
     allow_review: bool = True
     max_attempts: int = 1
     max_violations: int | None = None
+    # Optional scope inside the subject. Empty = whole subject (as before).
+    bank_id: UUID | None = None
+    topic_ids: list[UUID] = Field(default_factory=list)
+    period_id: UUID | None = None          # session/term (year/cycle...) the exam is for
 
     @model_validator(mode="after")
     def validate_times(self):
@@ -44,6 +49,9 @@ class ExamUpdate(BaseModel):
     allow_review: bool | None = None
     max_attempts: int | None = None
     max_violations: int | None = None
+    bank_id: UUID | None = None            # send null to clear
+    topic_ids: list[UUID] | None = None    # replaces the exam's topics when sent
+    period_id: UUID | None = None          # send null to clear
 
 
 class ExamRead(BaseModel):
@@ -70,6 +78,28 @@ class ExamRead(BaseModel):
     max_attempts: int
     created_at: datetime
     updated_at: datetime
+    bank_id: UUID | None = None
+    topic_ids: list[UUID] = Field(default_factory=list)
+    period_id: UUID | None = None
+    item_count: int = 0          # questions in the exam
+    assigned_count: int = 0      # candidates assigned
+    submitted_count: int = 0     # of those, how many have submitted
+
+
+class ExamPhase(str, Enum):
+    """Where an exam is in its life (from status + window); used to group the exams list."""
+    UPCOMING = "upcoming"
+    LIVE = "live"
+    PAST = "past"
+    DRAFTS = "drafts"
+
+
+class ExamPhaseCounts(BaseModel):
+    upcoming: int
+    live: int
+    past: int
+    drafts: int
+    all: int
 
 
 class ExamSectionCreate(BaseModel):

@@ -16,6 +16,8 @@ from cbt_service.schemas.exam_schemas import (
     ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate, UserSummary
 )
 from cbt_service.services.exam_service import ExamService
+from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
+from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.clients.auth_client import AuthClient
 
@@ -44,7 +46,7 @@ def create_exam(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     exam = ExamService.create(session, payload, current_user)
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 # ''' LIST EXAMS 📋 '''
@@ -69,21 +71,39 @@ def list_exams(
     search: str | None = Query(default=None, max_length=100, description="Matches exam title"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    period_id: UUID | None = Query(default=None, description="Only exams for this period (a session includes its terms)"),
+    phase: ExamPhase | None = Query(default=None, description="upcoming | live | past | drafts (from status and window)"),
 ) -> PaginatedResponse[ExamRead]:
     rows, total = ExamService.get_all(
         session, current_user,
         status=status, subject_id=subject_id, search=search,
-        page=page, page_size=page_size,
+        page=page, page_size=page_size, period_id=period_id, phase=phase,
     )
     return PaginatedResponse(
-        items=[
-            ExamRead.model_validate({**exam.model_dump(), "subject_name": subject_name})
-            for exam, subject_name in rows
-        ],
+        items=ExamService.to_reads(
+            session,
+            [exam for exam, _ in rows],
+            {exam.id: subject_name for exam, subject_name in rows},
+        ),
         total=total,
         page=page,
         page_size=page_size,
         total_pages=(total + page_size - 1) // page_size,
+    )
+
+
+''' EXAM COUNTS BY PHASE 📊 '''
+@router.get("/summary", response_model=ExamPhaseCounts)
+def exam_phase_counts(
+    session: SessionDep,
+    current_user: CurrentUser = Depends(StaffViewer),
+    subject_id: UUID | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=100),
+    period_id: UUID | None = Query(default=None),
+) -> ExamPhaseCounts:
+    """Counts for the exams list tabs, using the same filters as the list."""
+    return ExamService.phase_counts(
+        session, current_user, subject_id=subject_id, search=search, period_id=period_id
     )
 
 
@@ -104,7 +124,7 @@ def get_exam(
     current_user: CurrentUser = Depends(AnyExamRole),
 ):
     exam = ExamService.get_by_id(session, exam_id, current_user)
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 ''' UPDATE EXAM ✏️ '''
@@ -116,7 +136,7 @@ def update_exam(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     exam = ExamService.update(session, exam_id, payload, current_user)
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 ''' DELETE EXAM 🗑️ '''
@@ -141,7 +161,7 @@ def submit_for_approval(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     exam = ExamService.submit_for_approval(session, exam_id, current_user)
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 ''' APPROVE OR REJECT ✅❌ '''
@@ -153,7 +173,7 @@ def process_approval(
     current_user: CurrentUser = Depends(Approver),
 ):
     exam = ExamService.process_approval(session, exam_id, payload, current_user)
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 # --------------------------------------------------------
@@ -197,6 +217,21 @@ def add_items(
 ):
     items = ExamService.add_items(session, exam_id, payload, current_user)
     return [ExamItemRead.model_validate(i, from_attributes=True) for i in items]
+
+
+''' ADD ITEMS BY BANK / TOPIC 🎯 '''
+@router.post("/{exam_id}/items/from-bank", response_model=ExamItemsFromBankResult)
+def add_items_from_bank(
+    exam_id: UUID,
+    payload: ExamItemsFromBank,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(TeacherOrAbove),
+) -> ExamItemsFromBankResult:
+    """
+    Add questions from the exam's subject by bank, topics and/or period, e.g.
+    "the whole SS2 bank" or "20 random Algebra questions from SS2, First Term".
+    """
+    return ExamService.add_items_from_bank(session, exam_id, payload, current_user)
 
 
 ''' LIST EXAM ITEMS 📋 '''
@@ -388,7 +423,7 @@ def override_exam_status(
         reason=payload.reason,
         current_user=current_user,
     )
-    return ExamRead.model_validate(exam, from_attributes=True)
+    return ExamService.to_reads(session, [exam])[0]
 
 
 
