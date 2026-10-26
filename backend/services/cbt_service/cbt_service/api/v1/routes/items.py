@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from cbt_service.database.database import SessionDep
@@ -27,7 +27,7 @@ def create_item(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     item = ItemService.create(session, subject_id, payload, current_user)
-    return ItemRead.model_validate(item, from_attributes=True)
+    return ItemService.to_reads(session, [item])[0]
 
 
 ''' LIST ITEMS 📋 '''
@@ -42,15 +42,22 @@ def list_items(
     search: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    bank_id: UUID | None = Query(default=None, description="Only questions in this bank"),
+    no_bank: bool = Query(default=False, description="Only questions not in any bank"),
+    topic_id: UUID | None = Query(default=None, description="Only questions tagged with this topic"),
+    period_id: UUID | None = Query(default=None, description="Only questions for this period (a session includes its terms)"),
+    no_period: bool = Query(default=False, description="Only questions without a period"),
 ):
     items, total = ItemService.get_all(
         session, subject_id, current_user,
         status=status, difficulty=difficulty,
         item_type=type, search=search,
         page=page, page_size=page_size,
+        bank_id=bank_id, no_bank=no_bank, topic_id=topic_id,
+        period_id=period_id, no_period=no_period,
     )
     return PaginatedResponse(
-        items=[ItemRead.model_validate(i, from_attributes=True) for i in items],
+        items=ItemService.to_reads(session, list(items)),
         total=total,
         page=page,
         page_size=page_size,
@@ -67,7 +74,7 @@ def get_item(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     item = ItemService.get_by_id(session, item_id, current_user)
-    return ItemRead.model_validate(item, from_attributes=True)
+    return ItemService.to_reads(session, [item])[0]
 
 
 ''' UPDATE ITEM ✏️ '''
@@ -80,7 +87,7 @@ def update_item(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     item = ItemService.update(session, item_id, payload, current_user)
-    return ItemRead.model_validate(item, from_attributes=True)
+    return ItemService.to_reads(session, [item])[0]
 
 
 ''' UPDATE ITEM STATUS 🔄 '''
@@ -93,7 +100,7 @@ def update_item_status(
     current_user: CurrentUser = Depends(TeacherOrAbove),
 ):
     item = ItemService.update_status(session, item_id, payload.status, current_user)
-    return ItemRead.model_validate(item, from_attributes=True)
+    return ItemService.to_reads(session, [item])[0]
 
 
 ''' DELETE (ARCHIVE) ITEM 🗄️ '''
@@ -129,9 +136,13 @@ async def bulk_upload_items(
     session: SessionDep,
     current_user: CurrentUser = Depends(TeacherOrAbove),
     file: UploadFile = File(...),
+    bank_id: UUID | None = Form(default=None),
+    period_id: UUID | None = Form(default=None),
 ):
     """
-    Upload questions in bulk via Excel file. Accepts the native template
+    Upload questions in bulk via Excel file. Optionally put every question in
+    the file into one bank (bank_id) and/or period (period_id); an optional
+    "topics" column tags each row. Accepts the native template
     or a supported third-party export (currently Edu Expression).
     Use GET /bulk/template to download the native format.
     Partial success is supported: valid rows are saved even if some rows fail.
@@ -148,6 +159,8 @@ async def bulk_upload_items(
         filename=file.filename,
         subject_id=subject_id,
         current_user=current_user,
+        bank_id=bank_id,
+        period_id=period_id,
     )
 
 # ''' BULK UPLOAD ⬆️ '''

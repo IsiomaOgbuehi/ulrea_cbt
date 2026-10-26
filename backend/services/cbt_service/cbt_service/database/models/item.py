@@ -38,6 +38,11 @@ class ItemModel(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     org_id: UUID = Field(index=True, nullable=False)
     subject_id: UUID = Field(foreign_key="subjects.id", index=True, nullable=False)
+    # Optional: which bank (class/level, past paper...) in the subject this question
+    # belongs to. NULL = not in a bank (all questions created before banks existed).
+    bank_id: UUID | None = Field(default=None, foreign_key="question_banks.id", index=True)
+    # Optional: the session/term (or year/cycle) the question was prepared for.
+    period_id: UUID | None = Field(default=None, foreign_key="periods.id", index=True)
     created_by: UUID = Field(nullable=False, index=True,)
 
     # ----------------------------------------------------------------

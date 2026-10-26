@@ -35,3 +35,19 @@ class ItemSource(str, Enum):
     EXCEL_UPLOAD = "excel_upload"
     AI_GENERATED = "ai_generated"
     IMPORTED = "imported"
+
+class BankKind(str, Enum):
+    """What a question bank represents within a subject."""
+    LEVEL = "level"             # a class or level, e.g. JSS1, SS2, Year 10
+    PAST_PAPER = "past_paper"   # e.g. WASSCE 2008 (June)
+    CUSTOM = "custom"           # anything else: a CAT, a teacher's own set
+
+
+class BankStatus(str, Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class PeriodStatus(str, Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"

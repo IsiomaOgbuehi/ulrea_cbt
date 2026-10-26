@@ -70,6 +70,9 @@ class ItemCreate(BaseModel):
     negative_marks: float = Field(default=0.0, ge=0)     # This is the penalty deducted for a wrong answer.
     tags: list[str] = Field(default_factory=list)   # Used for: filtering, analytics, exam generation, topic grouping... Give me 20 questions tagged "calculus"... tags=["math", "arithmetic", "basic"],
     difficulty: ItemDifficulty = ItemDifficulty.MEDIUM   # easy | medium | hard
+    bank_id: UUID | None = None                          # bank (class/level...) in the subject; optional
+    topic_ids: list[UUID] = Field(default_factory=list)  # topics in the subject this question tests
+    period_id: UUID | None = None                        # session/term (year/cycle...) it was prepared for
 
     @field_validator("options")
     @classmethod
@@ -156,6 +159,9 @@ class ItemUpdate(BaseModel):
     tags: list[str] | None = None
     difficulty: ItemDifficulty | None = None
     status: ItemStatus | None = None
+    bank_id: UUID | None = None            # send null to take the question out of its bank
+    topic_ids: list[UUID] | None = None    # replaces the question's topics when sent
+    period_id: UUID | None = None          # send null to clear
 
 
 class ItemRead(BaseModel):
@@ -177,6 +183,9 @@ class ItemRead(BaseModel):
     source: ItemSource | None
     created_at: datetime
     updated_at: datetime
+    bank_id: UUID | None = None
+    topic_ids: list[UUID] = Field(default_factory=list)
+    period_id: UUID | None = None
 
 
 T = TypeVar("T")

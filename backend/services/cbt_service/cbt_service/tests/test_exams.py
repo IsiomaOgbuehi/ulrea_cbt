@@ -8,7 +8,7 @@ from cbt_service.clients.auth_client import AuthClient
 from .conftest import engine, STUDENT_ID
 
 from .attempt_conftest import start_attempt
-from .conftest import create_exam, add_items, make_auth_header, ORG_ID, TEST_SECRET
+from .conftest import create_exam, add_items, make_auth_header, seed_items, ORG_ID, TEST_SECRET
 
 
 # ============================================================
@@ -83,7 +83,7 @@ def test_teacher_cannot_edit_other_teachers_exam(client, teacher_headers):
 
 def test_cannot_edit_non_draft_exam(client, teacher_headers, admin_headers):
     exam = create_exam(client, teacher_headers)
-    items = add_items(client, teacher_headers, exam["id"], [uuid4()])
+    items = add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
 
     # Submit for approval
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
@@ -110,7 +110,7 @@ def test_full_approval_flow(client, teacher_headers, admin_headers):
     assert "question" in response.json()["detail"].lower()
 
     # Add items then submit
-    add_items(client, teacher_headers, exam["id"], [uuid4(), uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"], 2))
     response = client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     assert response.status_code == 200
     assert response.json()["status"] == "pending"
@@ -128,7 +128,7 @@ def test_full_approval_flow(client, teacher_headers, admin_headers):
 
 def test_rejection_requires_reason(client, teacher_headers, admin_headers):
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
 
     response = client.post(
@@ -141,7 +141,7 @@ def test_rejection_requires_reason(client, teacher_headers, admin_headers):
 
 def test_rejected_exam_can_be_resubmitted(client, teacher_headers, admin_headers):
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     client.post(
         f"/api/v1/exams/{exam['id']}/approval",
@@ -158,7 +158,7 @@ def test_rejected_exam_can_be_resubmitted(client, teacher_headers, admin_headers
 
 def test_teacher_cannot_approve(client, teacher_headers):
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
 
     response = client.post(
@@ -175,7 +175,7 @@ def test_teacher_cannot_approve(client, teacher_headers):
 
 def test_duplicate_items_not_added(client, teacher_headers):
     exam = create_exam(client, teacher_headers)
-    item_id = uuid4()
+    item_id = seed_items(exam["subject_id"])[0]
 
     add_items(client, teacher_headers, exam["id"], [item_id])
     add_items(client, teacher_headers, exam["id"], [item_id])  # duplicate
@@ -184,9 +184,80 @@ def test_duplicate_items_not_added(client, teacher_headers):
     assert len(response.json()) == 1
 
 
+def _post_items(client, headers, exam_id, item_ids):
+    return client.post(
+        f"/api/v1/exams/{exam_id}/items",
+        json={"item_ids": [str(i) for i in item_ids]},
+        headers=headers,
+    )
+
+
+def _exam_item_ids(client, headers, exam_id) -> set[str]:
+    return {i["item_id"] for i in client.get(f"/api/v1/exams/{exam_id}/items", headers=headers).json()}
+
+
+def test_add_items_rejects_unknown_ids(client, teacher_headers):
+    exam = create_exam(client, teacher_headers)
+    real = seed_items(exam["subject_id"])[0]
+    fake = uuid4()
+
+    response = _post_items(client, teacher_headers, exam["id"], [real, fake])
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["item_ids"] == [str(fake)]
+    # All or nothing: the valid question isn't added either.
+    assert _exam_item_ids(client, teacher_headers, exam["id"]) == set()
+
+
+def test_add_items_rejects_questions_from_another_subject(client, teacher_headers):
+    exam = create_exam(client, teacher_headers)
+    other_subject_item = seed_items(uuid4())[0]
+
+    response = _post_items(client, teacher_headers, exam["id"], [other_subject_item])
+    assert response.status_code == 400
+
+
+def test_add_items_rejects_questions_from_another_org(client, teacher_headers):
+    exam = create_exam(client, teacher_headers)
+    # Same subject id, but the question belongs to a different organisation.
+    foreign = seed_items(exam["subject_id"], org_id=uuid4())[0]
+
+    response = _post_items(client, teacher_headers, exam["id"], [foreign])
+    assert response.status_code == 400
+
+
+def test_add_items_rejects_archived_but_allows_draft(client, teacher_headers):
+    exam = create_exam(client, teacher_headers)
+    archived = seed_items(exam["subject_id"], status="archived")[0]
+    draft = seed_items(exam["subject_id"], status="draft")[0]
+
+    assert _post_items(client, teacher_headers, exam["id"], [archived]).status_code == 400
+    assert _post_items(client, teacher_headers, exam["id"], [draft]).status_code == 200
+    assert _exam_item_ids(client, teacher_headers, exam["id"]) == {str(draft)}
+
+
+def test_re_adding_a_question_already_in_the_exam_is_a_no_op(client, teacher_headers):
+    exam = create_exam(client, teacher_headers)
+    item_id = seed_items(exam["subject_id"])[0]
+    add_items(client, teacher_headers, exam["id"], [item_id])
+
+    # Even if it was archived since, re-sending it doesn't fail: it's skipped.
+    from cbt_service.database.models.item import ItemModel
+    from cbt_service.database.models.enums.item_subject_enums import ItemStatus
+    with Session(engine) as session:
+        item = session.get(ItemModel, item_id)
+        assert item is not None
+        item.status = ItemStatus.ARCHIVED
+        session.add(item)
+        session.commit()
+
+    response = _post_items(client, teacher_headers, exam["id"], [item_id])
+    assert response.status_code == 200 and response.json() == []
+
+
 def test_remove_item_updates_total_marks(client, teacher_headers):
     exam = create_exam(client, teacher_headers)
-    items = add_items(client, teacher_headers, exam["id"], [uuid4(), uuid4()])
+    items = add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"], 2))
 
     exam_after = client.get(f"/api/v1/exams/{exam['id']}", headers=teacher_headers).json()
     assert exam_after["total_marks"] == 2.0
@@ -214,7 +285,7 @@ def test_students_can_only_be_assigned_to_approved_exam(client, teacher_headers,
 
 def create_approved_exam(client, teacher_headers, admin_headers) -> dict:
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     client.post(
         f"/api/v1/exams/{exam['id']}/approval",
@@ -226,7 +297,7 @@ def create_approved_exam(client, teacher_headers, admin_headers) -> dict:
 
 def test_assign_students_to_approved_exam(client, teacher_headers, admin_headers, all_students_valid: None) -> None:
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approved"}, headers=admin_headers)
 
@@ -281,7 +352,7 @@ def test_assign_returns_502_when_auth_service_down(
 
 def test_audit_log_records_lifecycle(client, teacher_headers, admin_headers):
     exam = create_exam(client, teacher_headers)
-    add_items(client, teacher_headers, exam["id"], [uuid4()])
+    add_items(client, teacher_headers, exam["id"], seed_items(exam["subject_id"]))
     client.post(f"/api/v1/exams/{exam['id']}/submit", headers=teacher_headers)
     client.post(f"/api/v1/exams/{exam['id']}/approval", json={"action": "approved"}, headers=admin_headers)
 

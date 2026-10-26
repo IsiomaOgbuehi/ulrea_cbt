@@ -18,8 +18,15 @@ from cbt_service.database.models.enums.exam_enum import ExamStatus, AssignmentSt
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.schemas.exam_schemas import (
     ExamCreate, ExamDeleteResponse, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
-    ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser, MyAssignmentRead
+    ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser, MyAssignmentRead, ExamRead,
+    ExamPhase, ExamPhaseCounts,
 )
+from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
+from cbt_service.services.item.scope_service import ScopeService
+from cbt_service.services.period_service import PeriodScope
+from cbt_service.database.models.bank_topic import ItemTopic
+from cbt_service.database.models.enums.item_subject_enums import ItemStatus
+from sqlalchemy import exists
 
 
 def _log(session: Session, exam_id: UUID, org_id: UUID, actor_id: UUID, action: str, metadata: dict = None):
@@ -143,13 +150,19 @@ class ExamService:
 
     @staticmethod
     def create(session: Session, payload: ExamCreate, current_user: CurrentUser) -> ExamModel:
+        ScopeService.validate_bank(session, payload.subject_id, payload.bank_id, current_user.org_id)
+        topic_ids: list[UUID] = ScopeService.validate_topics(
+            session, payload.subject_id, payload.topic_ids, current_user.org_id
+        )
+        PeriodScope.validate(session, payload.period_id, current_user.org_id)
         exam = ExamModel(
             org_id=current_user.org_id,
             created_by=current_user.id,
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"topic_ids"}),
         )
         session.add(exam)
         session.flush()
+        ScopeService.set_exam_topics(session, exam.id, topic_ids)
         _log(session, exam.id, exam.org_id, current_user.id, "created")
         session.commit()
         session.refresh(exam)
@@ -187,16 +200,16 @@ class ExamService:
 
 
     @staticmethod
-    def get_all(
+    def _list_conditions(
         session: Session,
         current_user: CurrentUser,
         status: ExamStatus | None = None,
         subject_id: UUID | None = None,
         search: str | None = None,
-        page: int = 1,
-        page_size: int = 20,
-    ) -> tuple[list[tuple[ExamModel, str | None]], int]:
-        conditions: list = [ExamModel.org_id == current_user.org_id]
+        period_id: UUID | None = None,
+    ) -> list[Any]:
+        """Who may see what, plus the list filters (everything except the phase)."""
+        conditions: list[Any] = [ExamModel.org_id == current_user.org_id]
 
         if current_user.role in (UserRole.TEACHER, UserRole.SUPERVISOR):
             assigned_subject_ids = select(SubjectAssignment.subject_id).where(
@@ -218,24 +231,107 @@ class ExamService:
             conditions.append(ExamModel.status == status)
         if subject_id is not None:
             conditions.append(ExamModel.subject_id == subject_id)
+        if period_id is not None:
+            # A session also matches the exams set for its terms.
+            period_ids: list[UUID] = PeriodScope.with_children(session, period_id, current_user.org_id)
+            conditions.append(col(ExamModel.period_id).in_(period_ids))
         if search and search.strip():
             pattern: str = f"%{escape_like(search.strip())}%"
             conditions.append(col(ExamModel.title).ilike(pattern, escape="\\"))
+        return conditions
+
+    @staticmethod
+    def _phase_condition(phase: ExamPhase, now: datetime) -> Any:
+        """
+        Where an exam is in its life, from its status and window:
+        - drafts:   still being built (draft) or sent back (rejected)
+        - upcoming: awaiting approval, or approved with a start still ahead
+        - live:     approved/active and inside its window (no window = always open)
+        - past:     closed/archived, or approved/active with its end behind it
+        """
+        running = col(ExamModel.status).in_([ExamStatus.APPROVED, ExamStatus.ACTIVE])
+        started = or_(col(ExamModel.start_time).is_(None), col(ExamModel.start_time) <= now)
+        not_ended = or_(col(ExamModel.end_time).is_(None), col(ExamModel.end_time) > now)
+        if phase == ExamPhase.DRAFTS:
+            return col(ExamModel.status).in_([ExamStatus.DRAFT, ExamStatus.REJECTED])
+        if phase == ExamPhase.UPCOMING:
+            return or_(
+                ExamModel.status == ExamStatus.PENDING_APPROVAL,
+                and_(running, col(ExamModel.start_time) > now),
+            )
+        if phase == ExamPhase.LIVE:
+            return and_(running, started, not_ended)
+        return or_(
+            col(ExamModel.status).in_([ExamStatus.CLOSED, ExamStatus.ARCHIVED]),
+            and_(running, col(ExamModel.end_time) <= now),
+        )
+
+    @staticmethod
+    def get_all(
+        session: Session,
+        current_user: CurrentUser,
+        status: ExamStatus | None = None,
+        subject_id: UUID | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        period_id: UUID | None = None,
+        phase: ExamPhase | None = None,
+    ) -> tuple[list[tuple[ExamModel, str | None]], int]:
+        conditions = ExamService._list_conditions(
+            session, current_user, status=status, subject_id=subject_id, search=search, period_id=period_id
+        )
+        if phase is not None:
+            conditions.append(ExamService._phase_condition(phase, datetime.now(timezone.utc)))
 
         total: int = session.exec(
             select(func.count()).select_from(ExamModel).where(*conditions)
         ).one()
 
+        # Order to suit the phase: soonest first for what's coming / running,
+        # most recent first for what's done. id keeps page boundaries stable.
+        order: list[Any]
+        if phase == ExamPhase.UPCOMING:
+            order = [col(ExamModel.start_time).asc().nulls_last(), desc(col(ExamModel.updated_at))]
+        elif phase == ExamPhase.LIVE:
+            order = [col(ExamModel.end_time).asc().nulls_last(), desc(col(ExamModel.updated_at))]
+        elif phase == ExamPhase.PAST:
+            order = [col(ExamModel.end_time).desc().nulls_last(), desc(col(ExamModel.updated_at))]
+        else:
+            order = [desc(col(ExamModel.updated_at))]
+
         rows = session.exec(
             select(ExamModel, SubjectModel.name)
             .join(SubjectModel, SubjectModel.id == ExamModel.subject_id, isouter=True)
             .where(*conditions)
-            .order_by(desc(col(ExamModel.updated_at)), col(ExamModel.id))  # id keeps page boundaries stable
+            .order_by(*order, col(ExamModel.id))
             .offset((page - 1) * page_size)
             .limit(page_size)
         ).all()
 
         return [(exam, subject_name) for exam, subject_name in rows], total
+
+    @staticmethod
+    def phase_counts(
+        session: Session,
+        current_user: CurrentUser,
+        subject_id: UUID | None = None,
+        search: str | None = None,
+        period_id: UUID | None = None,
+    ) -> ExamPhaseCounts:
+        """How many exams the caller can see in each phase, with the same filters as the list."""
+        conditions = ExamService._list_conditions(
+            session, current_user, subject_id=subject_id, search=search, period_id=period_id
+        )
+        now = datetime.now(timezone.utc)
+        counts: dict[str, int] = {}
+        for phase in ExamPhase:
+            counts[phase.value] = session.exec(
+                select(func.count()).select_from(ExamModel)
+                .where(*conditions, ExamService._phase_condition(phase, now))
+            ).one()
+        counts["all"] = session.exec(select(func.count()).select_from(ExamModel).where(*conditions)).one()
+        return ExamPhaseCounts(**counts)
 
    
     @staticmethod
@@ -273,7 +369,19 @@ class ExamService:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_edit(session, exam, current_user)
 
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        data: dict[str, Any] = payload.model_dump(exclude_unset=True)
+        new_topic_ids: list[UUID] | None = data.pop("topic_ids", None)
+        if "bank_id" in data and data["bank_id"] != exam.bank_id:
+            ScopeService.validate_bank(session, exam.subject_id, data["bank_id"], current_user.org_id)
+        if "period_id" in data and data["period_id"] != exam.period_id:
+            PeriodScope.validate(session, data["period_id"], current_user.org_id)
+        if new_topic_ids is not None:
+            new_topic_ids = ScopeService.validate_topics(
+                session, exam.subject_id, new_topic_ids, current_user.org_id
+            )
+            ScopeService.set_exam_topics(session, exam.id, new_topic_ids)
+
+        for key, value in data.items():
             setattr(exam, key, value)
 
         exam.updated_at = datetime.now(timezone.utc)
@@ -431,6 +539,34 @@ class ExamService:
         total_marks = sum(i.marks for i in existing)
         existing_item_ids: set[UUID] = {i.item_id for i in existing}
 
+        # Only questions from this exam's subject, in the caller's organisation,
+        # and not archived. Ones already in the exam are skipped below, so they
+        # aren't re-checked.
+        new_ids: list[UUID] = [i for i in dict.fromkeys(payload.item_ids) if i not in existing_item_ids]
+        if new_ids:
+            usable: set[UUID] = set(
+                session.exec(
+                    select(ItemModel.id).where(
+                        col(ItemModel.id).in_(new_ids),
+                        ItemModel.org_id == current_user.org_id,
+                        ItemModel.subject_id == exam.subject_id,
+                        ItemModel.status != ItemStatus.ARCHIVED,
+                    )
+                ).all()
+            )
+            invalid: list[str] = [str(i) for i in new_ids if i not in usable]
+            if invalid:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "Some questions can't be added: they aren't in this exam's subject "
+                            "or are archived."
+                        ),
+                        "item_ids": invalid,
+                    },
+                )
+
         added: list[ExamItem] = []
         for item_id in dict.fromkeys(payload.item_ids):
             if item_id in existing_item_ids:
@@ -487,6 +623,102 @@ class ExamService:
         # for item in added:
         #     session.refresh(item)
         # return added
+
+    @staticmethod
+    def add_items_from_bank(
+        session: Session, exam_id: UUID,
+        payload: ExamItemsFromBank, current_user: CurrentUser
+    ) -> ExamItemsFromBankResult:
+        """
+        Adds active questions from the exam's subject that match a bank and/or
+        topics (any of), optionally a difficulty / type, skipping ones already
+        in the exam. With `count`, adds that many (randomly drawn by default).
+        """
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_edit(session, exam, current_user)
+        if payload.bank_id is not None:
+            ScopeService.get_bank(session, exam.subject_id, payload.bank_id, current_user.org_id)
+        topic_ids: list[UUID] = ScopeService.validate_topics(
+            session, exam.subject_id, payload.topic_ids, current_user.org_id
+        )
+
+        conditions: list[Any] = [
+            ItemModel.subject_id == exam.subject_id,
+            ItemModel.org_id == current_user.org_id,
+            ItemModel.status == ItemStatus.ACTIVE,
+            ~exists().where(ExamItem.exam_id == exam_id, ExamItem.item_id == ItemModel.id),
+        ]
+        if payload.bank_id is not None:
+            conditions.append(ItemModel.bank_id == payload.bank_id)
+        if topic_ids:
+            conditions.append(
+                exists().where(ItemTopic.item_id == ItemModel.id, col(ItemTopic.topic_id).in_(topic_ids))
+            )
+        if payload.period_id is not None:
+            period_ids: list[UUID] = PeriodScope.with_children(session, payload.period_id, current_user.org_id)
+            conditions.append(col(ItemModel.period_id).in_(period_ids))
+        if payload.difficulty is not None:
+            conditions.append(ItemModel.difficulty == payload.difficulty)
+        if payload.item_type is not None:
+            conditions.append(ItemModel.item_type == payload.item_type)
+
+        matched: int = session.exec(select(func.count()).select_from(ItemModel).where(*conditions)).one()
+
+        query = select(ItemModel.id).where(*conditions)
+        if payload.count is not None and payload.random:
+            query = query.order_by(func.random())
+        else:
+            query = query.order_by(col(ItemModel.created_at))
+        if payload.count is not None:
+            query = query.limit(payload.count)
+        item_ids: list[UUID] = list(session.exec(query).all())
+
+        if not item_ids:
+            return ExamItemsFromBankResult(matched=matched, added=0, item_ids=[])
+
+        added: list[ExamItem] = ExamService.add_items(
+            session, exam_id, ExamItemAdd(item_ids=item_ids, section_id=payload.section_id), current_user
+        )
+        return ExamItemsFromBankResult(matched=matched, added=len(added), item_ids=[a.item_id for a in added])
+
+    @staticmethod
+    def to_reads(
+        session: Session, exams: list[ExamModel], subject_names: dict[UUID, str | None] | None = None
+    ) -> list[ExamRead]:
+        """ExamRead for each exam with its topic ids (one query for all)."""
+        ids: list[UUID] = [e.id for e in exams]
+        topics: dict[UUID, list[UUID]] = ScopeService.topic_ids_by_exam(session, ids)
+        names: dict[UUID, str | None] = subject_names or {}
+        item_counts: dict[UUID, int] = {}
+        assigned: dict[UUID, int] = {}
+        submitted: dict[UUID, int] = {}
+        if ids:
+            # One grouped query each, so list pages don't do a query per exam.
+            for exam_id, n in session.exec(
+                select(ExamItem.exam_id, func.count()).where(col(ExamItem.exam_id).in_(ids))
+                .group_by(col(ExamItem.exam_id))
+            ).all():
+                item_counts[exam_id] = int(n)
+            for exam_id, n_all, n_done in session.exec(
+                select(
+                    ExamAssignment.exam_id,
+                    func.count(),
+                    func.count().filter(ExamAssignment.status == AssignmentStatus.SUBMITTED),
+                ).where(col(ExamAssignment.exam_id).in_(ids)).group_by(col(ExamAssignment.exam_id))
+            ).all():
+                assigned[exam_id] = int(n_all)
+                submitted[exam_id] = int(n_done)
+        return [
+            ExamRead.model_validate({
+                **e.model_dump(),
+                "topic_ids": topics.get(e.id, []),
+                "item_count": item_counts.get(e.id, 0),
+                "assigned_count": assigned.get(e.id, 0),
+                "submitted_count": submitted.get(e.id, 0),
+                **({"subject_name": names[e.id]} if e.id in names else {}),
+            })
+            for e in exams
+        ]
 
     @staticmethod
     def remove_item(
