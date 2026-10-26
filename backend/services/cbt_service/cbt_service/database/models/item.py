@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON, DateTime, Index
+from sqlalchemy import Column, JSON, DateTime, Index, String
 from sqlalchemy.dialects.postgresql import JSONB
 
-from .enums.item_subject_enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
+from .enums.item_subject_enums import ItemSource, ItemStatus, ItemType
 
 
 json_type = JSON().with_variant(JSONB, "postgresql")
@@ -64,7 +64,11 @@ class ItemModel(SQLModel, table=True):
     # Metadata
     # ----------------------------------------------------------------
     tags: list[str] = Field(default_factory=list, sa_column=Column(json_type))  # e.g. ["algebra","chapter-3"]
-    difficulty: ItemDifficulty = Field(default=ItemDifficulty.MEDIUM, index=True)                                # easy | medium | hard
+    # Key of one of the organisation's difficulty levels (see models/difficulty.py).
+    difficulty: str = Field(
+        default="medium",
+        sa_column=Column(String(40), nullable=False, index=True, server_default="medium"),
+    )
     status: ItemStatus = Field(default=ItemStatus.ACTIVE, index=True,)                        # ItemStatus
     version: int = Field(default=1, ge=1)
 

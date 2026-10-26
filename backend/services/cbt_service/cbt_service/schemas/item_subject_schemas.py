@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Generic, TypeVar
 
 from cbt_service.schemas.exam_schemas import ExamItemRead
-from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemSource, ItemType, ItemStatus, SubjectStatus
+from cbt_service.database.models.enums.item_subject_enums import ItemSource, ItemType, ItemStatus, SubjectStatus
 from cbt_service.database.models.enums.enums import UserRole
 
 
@@ -69,7 +69,7 @@ class ItemCreate(BaseModel):
     marks: float = Field(default=1.0, ge=0)     # This is the score awarded when the question is answered correctly.
     negative_marks: float = Field(default=0.0, ge=0)     # This is the penalty deducted for a wrong answer.
     tags: list[str] = Field(default_factory=list)   # Used for: filtering, analytics, exam generation, topic grouping... Give me 20 questions tagged "calculus"... tags=["math", "arithmetic", "basic"],
-    difficulty: ItemDifficulty = ItemDifficulty.MEDIUM   # easy | medium | hard
+    difficulty: str | None = None   # a difficulty level key; None = the organisation's default
     bank_id: UUID | None = None                          # bank (class/level...) in the subject; optional
     topic_ids: list[UUID] = Field(default_factory=list)  # topics in the subject this question tests
     period_id: UUID | None = None                        # session/term (year/cycle...) it was prepared for
@@ -157,7 +157,7 @@ class ItemUpdate(BaseModel):
     marks: float | None = None
     negative_marks: float | None = None
     tags: list[str] | None = None
-    difficulty: ItemDifficulty | None = None
+    difficulty: str | None = None          # a difficulty level key
     status: ItemStatus | None = None
     bank_id: UUID | None = None            # send null to take the question out of its bank
     topic_ids: list[UUID] | None = None    # replaces the question's topics when sent
@@ -177,7 +177,7 @@ class ItemRead(BaseModel):
     marks: float
     negative_marks: float
     tags: list | None
-    difficulty: ItemDifficulty | None
+    difficulty: str | None
     status: ItemStatus
     version: int
     source: ItemSource | None
@@ -226,12 +226,8 @@ class BulkUploadLogRead(BaseModel):
 # CURRENT USER (shared with auth service via JWT)
 # ============================================================
 
-class CurrentUser(BaseModel):
-    id: UUID
-    org_id: UUID
-    role: UserRole
-    email: str | None = None
-    verified: bool = False
+# Defined in its own module so every schema file can share it.
+from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa: E402
 
 # ============================================================
 # USER INFORMATION (from auth service via internal httpx)
@@ -262,6 +258,20 @@ class SubjectAssignmentEnriched(BaseModel):
 
 class ItemStatusUpdate(BaseModel):
     status: ItemStatus
+
+
+class ItemUsageExam(BaseModel):
+    id: UUID
+    title: str
+    status: str
+
+
+class ItemUsageRead(BaseModel):
+    """Whether a question can be deleted for good, and why not."""
+    answered_count: int                 # student answers recorded for it
+    exams: list[ItemUsageExam]          # exams it's on
+    can_delete: bool
+    reason: str | None = None           # why not, when can_delete is False
 
 
 

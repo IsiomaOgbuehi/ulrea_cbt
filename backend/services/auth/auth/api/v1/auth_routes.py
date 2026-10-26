@@ -10,6 +10,8 @@ class AuthRoutes(Enum):
     REQUEST_OTP = '/otp/request'
     VERIFY_OTP = '/otp/verify'
     REFRESH_TOKEN = '/token/refresh'
+    ORGANIZATIONS = '/organizations'              # the organisations I belong to
+    SWITCH_ORGANIZATION = '/switch-organization'
 
     # lives in users.py router
     STAFF = '/staff'

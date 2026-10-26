@@ -5,12 +5,8 @@ from datetime import datetime
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 
 
-class CurrentUser(BaseModel):
-    id: UUID
-    org_id: UUID
-    role: str
-    email: str | None = None
-    verified: bool = False
+# One CurrentUser for the whole service (see item_subject_schemas).
+from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa: E402
 
 
 class StartAttemptRequest(BaseModel):

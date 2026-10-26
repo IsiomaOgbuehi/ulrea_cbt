@@ -11,11 +11,12 @@ from auth.api_models.platform_subscription import (
 )
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.services.user.user_context import UserContext
-from .users import require_roles
 from auth.utility.payment.paystack import paystack
 from sqlmodel import select
 import json
 import logging
+from auth.core.permissions import P
+from auth.dependencies.auth_dependencies import require_candidate_or, require_permission
 
 router = APIRouter(prefix="/platform", tags=["platform-subscriptions"])
 
@@ -33,9 +34,7 @@ async def list_plans(session: SessionDep):
 async def start_trial(
     plan_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(
-        require_roles(UserRole.SUPER_ADMIN)
-    ),
+    ctx: UserContext = Depends(require_permission(P.BILLING_MANAGE)),
 ):
     org = session.exec(
         select(OrganizationModel).where(
@@ -64,9 +63,7 @@ async def start_trial(
 async def subscribe(
     payload: SubscribeToPlatformRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(
-        require_roles(UserRole.SUPER_ADMIN)
-    ),
+    ctx: UserContext = Depends(require_permission(P.BILLING_MANAGE)),
 ):
     """Organization subscribes or upgrades their plan."""
     org = session.exec(
@@ -91,7 +88,7 @@ async def subscribe(
 @router.get("/my-subscription")
 async def my_subscription(
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.BILLING_VIEW)),
 ):
     subscription = PlatformSubscriptionService.get_active_subscription(
         session, ctx.membership.org_id
@@ -119,9 +116,7 @@ async def my_subscription(
 @router.get("/limits", response_model=OrgLimitsCheck)
 async def check_limits(
     session: SessionDep,
-    ctx: UserContext = Depends(
-        require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-    ),
+    ctx: UserContext = Depends(require_permission(P.BILLING_VIEW)),
 ):
     """Check how many students/staff org can still add."""
     return PlatformSubscriptionService.check_org_limits(

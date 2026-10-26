@@ -7,7 +7,7 @@ from cbt_service.database.models.exam import ExamAssignment
 from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRead, PaginatedResponse
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep, release_connection
-from cbt_service.dependencies import get_current_user, require_roles
+from cbt_service.dependencies import get_current_user
 from cbt_service.schemas.exam_schemas import (
     AssignCohortRequest, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
@@ -18,24 +18,14 @@ from cbt_service.schemas.exam_schemas import (
 from cbt_service.services.exam_service import ExamService
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
-from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.clients.auth_client import AuthClient
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER)
-StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STUDENT)
 
 # new
-StaffViewer = require_roles(
-    UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.SUPERVISOR
-)
-Approver = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.SUPERVISOR)
-AnyExamRole = require_roles(
-    UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER,
-    UserRole.SUPERVISOR, UserRole.STUDENT,
-)
 
 
 ''' CREATE EXAM 📝 '''
@@ -43,7 +33,7 @@ AnyExamRole = require_roles(
 def create_exam(
     payload: ExamCreate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_CREATE)),
 ):
     exam = ExamService.create(session, payload, current_user)
     return ExamService.to_reads(session, [exam])[0]
@@ -65,7 +55,7 @@ def create_exam(
 @router.get("", response_model=PaginatedResponse[ExamRead])
 def list_exams(
     session: SessionDep,
-    current_user: CurrentUser = Depends(StaffViewer),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
     status: ExamStatus | None = Query(default=None),
     subject_id: UUID | None = Query(default=None),
     search: str | None = Query(default=None, max_length=100, description="Matches exam title"),
@@ -96,7 +86,7 @@ def list_exams(
 @router.get("/summary", response_model=ExamPhaseCounts)
 def exam_phase_counts(
     session: SessionDep,
-    current_user: CurrentUser = Depends(StaffViewer),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
     subject_id: UUID | None = Query(default=None),
     search: str | None = Query(default=None, max_length=100),
     period_id: UUID | None = Query(default=None),
@@ -111,7 +101,7 @@ def exam_phase_counts(
 @router.get("/my-assignments", response_model=list[MyAssignmentRead])
 def get_my_assignments(
     session: SessionDep,
-    current_user: CurrentUser = Depends(StudentOrAbove),
+    current_user: CurrentUser = Depends(require_candidate_or(P.EXAMS_VIEW)),
 ):
     return ExamService.get_my_assignments(session, current_user)
 
@@ -121,7 +111,7 @@ def get_my_assignments(
 def get_exam(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AnyExamRole),
+    current_user: CurrentUser = Depends(require_candidate_or(P.EXAMS_VIEW)),
 ):
     exam = ExamService.get_by_id(session, exam_id, current_user)
     return ExamService.to_reads(session, [exam])[0]
@@ -133,7 +123,7 @@ def update_exam(
     exam_id: UUID,
     payload: ExamUpdate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     exam = ExamService.update(session, exam_id, payload, current_user)
     return ExamService.to_reads(session, [exam])[0]
@@ -144,7 +134,7 @@ def update_exam(
 def delete_exam(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),   # ← tightened from TeacherOrAbove
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_DELETE)),
 ):
     return ExamService.delete(session, exam_id, current_user)
 
@@ -158,7 +148,7 @@ def delete_exam(
 def submit_for_approval(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_SUBMIT)),
 ):
     exam = ExamService.submit_for_approval(session, exam_id, current_user)
     return ExamService.to_reads(session, [exam])[0]
@@ -170,7 +160,7 @@ def process_approval(
     exam_id: UUID,
     payload: ApprovalAction,
     session: SessionDep,
-    current_user: CurrentUser = Depends(Approver),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_APPROVE)),
 ):
     exam = ExamService.process_approval(session, exam_id, payload, current_user)
     return ExamService.to_reads(session, [exam])[0]
@@ -186,7 +176,7 @@ def add_section(
     exam_id: UUID,
     payload: ExamSectionCreate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     section = ExamService.add_section(session, exam_id, payload, current_user)
     return ExamSectionRead.model_validate(section, from_attributes=True)
@@ -197,7 +187,7 @@ def add_section(
 def list_sections(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
 ):
     sections = ExamService.get_sections(session, exam_id, current_user)
     return [ExamSectionRead.model_validate(s, from_attributes=True) for s in sections]
@@ -213,7 +203,7 @@ def add_items(
     exam_id: UUID,
     payload: ExamItemAdd,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     items = ExamService.add_items(session, exam_id, payload, current_user)
     return [ExamItemRead.model_validate(i, from_attributes=True) for i in items]
@@ -225,7 +215,7 @@ def add_items_from_bank(
     exam_id: UUID,
     payload: ExamItemsFromBank,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ) -> ExamItemsFromBankResult:
     """
     Add questions from the exam's subject by bank, topics and/or period, e.g.
@@ -239,7 +229,7 @@ def add_items_from_bank(
 def list_exam_items(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(StaffViewer),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
 ):
     items = ExamService.get_items(session, exam_id, current_user)
     return [ExamItemRead.model_validate(i, from_attributes=True) for i in items]
@@ -251,7 +241,7 @@ def remove_item(
     exam_id: UUID,
     exam_item_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     ExamService.remove_item(session, exam_id, exam_item_id, current_user)
 
@@ -277,7 +267,7 @@ async def assign_students(
     exam_id: UUID,
     payload: AssignStudentsRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
 ) -> list[ExamAssignmentRead]:
     # 1. Cheap DB check first: 404 / 400 return immediately, no network call.
     await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
@@ -315,7 +305,7 @@ async def assign_students(
 async def list_assignments(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
 ):
     assignments: list[ExamAssignmentRead] = await run_in_threadpool(
     ExamService.get_assignments, session, exam_id, current_user)
@@ -349,7 +339,7 @@ async def list_assignments(
 def get_audit_log(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_AUDIT_LOG)),
 ):
     logs = ExamService.get_audit_log(session, exam_id, current_user)
     return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
@@ -365,7 +355,7 @@ async def assign_cohort(
     exam_id: UUID,
     payload: AssignCohortRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
 ):
     """
     Assign all active students in a cohort to this exam.
@@ -410,7 +400,7 @@ def override_exam_status(
     exam_id: UUID,
     payload: ExamStatusUpdate,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_OVERRIDE_STATUS)),
 ):
     """
     Manually force an exam's status. Super admin only — bypasses the normal
@@ -432,7 +422,7 @@ def override_exam_status(
 def list_exam_questions(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(StaffViewer),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
 ):
     rows = ExamService.get_items_with_content(session, exam_id, current_user)
     return [

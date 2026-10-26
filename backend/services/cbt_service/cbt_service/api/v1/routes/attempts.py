@@ -22,15 +22,12 @@ from cbt_service.schemas.attempt_schemas import (
     ResponseRead,
     CurrentUser,
 )
-from cbt_service.database.models.enums.enums import UserRole
-from cbt_service.dependencies import require_roles
 from cbt_service.services.attempt_service import AttemptService, build_exam_attempts_workbook
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/attempts", tags=["attempts"])
 
-AdminOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
-TeacherOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STAFF)
-StudentOrAbove = require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TEACHER, UserRole.STUDENT)
 
 
 ''' START ATTEMPT 🚀 '''
@@ -122,7 +119,7 @@ def manual_review(
     response_id: UUID,
     payload: ManualReviewRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_MARK)),
 ):
     """Teacher or admin manually marks a short answer response."""
     response = AttemptService.manual_review(
@@ -130,6 +127,7 @@ def manual_review(
         response_id=response_id,
         payload=payload,
         reviewer_id=current_user.id,
+        current_user=current_user,
     )
     return ResponseRead.model_validate(response, from_attributes=True)
 
@@ -165,7 +163,7 @@ async def get_cohort_attempts(
     exam_id: UUID,
     cohort_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
 ) -> list[CohortAttemptSummary]:
     summaries: list[CohortAttemptSummary] = await run_in_threadpool(
         AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
@@ -194,7 +192,7 @@ async def get_cohort_attempts(
 def get_attempt_detail(
     attempt_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(TeacherOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
 ):
     return AttemptService.get_attempt_detail_for_staff(session, attempt_id, current_user)
 
@@ -206,7 +204,7 @@ def reset_attempt(
     attempt_id: UUID,
     payload: ResetAttemptRequest,
     session: SessionDep,
-    current_user: CurrentUser = Depends(AdminOrAbove),
+    current_user: CurrentUser = Depends(require_permission(P.ATTEMPTS_RESET)),
 ) -> AttemptRead:
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
     exam = session.get(ExamModel, attempt.exam_id)
@@ -219,7 +217,7 @@ def reset_attempt(
 def get_attempt_status(
     attempt_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = Depends(StudentOrAbove),
+    current_user: CurrentUser = Depends(require_candidate_or(P.RESULTS_VIEW)),
 ) -> AttemptStatusRead:
     """Lightweight poll: status, time left, and violation count. Enforces expiry."""
     # Single query; checks ownership and auto-submits if time has run out.
@@ -231,7 +229,7 @@ def get_attempt_status(
 async def export_exam_attempts_to_excel(
     exam_id: UUID,
     session: SessionDep,
-    ctx: CurrentUser = Depends(TeacherOrAbove),
+    ctx: CurrentUser = Depends(require_permission(P.RESULTS_EXPORT)),
 ):
     """Download all attempts for an exam as an Excel workbook."""
 
@@ -243,6 +241,7 @@ async def export_exam_attempts_to_excel(
         session,
         exam_id,
         org_id,
+        ctx,
     )
     # DB work done: free the connection before the auth-service call
     # and the workbook build.

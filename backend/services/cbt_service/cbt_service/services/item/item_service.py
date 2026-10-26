@@ -6,13 +6,22 @@ from sqlmodel import Session, select, func
 from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
 from cbt_service.schemas.item_subject_schemas import ItemCreate, ItemUpdate, CurrentUser
-from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemSource, ItemStatus, ItemType
+from cbt_service.database.models.enums.item_subject_enums import ItemSource, ItemStatus, ItemType
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.services.item.utils.item_answer_utils import normalize_correct_answers, assert_correct_answers_valid
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.services.difficulty_service import DifficultyScope
+from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
-from cbt_service.schemas.item_subject_schemas import ItemRead
+from cbt_service.database.models.attempt import ResponseModel
+from cbt_service.database.models.exam import ExamAuditLog, ExamItem, ExamModel
+from cbt_service.database.models.enums.exam_enum import ExamAction, ExamStatus
+from cbt_service.schemas.item_subject_schemas import ItemRead, ItemUsageExam, ItemUsageRead
+
+# Exams a question can still be taken off when it's deleted: nobody has
+# reviewed, scheduled or sat them yet.
+EDITABLE_EXAM_STATUSES: frozenset[ExamStatus] = frozenset({ExamStatus.DRAFT, ExamStatus.REJECTED})
 from sqlmodel import col
 from sqlalchemy import exists
 
@@ -20,8 +29,13 @@ from sqlalchemy import exists
 class ItemService:
 
     @staticmethod
-    def _assert_subject_access(session: Session, subject_id: UUID, current_user: CurrentUser):
-        """Shared guard — ensures subject exists in org and user has access."""
+    def _assert_subject_access(
+        session: Session, subject_id: UUID, current_user: CurrentUser, perm: P = P.QUESTIONS_VIEW
+    ) -> SubjectModel:
+        """
+        Shared guard: the subject exists in the caller's org, and the caller holds
+        `perm` for it (any subject with reach "all", else only assigned ones).
+        """
         subject = session.exec(
             select(SubjectModel).where(
                 SubjectModel.id == subject_id,
@@ -31,7 +45,10 @@ class ItemService:
         if not subject:
             raise HTTPException(status_code=404, detail="Subject not found.")
 
-        if current_user.role == UserRole.TEACHER:
+        reach = current_user.reach(perm)
+        if reach is None:
+            raise HTTPException(status_code=403, detail="Insufficient permissions.")
+        if reach != "all":
             assignment = session.exec(
                 select(SubjectAssignment).where(
                     SubjectAssignment.subject_id == subject_id,
@@ -50,12 +67,13 @@ class ItemService:
         payload: ItemCreate,
         current_user: CurrentUser,
     ) -> ItemModel:
-        ItemService._assert_subject_access(session, subject_id, current_user)
+        ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, payload.bank_id, current_user.org_id)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, subject_id, payload.topic_ids, current_user.org_id
         )
         PeriodScope.validate(session, payload.period_id, current_user.org_id)
+        difficulty: str = DifficultyScope.resolve(session, current_user.org_id, payload.difficulty)
 
         item = ItemModel(
             org_id=current_user.org_id,
@@ -73,7 +91,7 @@ class ItemService:
             marks=payload.marks,
             negative_marks=payload.negative_marks,
             tags=payload.tags or [],
-            difficulty=payload.difficulty,
+            difficulty=difficulty,
         )
         session.add(item)
         session.flush()
@@ -88,7 +106,7 @@ class ItemService:
         subject_id: UUID,
         current_user: CurrentUser,
         status: ItemStatus | None = None,
-        difficulty: ItemDifficulty | None = None,
+        difficulty: str | None = None,
         item_type: ItemType | None = None,
         search: str | None = None,
         page: int = 1,
@@ -114,8 +132,9 @@ class ItemService:
             query = query.where(ItemModel.status == status)
         else:
             query = query.where(ItemModel.status == ItemStatus.ACTIVE)
-        if difficulty:
-            query = query.where(ItemModel.difficulty == difficulty)
+        difficulty_key: str | None = DifficultyScope.filter_key(session, current_user.org_id, difficulty)
+        if difficulty_key:
+            query = query.where(ItemModel.difficulty == difficulty_key)
         if item_type:
             query = query.where(ItemModel.item_type == item_type)
         if search:
@@ -155,6 +174,7 @@ class ItemService:
         session: Session,
         item_id: UUID,
         current_user: CurrentUser,
+        perm: P = P.QUESTIONS_VIEW,
     ) -> ItemModel:
         item = session.exec(
             select(ItemModel).where(
@@ -167,7 +187,7 @@ class ItemService:
             raise HTTPException(status_code=404, detail="Item not found.")
 
         # Check subject access
-        ItemService._assert_subject_access(session, item.subject_id, current_user)
+        ItemService._assert_subject_access(session, item.subject_id, current_user, perm)
         return item
 
     @staticmethod
@@ -177,7 +197,7 @@ class ItemService:
         payload: ItemUpdate,
         current_user: CurrentUser,
     ) -> ItemModel:
-        item = ItemService.get_by_id(session, item_id, current_user)
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
 
         update_data = payload.model_dump(exclude_unset=True)
 
@@ -190,6 +210,13 @@ class ItemService:
             ScopeService.validate_bank(session, item.subject_id, update_data["bank_id"], current_user.org_id)
         if "period_id" in update_data and update_data["period_id"] != item.period_id:
             PeriodScope.validate(session, update_data["period_id"], current_user.org_id)
+        if "difficulty" in update_data:
+            if update_data["difficulty"] is None:
+                update_data.pop("difficulty")       # not clearable; leave it as it is
+            else:
+                update_data["difficulty"] = DifficultyScope.resolve(
+                    session, current_user.org_id, update_data["difficulty"], current=item.difficulty,
+                )
 
         # Re-validate correct_answers against options whenever either changes —
         # use the incoming value if provided, otherwise fall back to what's
@@ -228,7 +255,7 @@ class ItemService:
         new_status: ItemStatus,
         current_user: CurrentUser,
     ) -> ItemModel:
-        item = ItemService.get_by_id(session, item_id, current_user)
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
 
         if item.status == new_status:
             return item  # no-op, avoid a pointless write + updated_at churn
@@ -271,13 +298,91 @@ class ItemService:
 
 
     @staticmethod
+    def usage(session: Session, item_id: UUID, current_user: CurrentUser) -> ItemUsageRead:
+        """Where a question is used, and whether it can be deleted for good."""
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
+        return ItemService._usage(session, item)
+
+    @staticmethod
+    def _usage(session: Session, item: ItemModel) -> ItemUsageRead:
+        answered: int = int(session.exec(
+            select(func.count()).select_from(ResponseModel).where(
+                ResponseModel.item_id == item.id, ResponseModel.org_id == item.org_id,
+            )
+        ).one())
+        exams: list[ExamModel] = list(session.exec(
+            select(ExamModel)
+            .where(
+                col(ExamModel.id).in_(
+                    select(ExamItem.exam_id).where(ExamItem.item_id == item.id, ExamItem.org_id == item.org_id)
+                )
+            )
+            .order_by(col(ExamModel.created_at))
+        ).all())
+        listed = [
+            ItemUsageExam(id=e.id, title=e.title, status=getattr(e.status, "value", str(e.status)))
+            for e in exams
+        ]
+
+        reason: str | None = None
+        if answered:
+            reason = (
+                f"Students have answered it {answered} time{'s' if answered != 1 else ''}. "
+                "Deleting it would change their results, so archive it instead."
+            )
+        else:
+            locked = [e for e in exams if ExamStatus(e.status) not in EDITABLE_EXAM_STATUSES]
+            if locked:
+                names = ", ".join(f"“{e.title}”" for e in locked[:3]) + (" and others" if len(locked) > 3 else "")
+                reason = (
+                    f"It's on {names}, which {'has' if len(locked) == 1 else 'have'} been submitted, approved "
+                    "or run. Archive it instead, or take it off those exams first."
+                )
+        return ItemUsageRead(answered_count=answered, exams=listed, can_delete=reason is None, reason=reason)
+
+    @staticmethod
     def delete(
         session: Session,
         item_id: UUID,
         current_user: CurrentUser,
     ) -> None:
-        # Soft delete — archive instead of hard delete for audit trail
-        ItemService.update_status(session, item_id, ItemStatus.ARCHIVED, current_user)
+        """
+        Delete a question for good. Only when no student has answered it and it
+        isn't on an exam past draft; it's taken off any draft exams. Otherwise
+        409 — archive it instead (PATCH .../status), which keeps results intact.
+        """
+        item = ItemService.get_by_id(session, item_id, current_user, P.QUESTIONS_MANAGE)
+        usage = ItemService._usage(session, item)
+        if not usage.can_delete:
+            raise HTTPException(status_code=409, detail=usage.reason)
+
+        now = datetime.now(timezone.utc)
+        exam_items: list[ExamItem] = list(session.exec(
+            select(ExamItem).where(ExamItem.item_id == item.id, ExamItem.org_id == item.org_id)
+        ).all())
+        exams_by_id: dict[UUID, ExamModel] = {
+            e.id: e for e in session.exec(
+                select(ExamModel).where(col(ExamModel.id).in_({ei.exam_id for ei in exam_items}))
+            ).all()
+        } if exam_items else {}
+        for exam_item in exam_items:
+            exam = exams_by_id.get(exam_item.exam_id)
+            if exam is not None:
+                exam.total_marks = max(0.0, exam.total_marks - exam_item.marks)
+                exam.updated_at = now
+                session.add(exam)
+            session.add(ExamAuditLog(
+                exam_id=exam_item.exam_id, org_id=item.org_id, actor_id=current_user.id,
+                action=ExamAction.ITEM_REMOVED.value,
+                extra_data={"item_id": str(item.id), "reason": "question deleted"},
+                created_at=now,
+            ))
+            session.delete(exam_item)
+        for link in session.exec(select(ItemTopic).where(ItemTopic.item_id == item.id)).all():
+            session.delete(link)
+        session.flush()
+        session.delete(item)
+        session.commit()
 
 
 

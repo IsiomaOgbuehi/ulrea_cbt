@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Any
@@ -163,21 +163,39 @@ class ExamAssignmentRead(BaseModel):
     created_at: datetime
 
 
+# Names stored before the column became plain text (e.g. "CREATED", "ARCHIVED").
+_LEGACY_ACTIONS: dict[str, ExamAction] = {"ARCHIVED": ExamAction.EXAM_ARCHIVED}
+
+
 class ExamAuditLogRead(BaseModel):
     id: UUID
     exam_id: UUID
     actor_id: UUID
-    action: ExamAction
+    # Known actions come back as their value ("created"); anything unrecognised
+    # is passed through as text rather than failing the whole log.
+    action: ExamAction | str
     extra_data: dict | None
     created_at: datetime
 
+    @field_validator("action", mode="before")
+    @classmethod
+    def _normalise_action(cls, raw: object) -> ExamAction | str:
+        """Old rows hold the enum NAME ("CREATED"); newer ones the value ("created")."""
+        if isinstance(raw, ExamAction):
+            return raw
+        text: str = str(raw).strip()
+        if text in _LEGACY_ACTIONS:
+            return _LEGACY_ACTIONS[text]
+        try:
+            return ExamAction(text.lower())
+        except ValueError:
+            pass
+        member: ExamAction | None = ExamAction.__members__.get(text.upper())
+        return member if member is not None else text.lower()
 
-class CurrentUser(BaseModel):
-    id: UUID
-    org_id: UUID
-    role: UserRole
-    email: str | None = None
-    verified: bool = False
+
+# One CurrentUser for the whole service (see item_subject_schemas).
+from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa: E402
 
 
 class AssignCohortRequest(BaseModel):

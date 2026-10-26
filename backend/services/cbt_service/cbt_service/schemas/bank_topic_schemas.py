@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from cbt_service.database.models.enums.item_subject_enums import (
-    BankKind, BankStatus, ItemDifficulty, ItemType,
+    BankKind, BankStatus, ItemType,
 )
 
 
@@ -102,7 +102,7 @@ class ExamItemsFromBank(BaseModel):
     bank_id: UUID | None = None
     topic_ids: list[UUID] = Field(default_factory=list)   # match ANY of these
     period_id: UUID | None = None                          # a session also matches its terms
-    difficulty: ItemDifficulty | None = None
+    difficulty: str | None = None          # a difficulty level key
     item_type: ItemType | None = None
     count: int | None = Field(default=None, ge=1, le=500)  # None = all matching
     random: bool = True                                    # with count: random draw

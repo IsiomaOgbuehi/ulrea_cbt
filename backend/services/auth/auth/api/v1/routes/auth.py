@@ -35,6 +35,11 @@ from auth.database.schema.platform_subscription.platform_subscription_db import 
 from auth.services.platform_subscription_service import PlatformSubscriptionService
 from auth.database.schema.platform_subscription.enum import PlatformPlanStatus
 from auth.database.schema.membership.membership_db import OrgMembership
+from auth.services.role_service import RoleService
+from auth.services.workspace_service import WorkspaceService
+from auth.api_models.workspace_api_models import SwitchOrganizationRequest, WorkspaceRead
+from auth.dependencies.auth_dependencies import get_user_context
+from auth.services.user.user_context import UserContext
 
 
 IS_DEV = settings.ENVIRONMENT == "dev"
@@ -51,6 +56,9 @@ router = APIRouter(
 class _LoginResult:
     response: LoginResponse | None = None
     needs_otp_for: UserModel | None = None   # unverified, handled async below
+    user: UserModel | None = None
+    # Every organisation they're active in, so login can land on the last one used.
+    active: list[tuple[OrgMembership, OrganizationModel]] | None = None
 
 
 async def handle_unverified_user(user: UserModel):
@@ -100,7 +108,11 @@ def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
     ).all())
     
     pending = next((m for m, _ in rows if m.status == MembershipStatus.PENDING), None)
-    active = next(((m, o) for m, o in rows if m.status == MembershipStatus.ACTIVE), None)
+    active_rows = sorted(
+        ((m, o) for m, o in rows if m.status == MembershipStatus.ACTIVE),
+        key=lambda r: r[0].created_at,
+    )
+    active = active_rows[0] if active_rows else None
 
     if not user.verified:
         if pending is not None and pending.role != UserRole.STUDENT:
@@ -108,17 +120,27 @@ def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
         return _LoginResult(needs_otp_for=user)
 
     if active is None:
-        ...  # your org-less student / first-login / 403 branches, using `pending`
-             # instead of re-querying
+        if pending is None:
+            # Verified student who hasn't joined an organisation yet.
+            provisional = create_student_provisional_token(user.id)
+            return _LoginResult(response=LoginResponse(
+                access_token=provisional.access_token,
+                refresh_token="",
+                user=StaffUserResponse.model_validate(user, from_attributes=True),
+                organization=None,
+                requires_setup=False,
+                is_provisional=True,   # frontend sends them to organisation discovery
+            ))
+        if user.is_first_login:
+            raise HTTPException(status_code=403, detail="Please complete account activation before logging in.")
+        raise HTTPException(status_code=403, detail="No active organization membership found.")
 
     membership, org = active
-    return _LoginResult(response=LoginResponse(
-        access_token=create_access_token(user.id, membership.org_id, membership.role).access_token,
-        refresh_token=create_refresh_token(user.id),
-        user=StaffUserResponse.model_validate(user, from_attributes=True),
-        organization=OrganizationRead.model_validate(org, from_attributes=True),
-        requires_setup=user.is_first_login,
-    ))
+    return _LoginResult(
+        response=WorkspaceService.session_response(session, user, membership, org, user.is_first_login),
+        user=user,
+        active=active_rows,
+    )
     
 
 '''LOGIN 🔐 '''
@@ -130,6 +152,18 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
         detail = await handle_unverified_user(result.needs_otp_for)
         raise HTTPException(status_code=403, detail=detail)
     assert result.response is not None
+
+    # In several organisations: land in the one they used last.
+    if result.user is not None and result.active:
+        user = result.user
+        picked = WorkspaceService.pick(result.active, await WorkspaceService.preferred(user.id))
+        if picked is not None:
+            membership, org = picked
+            if membership is not result.active[0][0]:
+                result.response = await run_in_threadpool(
+                    WorkspaceService.session_response, session, user, membership, org, user.is_first_login,
+                )
+            await WorkspaceService.remember(user.id, membership.org_id)
     return result.response
 
     # user = authenticate_user(session, form_data.username, form_data.password)
@@ -253,16 +287,35 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
 
 
 
-def _load_refresh_subject(session: Session, user_id: UUID) -> tuple[UserModel, OrgMembership]:
+def _load_refresh_subject(
+    session: Session, user_id: UUID, org_id: UUID | None
+) -> tuple[UserModel, OrgMembership]:
+    """
+    org_id: the organisation the refresh token is for. Old tokens without one
+    (or one they've since left) fall back to the last-used / first organisation.
+    """
     user = session.get(UserModel, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists.")
     if not user.verified:
         raise HTTPException(status_code=403, detail="Account is not verified.")
-    membership = MembershipService.get_active_membership(session, user_id)
-    if membership is None:
+    picked = WorkspaceService.pick(WorkspaceService.active_memberships(session, user_id), org_id)
+    if picked is None:
         raise HTTPException(status_code=403, detail="No active organization membership found.")
-    return user, membership
+    return user, picked[0]
+
+
+async def _revoke(token: str | None) -> None:
+    """Blacklist a token until it would have expired anyway (invalid tokens are ignored)."""
+    if not token:
+        return
+    try:
+        claims = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        return
+    ttl = int(claims['exp'] - datetime.now(timezone.utc).timestamp())
+    if ttl > 0:
+        await redis_client.set(f"blacklist:jti:{claims['jti']}", 1, ex=ttl)
 
 
 ''' REFRESH TOKEN 🔄 '''
@@ -290,9 +343,12 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
     except (ValueError, AttributeError):
         raise HTTPException(status_code=401, detail="Invalid token subject.")
 
-    user, membership = await run_in_threadpool(_load_refresh_subject, session, user_id)
+    token_org = token_payload.get('org_id')
+    org_id = UUID(token_org) if token_org else await WorkspaceService.preferred(user_id)
+    user, membership = await run_in_threadpool(_load_refresh_subject, session, user_id, org_id)
 
-    new_token = create_access_token(user.id, membership.org_id, membership.role)
+    new_perms = await run_in_threadpool(RoleService.token_perms, session, membership)
+    new_token = create_access_token(user.id, membership.org_id, membership.role, perms=new_perms)
 
     return RefreshResponse(access_token=new_token.access_token)
 
@@ -548,7 +604,10 @@ def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OT
         message="OTP verified successfully.",
         verified=True,
         token=TokenData(
-            access_token=create_access_token(user.id, membership.org_id, membership.role).access_token,
+            access_token=create_access_token(
+            user.id, membership.org_id, membership.role,
+            perms=RoleService.token_perms(session, membership),
+        ).access_token,
             refresh_token=create_refresh_token(user.id),
         ),
     )
@@ -698,3 +757,35 @@ Add resend OTP cooldown
 Implement OTP for login (passwordless login)
 Mock Redis for tests (important for CI)
 '''
+
+
+'''MY ORGANISATIONS 🏢'''
+@router.get(AuthRoutes.ORGANIZATIONS.value, response_model=list[WorkspaceRead])
+def my_workspaces(
+    session: SessionDep,
+    ctx: UserContext = Depends(get_user_context),
+) -> list[WorkspaceRead]:
+    """Every organisation the signed-in person is active in; the current one is marked."""
+    return WorkspaceService.list_for_user(session, ctx.user.id, ctx.membership.org_id)
+
+
+'''SWITCH ORGANISATION 🔀'''
+@router.post(AuthRoutes.SWITCH_ORGANIZATION.value, response_model=LoginResponse)
+async def switch_organization(
+    payload: SwitchOrganizationRequest,
+    session: SessionDep,
+    token: str = Depends(oauth2_scheme),
+    ctx: UserContext = Depends(get_user_context),
+) -> LoginResponse:
+    """
+    New tokens for another organisation they belong to. The old tokens are
+    revoked so nothing keeps acting in the previous organisation.
+    """
+    user = ctx.user
+    membership, org = await run_in_threadpool(WorkspaceService.membership_in, session, user.id, payload.org_id)
+    response = await run_in_threadpool(WorkspaceService.session_response, session, user, membership, org, False)
+    if membership.org_id != ctx.membership.org_id:
+        await _revoke(token)
+        await _revoke(payload.refresh_token)
+    await WorkspaceService.remember(user.id, membership.org_id)
+    return response

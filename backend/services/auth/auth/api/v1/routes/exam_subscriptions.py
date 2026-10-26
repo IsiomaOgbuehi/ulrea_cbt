@@ -13,9 +13,10 @@ from auth.api_models.exam_subscription import (
     ExamAccessCheck,
 )
 from auth.utility.payment.paystack.paystack import paystack
-from .users import require_roles
 from auth.services.user.user_context import UserContext
 import logging
+from auth.core.permissions import P
+from auth.dependencies.auth_dependencies import require_candidate_or, require_permission
 
 router = APIRouter(prefix="/subscriptions", tags=["exam-subscriptions"])
 
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/subscriptions", tags=["exam-subscriptions"])
 async def check_exam_access(
     exam_body_org_id: UUID,
     session: SessionDep,
-    ctx: UserContext = Depends(get_user_context),
+    ctx: UserContext = Depends(require_candidate_or(P.EXAM_ACCESS_VIEW, P.BILLING_VIEW)),
 ):
     can_access, reason = ExamSubscriptionService.can_access_exam_body(
         session=session,
@@ -40,7 +41,7 @@ async def check_exam_access(
 async def initiate_payment(
     payload: InitiateSubscriptionRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(get_user_context),
+    ctx: UserContext = Depends(require_candidate_or(P.EXAM_ACCESS_PAY, P.BILLING_PAY_EXAM_ACCESS)),
 ):
     return await ExamSubscriptionService.initiate_student_payment(
         session=session,
@@ -55,10 +56,10 @@ async def initiate_payment(
 async def org_bulk_payment(
     payload: BulkSubscribeStudentsRequest,
     session: SessionDep,
-    ctx: UserContext = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)),
+    ctx: UserContext = Depends(require_permission(P.BILLING_PAY_EXAM_ACCESS)),
 ):
     """
-    require_roles already returns a UserContext, so ctx here is fully typed.
+    require_permission returns a UserContext, so ctx here is fully typed.
     Pass ctx.user downstream where the old `creator: UserModel` was expected.
     """
     return await ExamSubscriptionService.initiate_org_bulk_payment(
@@ -74,7 +75,7 @@ async def org_bulk_payment(
 @router.get("/me", response_model=list[SubscriptionRead])
 async def my_subscriptions(
     session: SessionDep,
-    ctx: UserContext = Depends(get_user_context),
+    ctx: UserContext = Depends(require_candidate_or(P.EXAM_ACCESS_VIEW, P.BILLING_VIEW)),
 ):
     subs = ExamSubscriptionService.get_my_subscriptions(session, ctx.user.id)
     return [SubscriptionRead.model_validate(s, from_attributes=True) for s in subs]

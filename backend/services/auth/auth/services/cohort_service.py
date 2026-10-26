@@ -8,6 +8,7 @@ from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, Coh
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.database.schema.user.enums import MembershipStatus, UserRole
+from auth.core.permissions import P
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
     CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse, SkippedMember
@@ -132,8 +133,18 @@ class CohortService:
         search: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        assigned_to: UUID | None = None,
     ) -> tuple[list[CohortRead], int]:
         conditions: list = [CohortModel.org_id == org_id]
+        if assigned_to is not None:
+            conditions.append(
+                col(CohortModel.id).in_(
+                    select(TeacherCohortAssignment.cohort_id).where(
+                        TeacherCohortAssignment.teacher_id == assigned_to,
+                        TeacherCohortAssignment.org_id == org_id,
+                    )
+                )
+            )
 
         # Default hides archived cohorts, as before.
         conditions.append(
@@ -179,22 +190,14 @@ class CohortService:
             org_id=ctx.membership.org_id,
         )
 
-        role = ctx.membership.role
+        reach = None if ctx.is_candidate else ctx.reach(P.COHORTS_VIEW)
 
-        # Admins can view any cohort in their organization.
-        if role in {
-            UserRole.SUPER_ADMIN,
-            UserRole.ADMIN,
-        }:
+        # Org-wide reach: any group in the organisation.
+        if reach == "all":
             return CohortService._to_read(cohort, session)
 
-        # Teachers, supervisors and staff must be assigned
-        # to the cohort through TeacherCohortAssignment.
-        if role in {
-            UserRole.TEACHER,
-            UserRole.SUPERVISOR,
-            UserRole.STAFF,
-        }:
+        # Otherwise only groups they're assigned to (TeacherCohortAssignment).
+        if reach is not None:
             assignment = session.exec(
                 select(TeacherCohortAssignment).where(
                     TeacherCohortAssignment.teacher_id == ctx.user.id,

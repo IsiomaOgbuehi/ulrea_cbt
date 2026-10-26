@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select, func, col
 
 from cbt_service.schemas.attempt_schemas import CurrentUser
+from cbt_service.core.permissions import P
 from cbt_service.database.models.exam import ExamModel
 from cbt_service.services.attempt_service import AttemptService
 from cbt_service.database.models.violation import ExamViolation
@@ -235,7 +236,7 @@ class ViolationService:
 
         # Reuse the exam's own view-access rule (creator / subject-assigned teacher / admin)
         exam = ExamService._get_exam(session, attempt.exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.VIOLATIONS_VIEW)
 
         return session.exec(
             select(ExamViolation)
@@ -246,7 +247,7 @@ class ViolationService:
     @staticmethod
     def list_for_exam(session: Session, exam_id: UUID, current_user) -> list[ExamViolation]:
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.VIOLATIONS_VIEW)
 
         return session.exec(
             select(ExamViolation)
@@ -266,7 +267,7 @@ class ViolationService:
             raise HTTPException(status_code=404, detail="Violation not found.")
 
         exam = ExamService._get_exam(session, violation.exam_id, current_user.org_id)
-        ExamService._assert_can_view(session, exam, current_user)
+        ExamService._assert_can_view(session, exam, current_user, P.VIOLATIONS_REVIEW)
 
         violation.reviewed = True
         violation.reviewed_by = current_user.id

@@ -7,8 +7,9 @@ from cbt_service.clients.auth_client import AuthClient
 from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.services.violation.violation_service import ViolationService
 from cbt_service.schemas.violation_schemas import ViolationRead
-from cbt_service.dependencies import TeacherOrAbove
 from cbt_service.schemas.attempt_schemas import CurrentUser
+from cbt_service.core.permissions import P
+from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 router = APIRouter(prefix="/exams/{exam_id}/violations", tags=["violations"])
 
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/exams/{exam_id}/violations", tags=["violations"])
 async def list_exam_violations(
     exam_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = TeacherOrAbove,
+    current_user: CurrentUser = Depends(require_permission(P.VIOLATIONS_VIEW)),
 ):
     violations: list[ViolationRead] = await run_in_threadpool(ViolationService.list_for_exam, session, exam_id, current_user)
     # DB work done: free the connection before the auth-service call.
@@ -46,6 +47,6 @@ def review_violation(
     exam_id: UUID,  # kept in path for REST consistency; not otherwise used since violation_id is globally unique
     violation_id: UUID,
     session: SessionDep,
-    current_user: CurrentUser = TeacherOrAbove,
+    current_user: CurrentUser = Depends(require_permission(P.VIOLATIONS_REVIEW)),
 ):
     return ViolationService.mark_reviewed(session, violation_id, current_user)

@@ -3,7 +3,7 @@ import uuid
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
-from sqlmodel import Session, select, func
+from sqlmodel import Session, select, func, col
 
 from auth.database.schema.platform_subscription.platform_subscription_db import (
     PlatformPlan, OrgPlatformSubscription,
@@ -286,11 +286,9 @@ class PlatformSubscriptionService:
         current_staff = session.exec(
             select(func.count(OrgMembership.id)).where(
                 OrgMembership.org_id == org_id,
-                OrgMembership.role.in_([
-                    UserRole.ADMIN,
-                    UserRole.TEACHER,
-                    UserRole.SUPERVISOR,
-                ])
+                # Every member who isn't a candidate or the organisation's
+                # owner counts as staff (so custom roles count too).
+                col(OrgMembership.role).not_in([UserRole.STUDENT, UserRole.SUPER_ADMIN]),
             )
         ).one()
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 from uuid import UUID
 
@@ -20,6 +21,8 @@ from auth.services.user.user_context import UserContext
 from auth.utility.jwt.jwt import decode_access_token, decode_provisional_token
 from auth.services.teacher_cohort_service import TeacherCohortService
 from auth.database.schema.cohort.cohort_db import CohortModel
+from auth.core.permissions import P
+from auth.services.role_service import RoleService
 
 
 SECRET_KEY = settings.SECRET_KEY
@@ -125,7 +128,11 @@ async def get_user_context(
     if not membership:
         raise HTTPException(status_code=403, detail="No active membership for this organization.")
 
-    return UserContext(user=user, membership=membership)
+    # Permissions straight from the database, so role changes apply at once here.
+    return UserContext(
+        user=user, membership=membership,
+        resolved_grants=RoleService.resolve_grants(session, membership),
+    )
 
 
 
@@ -198,57 +205,50 @@ def get_provisional_or_authenticated_user(
 
 
 
+def require_permission(*perms: P) -> Callable[..., Awaitable[UserContext]]:
+    """Staff holding ANY of these permissions (reach is checked in the service)."""
+    async def _check(ctx: UserContext = Depends(get_user_context)) -> UserContext:
+        if ctx.is_candidate or not any(ctx.can(p) for p in perms):
+            raise HTTPException(status_code=403, detail="Insufficient permissions.")
+        return ctx
+    return _check
+
+
+def require_candidate_or(*perms: P) -> Callable[..., Awaitable[UserContext]]:
+    """Candidates acting for themselves, or staff holding any of these permissions."""
+    async def _check(ctx: UserContext = Depends(get_user_context)) -> UserContext:
+        # Candidates hold only candidate permissions, so one check covers both.
+        if any(ctx.can(p) for p in perms):
+            return ctx
+        raise HTTPException(status_code=403, detail="Insufficient permissions.")
+    return _check
+
+
 async def require_cohort_access(
     cohort_id: UUID,
     session: SessionDep,
     ctx: UserContext = Depends(get_user_context),
 ) -> UserContext:
     """
-    Allows access if the user is ADMIN/SUPER_ADMIN (full org access),
-    or TEACHER/STAFF/SUPERVISOR who is specifically assigned
-    to this cohort within their organization.
+    The cohort must be in the caller's organisation, and the caller needs
+    "View groups": org-wide reach sees any group, otherwise only groups they're
+    assigned to.
     """
-    role = ctx.membership.role
     org_id = ctx.membership.org_id
+    reach = None if ctx.is_candidate else ctx.reach(P.COHORTS_VIEW)
+    if reach is None:
+        raise HTTPException(status_code=403, detail="Insufficient permissions.")
 
-    if role in (UserRole.SUPER_ADMIN, UserRole.ADMIN):
-        # The cohort must still belong to the user's organization.
+    if reach == "all":
         cohort = session.exec(
-            select(CohortModel).where(
-                CohortModel.id == cohort_id,
-                CohortModel.org_id == org_id,
-            )
+            select(CohortModel).where(CohortModel.id == cohort_id, CohortModel.org_id == org_id)
         ).first()
-
         if not cohort:
-            raise HTTPException(
-                status_code=404,
-                detail="Cohort not found.",
-            )
-
+            raise HTTPException(status_code=404, detail="Cohort not found.")
         return ctx
 
-    if role in (
-        UserRole.TEACHER,
-        UserRole.STAFF,
-        UserRole.SUPERVISOR,
+    if TeacherCohortService.is_teacher_assigned(
+        session=session, cohort_id=cohort_id, teacher_id=ctx.user.id, org_id=org_id,
     ):
-        assigned = TeacherCohortService.is_teacher_assigned(
-            session=session,
-            cohort_id=cohort_id,
-            teacher_id=ctx.user.id,
-            org_id=org_id,
-        )
-
-        if assigned:
-            return ctx
-
-        raise HTTPException(
-            status_code=403,
-            detail="You are not assigned to this cohort.",
-        )
-
-    raise HTTPException(
-        status_code=403,
-        detail="Insufficient permissions.",
-    )
+        return ctx
+    raise HTTPException(status_code=403, detail="You are not assigned to this cohort.")
