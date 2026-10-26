@@ -51,3 +51,8 @@ class BankStatus(str, Enum):
 class PeriodStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
+
+
+class DifficultyStatus(str, Enum):
+    ACTIVE = "active"        # offered for new questions
+    ARCHIVED = "archived"    # kept on existing questions, not offered

@@ -319,7 +319,7 @@ def test_from_bank_filters_difficulty_and_skips_archived(client: TestClient, adm
     easy = make_item(client, admin_headers, subject, "easy", bank_id=ss2["id"], difficulty="easy")
     make_item(client, admin_headers, subject, "hard", bank_id=ss2["id"], difficulty="hard")
     gone = make_item(client, admin_headers, subject, "gone", bank_id=ss2["id"], difficulty="easy")
-    client.delete(f"{V1}/subjects/{subject}/items/{gone['id']}", headers=admin_headers)
+    client.patch(f"{V1}/subjects/{subject}/items/{gone['id']}/status", json={"status": "archived"}, headers=admin_headers)
     exam = create_exam(client, admin_headers, subject_id=subject)
 
     result = _from_bank(client, admin_headers, exam["id"], bank_id=ss2["id"], difficulty="easy")

@@ -4,11 +4,12 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from cbt_service.database.database import SessionDep
 from cbt_service.schemas.item_subject_schemas import (
-    ItemCreate, ItemStatusUpdate, ItemUpdate, ItemRead, BulkUploadResult, CurrentUser, PaginatedResponse
+    ItemCreate, ItemStatusUpdate, ItemUpdate, ItemRead, ItemUsageRead, BulkUploadResult, CurrentUser, PaginatedResponse
 )
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.bulk_upload_service import BulkUploadService, read_upload_within_limit
-from cbt_service.database.models.enums.item_subject_enums import ItemDifficulty, ItemStatus, ItemType
+from cbt_service.services.difficulty_service import DifficultyScope
+from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
 from cbt_service.core.permissions import P
 from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
@@ -35,7 +36,7 @@ def list_items(
     session: SessionDep,
     current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_VIEW)),
     status: ItemStatus | None = Query(default=None),
-    difficulty: ItemDifficulty | None = Query(default=None),
+    difficulty: str | None = Query(default=None, max_length=40, description="Difficulty level key"),
     type: ItemType | None = Query(default=None),
     search: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
@@ -101,14 +102,30 @@ def update_item_status(
     return ItemService.to_reads(session, [item])[0]
 
 
-''' DELETE (ARCHIVE) ITEM 🗄️ '''
+''' ITEM USAGE (CAN IT BE DELETED?) 🔎 '''
+@router.get("/{item_id}/usage", response_model=ItemUsageRead)
+def item_usage(
+    subject_id: UUID,
+    item_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
+) -> ItemUsageRead:
+    """How many times students answered it and which exams it's on."""
+    return ItemService.usage(session, item_id, current_user)
+
+
+''' DELETE ITEM PERMANENTLY ❌ '''
 @router.delete("/{item_id}", status_code=204)
 def delete_item(
     subject_id: UUID,
     item_id: UUID,
     session: SessionDep,
     current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_MANAGE)),
-):
+) -> None:
+    """
+    Only when no student has answered it and it isn't on an exam past draft
+    (it's taken off draft exams). Otherwise 409: archive it via PATCH .../status.
+    """
     ItemService.delete(session, item_id, current_user)
 
 
@@ -116,10 +133,12 @@ def delete_item(
 @router.get("/bulk/template", tags=["bulk-upload"])
 def download_template(
     subject_id: UUID,
+    session: SessionDep,
     current_user: CurrentUser = Depends(require_permission(P.QUESTIONS_VIEW)),
 ):
     """Download the Excel template for bulk question upload."""
-    file_bytes = BulkUploadService.generate_template()
+    levels = DifficultyScope.levels(session, current_user.org_id)
+    file_bytes = BulkUploadService.generate_template([l.name for l in levels if l.status == "active"])
     return Response(
         content=file_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -25,6 +25,7 @@ from cbt_service.schemas.exam_schemas import (
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.services.difficulty_service import DifficultyScope
 from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus
@@ -679,8 +680,9 @@ class ExamService:
         if payload.period_id is not None:
             period_ids: list[UUID] = PeriodScope.with_children(session, payload.period_id, current_user.org_id)
             conditions.append(col(ItemModel.period_id).in_(period_ids))
-        if payload.difficulty is not None:
-            conditions.append(ItemModel.difficulty == payload.difficulty)
+        difficulty_key: str | None = DifficultyScope.filter_key(session, current_user.org_id, payload.difficulty)
+        if difficulty_key is not None:
+            conditions.append(ItemModel.difficulty == difficulty_key)
         if payload.item_type is not None:
             conditions.append(ItemModel.item_type == payload.item_type)
 

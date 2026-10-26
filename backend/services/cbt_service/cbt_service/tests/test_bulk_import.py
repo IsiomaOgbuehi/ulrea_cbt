@@ -359,3 +359,24 @@ def test_unassigned_teacher_cannot_bulk_upload(client, admin_headers, teacher_he
     ])
     resp = upload(client, teacher_headers, unassigned["id"], "q.xlsx", content)
     assert resp.status_code == 403
+
+def test_edu_difficulty_codes_names_and_custom_levels(client, admin_headers, teacher_headers, subject) -> None:
+    """E/M/H codes still work; spelled-out names and custom levels are matched; unknowns are reported."""
+    client.post("/api/v1/difficulty-levels", json={"name": "Olympiad"}, headers=admin_headers)
+    tf = {"Question Type": "T", "True & False": "True"}
+    content = edu_file([
+        edu_row(**tf, **{"Question": "Edu code H", "Difficulty Level": "H"}),
+        edu_row(**tf, **{"Question": "Edu name Hard", "Difficulty Level": "Hard"}),
+        edu_row(**tf, **{"Question": "Edu custom", "Difficulty Level": "olympiad"}),
+        edu_row(**tf, **{"Question": "Edu blank", "Difficulty Level": ""}),
+        edu_row(**tf, **{"Question": "Edu unknown", "Difficulty Level": "Legendary"}),
+    ])
+    r = upload(client, teacher_headers, subject["id"], "edu.xlsx", content)
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    assert body["successful_rows"] == 4 and body["failed_rows"] == 1, body
+    assert "Legendary" in body["errors"][0]["error"]
+    assert find_item(client, teacher_headers, subject["id"], "Edu code H")["difficulty"] == "hard"
+    assert find_item(client, teacher_headers, subject["id"], "Edu name Hard")["difficulty"] == "hard"
+    assert find_item(client, teacher_headers, subject["id"], "Edu custom")["difficulty"] == "olympiad"
+    assert find_item(client, teacher_headers, subject["id"], "Edu blank")["difficulty"] == "medium"

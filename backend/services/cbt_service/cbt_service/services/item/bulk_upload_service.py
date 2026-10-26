@@ -29,6 +29,7 @@ from cbt_service.schemas.item_subject_schemas import BulkUploadResult, CurrentUs
 from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
+from cbt_service.services.difficulty_service import DifficultyScope
 from cbt_service.core.permissions import P
 from cbt_service.services.item.utils.item_answer_utils import (
     assert_correct_answers_valid,
@@ -54,7 +55,7 @@ OPTIONAL_COLUMNS = {
 }
 
 VALID_TYPES = {t.value for t in ItemType}
-VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+# Difficulty is checked against the organisation's levels (DifficultyScope), by key or name.
 
 # --- Edu Expression layout (headers are matched lowercased, because the
 #     source mixes "Option1" and "option2") ---
@@ -202,7 +203,10 @@ def _map_edu_expression_row(get) -> dict:
       Hint                              -> prepended to explanation
     """
     q_type = _safe_str(get("question type")).strip().upper()
-    difficulty = EDU_DIFFICULTY_MAP.get(_safe_str(get("difficulty level")).strip().lower(), "")
+    # E / M / H are Edu Expression's own codes; anything else ("Hard", "CAT 1",
+    # a custom level) goes to the organisation's levels, which report unknowns.
+    raw_difficulty: str = _safe_str(get("difficulty level")).strip()
+    difficulty: str = EDU_DIFFICULTY_MAP.get(raw_difficulty.lower(), raw_difficulty)
 
     marks = get("marks")
     negative_marks = get("negative marks")
@@ -321,9 +325,7 @@ def _validate_row(row: dict, row_num: int):
     else:
         correct_answers = normalize_correct_answers(options, correct_answers)
 
-    difficulty = _safe_str(row.get("difficulty")).strip().lower() or None
-    if difficulty and difficulty not in VALID_DIFFICULTIES:
-        return None, f"Row {row_num}: invalid difficulty '{difficulty}'"
+    difficulty = _safe_str(row.get("difficulty")).strip() or None   # resolved per organisation later
 
     try:
         marks = float(row.get("marks") or 1.0)
@@ -376,7 +378,11 @@ class BulkUploadService:
     # TEMPLATE
     # --------------------------------------------------------
     @staticmethod
-    def generate_template() -> bytes:
+    def generate_template(level_names: list[str] | None = None) -> bytes:
+        """level_names: the organisation's active difficulty levels, for the instructions."""
+        difficulty_help: str = (
+            " | ".join(level_names) if level_names else "easy | medium | hard"
+        ) + ". Blank = the default level."
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Questions"
@@ -410,7 +416,7 @@ class BulkUploadService:
             ["marks", "No", "Points awarded. Default: 1"],
             ["negative_marks", "No", "Points deducted for wrong answer. Default: 0"],
             ["tags", "No", "Comma-separated tags e.g. algebra,chapter-3"],
-            ["difficulty", "No", "easy | medium | hard"],
+            ["difficulty", "No", difficulty_help],
             ["topics", "No", "Topics from this subject, separated by ; e.g. Ethics; Compliance > Anti-money laundering. Must already exist in the subject."],
         ]
         for row in instructions:
@@ -463,6 +469,7 @@ class BulkUploadService:
         else:  # edu_expression
             extracted = _extract_rows_edu_expression(headers, data_rows)
 
+        resolve_difficulty = DifficultyScope.bulk_resolver(session, current_user.org_id)
         upload_id = uuid4()
         successful = []
         errors = []
@@ -477,6 +484,11 @@ class BulkUploadService:
             if error:
                 errors.append({"row": row_num, "error": error})
                 continue
+            difficulty_key, difficulty_error = resolve_difficulty(cleaned["difficulty"])
+            if difficulty_error:
+                errors.append({"row": row_num, "error": f"Row {row_num}: {difficulty_error}"})
+                continue
+            cleaned["difficulty"] = difficulty_key
 
             row_topic_ids: list[UUID] = []
             raw_topics: str = _safe_str(row.get("topics")).strip()

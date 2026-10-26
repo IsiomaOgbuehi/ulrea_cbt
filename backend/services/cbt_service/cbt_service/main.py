@@ -14,7 +14,7 @@ from cbt_service.core.settings import settings
 from cbt_service.core.redis.redis_client import redis_client
 
 from cbt_service.database.database import database_engine as engine
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods, difficulty_levels
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ app.include_router(subjects.router, prefix="/api/v1")
 app.include_router(items.router, prefix="/api/v1")
 app.include_router(banks_topics.router, prefix="/api/v1")
 app.include_router(periods.router, prefix="/api/v1")
+app.include_router(difficulty_levels.router, prefix="/api/v1")
 
 
 # Exam AND ATTEMPT SERVICES
