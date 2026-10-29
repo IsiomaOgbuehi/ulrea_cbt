@@ -20,6 +20,8 @@ class ExamCreate(BaseModel):
     shuffle_options: bool = False
     show_result_immediately: bool = True
     allow_review: bool = True
+    auto_mark_short_answers: bool = False   # off: short answers are marked by a person
+    show_attempts_used: bool = False        # candidates see "1 of 2 attempts used"
     max_attempts: int = 1
     max_violations: int | None = None
     # Optional scope inside the subject. Empty = whole subject (as before).
@@ -35,6 +37,26 @@ class ExamCreate(BaseModel):
         return self
 
 
+class ExamMaxAttemptsUpdate(BaseModel):
+    """
+    Change how many attempts candidates get, and whether they see how many
+    they've used, once an exam is approved or live. Send either or both.
+    """
+    max_attempts: int | None = Field(default=None, ge=1, le=100)
+    show_attempts_used: bool | None = None
+
+    @model_validator(mode="after")
+    def something_to_change(self) -> "ExamMaxAttemptsUpdate":
+        if self.max_attempts is None and self.show_attempts_used is None:
+            raise ValueError("Send max_attempts, show_attempts_used, or both.")
+        return self
+
+
+class ExamShowResultsUpdate(BaseModel):
+    """Show candidates their results (or hide them again) once an exam is approved, live or closed."""
+    show_result_immediately: bool
+
+
 class ExamUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
@@ -47,6 +69,8 @@ class ExamUpdate(BaseModel):
     shuffle_options: bool | None = None
     show_result_immediately: bool | None = None
     allow_review: bool | None = None
+    auto_mark_short_answers: bool | None = None   # only while the exam is a draft / sent back
+    show_attempts_used: bool | None = None
     max_attempts: int | None = None
     max_violations: int | None = None
     bank_id: UUID | None = None            # send null to clear
@@ -75,6 +99,8 @@ class ExamRead(BaseModel):
     shuffle_options: bool
     show_result_immediately: bool
     allow_review: bool
+    auto_mark_short_answers: bool = False
+    show_attempts_used: bool = False
     max_attempts: int
     created_at: datetime
     updated_at: datetime
@@ -239,6 +265,17 @@ class MyAssignmentRead(BaseModel):
     start_time: datetime | None
     end_time: datetime | None
     has_attempted: bool     # so the frontend can show "resume" vs "start"
+    # Attempts, worked out from the student's attempts (not the assignment status).
+    # Both left out (None) unless the exam shows candidates their attempts used.
+    max_attempts: int | None = None
+    attempts_used: int | None = None            # attempts started or finished (resets don't count)
+    show_attempts_used: bool = False
+    in_progress_attempt_id: UUID | None = None  # an attempt to resume (started, or reset by staff)
+    restart: bool = False                       # that attempt was reset by staff: it starts afresh
+    latest_attempt_id: UUID | None = None       # the latest finished attempt, for "View result"
+    can_retake: bool = False                    # finished before, attempts left, window open
+    show_result: bool = True
+    allow_review: bool = False
 
 
 class ExamStatusUpdate(BaseModel):

@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
@@ -8,6 +9,7 @@ from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRea
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
+from cbt_service.schemas.exam_schemas import ExamMaxAttemptsUpdate, ExamShowResultsUpdate
 from cbt_service.schemas.exam_schemas import (
     AssignCohortRequest, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
@@ -21,6 +23,8 @@ from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.core.permissions import P
 from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -126,6 +130,32 @@ def update_exam(
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     exam = ExamService.update(session, exam_id, payload, current_user)
+    return ExamService.to_reads(session, [exam])[0]
+
+
+''' CHANGE ATTEMPTS ALLOWED (APPROVED / LIVE) 🔁 '''
+@router.patch("/{exam_id}/max-attempts", response_model=ExamRead)
+def update_max_attempts(
+    exam_id: UUID,
+    payload: ExamMaxAttemptsUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_CHANGE_ATTEMPTS)),
+) -> ExamRead:
+    """Change how many attempts candidates get, once the exam is approved or live."""
+    exam = ExamService.update_max_attempts(session, exam_id, payload, current_user)
+    return ExamService.to_reads(session, [exam])[0]
+
+
+''' SHOW / HIDE RESULTS (APPROVED / LIVE / CLOSED) 📣 '''
+@router.patch("/{exam_id}/show-results", response_model=ExamRead)
+def update_show_results(
+    exam_id: UUID,
+    payload: ExamShowResultsUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_RELEASE_RESULTS)),
+) -> ExamRead:
+    """Show candidates their scores and pass/fail (or hide them again)."""
+    exam = ExamService.update_show_results(session, exam_id, payload, current_user)
     return ExamService.to_reads(session, [exam])[0]
 
 
@@ -376,6 +406,7 @@ async def assign_cohort(
     except HTTPException:
         raise   # 400 graduated / 404 not found / 502 from the client: pass through
     except Exception:
+        logger.exception("Fetching members of cohort %s for exam %s failed", payload.cohort_id, exam_id)
         raise HTTPException(status_code=502, detail="Could not fetch cohort members from auth service.")
 
     if not student_ids:

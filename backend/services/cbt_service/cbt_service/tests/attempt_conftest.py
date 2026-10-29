@@ -122,6 +122,8 @@ def start_attempt(client, headers, exam_id=None, assignment_id=None):
 
 def save_response(client, headers, attempt_id, item_id=None, answer=None):
     iid = str(item_id or uuid4())
+    from .helpers import ensure_on_exam
+    ensure_on_exam(attempt_id, iid)
     response = client.post(
         f"/api/v1/attempts/{attempt_id}/responses",
         json={

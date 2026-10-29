@@ -80,9 +80,9 @@ class AuthClient:
 
 
     def __init__(self, redis_client, base_url: str | None = None):
-        self.base_url = (
-            base_url or settings.AUTH_SERVICE_URL
-        ).rstrip("/")
+        # Calls below add /api/v1 themselves, so accept the URL with or without it.
+        url: str = (base_url or settings.AUTH_SERVICE_URL).rstrip("/")
+        self.base_url = url[: -len("/api/v1")] if url.endswith("/api/v1") else url
         self.redis = redis_client
 
     @staticmethod
@@ -374,15 +374,11 @@ class AuthClient:
             # )
 
     async def get_cohort_student_ids(self, cohort_id: UUID, org_id: UUID) -> list[UUID]:
-        cache_key: str = self.cohort_cache_key(org_id, cohort_id)
-
-        cached = await self._cache_get(cache_key)
-        if cached:
-            try:
-                return [UUID(i) for i in json.loads(cached)]
-            except (ValueError, TypeError):
-                pass
-
+        """
+        Active student IDs in a cohort, for assigning an exam to it. Not cached:
+        it's an occasional admin action, and a cached list would miss students
+        just added or removed, and a cohort just graduated.
+        """
         try:
             response: httpx.Response = await get_http_client().get(
                 f"{self.base_url}/api/v1/internal/cohorts/{cohort_id}/student_ids",
@@ -406,7 +402,6 @@ class AuthClient:
             raise HTTPException(status_code=502, detail="Unexpected response from auth service.")
 
         ids: list[str] = response.json()
-        await self._cache_set(cache_key, json.dumps(ids), 120)
         return [UUID(i) for i in ids]
 
     

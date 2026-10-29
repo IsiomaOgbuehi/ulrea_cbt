@@ -67,6 +67,41 @@ class ResponseModel(SQLModel, table=True):
     marks_awarded: float | None = None
     reviewed_by: UUID | None = None                             # for manual review
     review_notes: str | None = None
+    reviewed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     answered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), nullable=False),)
+
+
+class LateResponseModel(SQLModel, table=True):
+    """
+    An answer that reached the server after the attempt's time ran out
+    (typically held up by a bad connection). It never changes the score by
+    itself: staff see when it arrived and decide whether to accept it.
+    """
+    __tablename__ = "late_responses"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    attempt_id: UUID = Field(foreign_key="attempts.id", index=True, nullable=False)
+    org_id: UUID = Field(index=True, nullable=False)
+    item_id: UUID = Field(nullable=False)
+    exam_item_id: UUID = Field(nullable=False)
+    answer: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    received_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    seconds_late: float = Field(default=0.0)
+    # The attempt's last on-time save: a steady stream of saves until the
+    # deadline, then silence, points to a dropped connection.
+    last_on_time_save_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    status: str = Field(default="pending", index=True)     # pending | accepted | rejected
+    decided_by: UUID | None = None
+    decided_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )

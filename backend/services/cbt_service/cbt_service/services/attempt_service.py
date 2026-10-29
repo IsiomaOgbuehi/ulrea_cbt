@@ -17,12 +17,14 @@ from fastapi.responses import StreamingResponse
 
 
 from cbt_service.database.models.violation import ExamViolation
-from cbt_service.database.models.enums.exam_enum import ExamStatus
+from cbt_service.database.models.enums.exam_enum import AssignmentStatus, ExamAction, ExamStatus
 from cbt_service.schemas.item_subject_schemas import ItemForDisplayRead, ItemForScoringRead
 from cbt_service.services.item.item_service import ItemService
-from cbt_service.database.models.exam import ExamAssignment, ExamModel
+from cbt_service.database.models.exam import ExamAssignment, ExamItem, ExamModel
+from cbt_service.database.models.item import ItemModel
+from cbt_service.services.marking.scoring import pass_threshold, score_answer, verdict
 from cbt_service.services.exam_service import ExamService, _log
-from cbt_service.database.models.attempt import AttemptModel, ResponseModel
+from cbt_service.database.models.attempt import AttemptModel, LateResponseModel, ResponseModel
 
 from cbt_service.schemas.attempt_schemas import (
     AttemptDetailRead,
@@ -37,7 +39,11 @@ from cbt_service.schemas.attempt_schemas import (
     ManualReviewRequest,
     AttemptRead,
     AttemptStatusRead,
+    AttemptReviewRead,
+    AttemptOptionRead,
+    LateAnswerRead,
     ResponseRead,
+    ReviewItem,
     CurrentUser,
 )
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
@@ -54,7 +60,33 @@ class ExamExportData:
 # SERVICE
 # ============================================================
 
+# Question types whose options keep their order (shuffling True/False reads oddly).
+FIXED_OPTION_TYPES: frozenset[str] = frozenset({"true_false"})
+# Time is strict: an attempt closes at its deadline and nothing saved after it
+# changes the score. Answers held up by a bad connection that arrive within
+# LATE_WINDOW are kept as late answers for staff to accept or reject, with
+# evidence (how late, when the last on-time save was).
+LATE_WINDOW: timedelta = timedelta(minutes=10)
+# The browser's auto-submit at 0:00 can land a moment before the server's
+# deadline; such an attempt still counts as closed by time.
+CLOCK_SLACK: timedelta = timedelta(seconds=10)
+
+CLOSED_ATTEMPT_STATUSES: tuple[AttemptStatus, ...] = (
+    AttemptStatus.SUBMITTED, AttemptStatus.SCORED, AttemptStatus.TERMINATED,
+)
+
+
 class AttemptService:
+
+    @staticmethod
+    def _set_assignment_status(session: Session, attempt: AttemptModel, status: AssignmentStatus) -> None:
+        """Keep the assignment's status in step with the attempt (counts and lists use it)."""
+        assignment: ExamAssignment | None = (
+            session.get(ExamAssignment, attempt.assignment_id) if attempt.assignment_id else None
+        )
+        if assignment is not None and assignment.status != status:
+            assignment.status = status
+            session.add(assignment)
 
     @staticmethod
     def _aware(dt: datetime) -> datetime:
@@ -122,6 +154,7 @@ class AttemptService:
             attempt_to_resume.scored_at = None
             attempt_to_resume.scored_by = None
             session.add(attempt_to_resume)
+            AttemptService._set_assignment_status(session, attempt_to_resume, AssignmentStatus.STARTED)
             session.commit()
             session.refresh(attempt_to_resume)
             return attempt_to_resume
@@ -142,6 +175,7 @@ class AttemptService:
             attempt_number=len(existing) + 1,
         )
         session.add(attempt)
+        AttemptService._set_assignment_status(session, attempt, AssignmentStatus.STARTED)
         session.commit()
         session.refresh(attempt)
         return attempt
@@ -188,19 +222,54 @@ class AttemptService:
     #     return response
 
     @staticmethod
+    def _deadline(attempt: AttemptModel, exam: ExamModel) -> datetime:
+        return AttemptService._aware(attempt.started_at) + timedelta(minutes=exam.duration_minutes)
+
+    @staticmethod
     def save_response(
         session: Session,
         attempt_id: UUID,
         payload: SaveResponseRequest,
         student_id: UUID,
-    ) -> ResponseModel:
-        attempt = AttemptService.get_attempt(session, attempt_id, student_id)  # expiry-checked
+    ) -> ResponseModel | LateResponseModel:
+        """
+        Save an answer while the attempt is open. After time runs out, an
+        answer that arrives within LATE_WINDOW (held up by the connection) is
+        kept as a late answer for staff to decide on; it doesn't change the score.
+        """
+        attempt = session.get(AttemptModel, attempt_id)
+        if attempt is None or attempt.student_id != student_id:
+            raise HTTPException(status_code=404, detail="Attempt not found.")
+        exam = session.get(ExamModel, attempt.exam_id)
+        if exam is None:
+            raise HTTPException(status_code=404, detail="Exam not found.")
+
+        # The question must be on this exam; its exam entry comes from here,
+        # not from the client.
+        exam_item: ExamItem | None = session.exec(
+            select(ExamItem).where(ExamItem.exam_id == attempt.exam_id, ExamItem.item_id == payload.item_id)
+        ).first()
+
+        now = datetime.now(timezone.utc)
+        deadline = AttemptService._deadline(attempt, exam)
+        if attempt.status == AttemptStatus.STARTED and now >= deadline:
+            attempt = AttemptService._finalize_submission(session, attempt, exam, auto=True)
 
         if attempt.status != AttemptStatus.STARTED:
+            closed_by_time: bool = (
+                attempt.status in (AttemptStatus.SUBMITTED, AttemptStatus.SCORED)
+                and attempt.submitted_at is not None
+                and AttemptService._aware(attempt.submitted_at) >= deadline - CLOCK_SLACK
+            )
+            if exam_item is not None and closed_by_time and now <= deadline + LATE_WINDOW:
+                return AttemptService._keep_late_answer(session, attempt, exam_item, payload, now, deadline)
             raise HTTPException(
-            status_code=409,
-            detail={"code": "ATTEMPT_CLOSED", "status": attempt.status.value},
-        )
+                status_code=409,
+                detail={"code": "ATTEMPT_CLOSED", "status": attempt.status.value},
+            )
+
+        if exam_item is None:
+            raise HTTPException(status_code=422, detail="This question isn't part of the exam.")
 
         existing = session.exec(
             select(ResponseModel).where(
@@ -213,7 +282,7 @@ class AttemptService:
             existing.answer = payload.answer
             existing.time_spent_seconds = payload.time_spent_seconds
             existing.is_flagged = payload.is_flagged
-            existing.updated_at = datetime.now(timezone.utc)
+            existing.updated_at = now
             session.add(existing)
             session.commit()
             session.refresh(existing)
@@ -222,7 +291,7 @@ class AttemptService:
         response = ResponseModel(
             attempt_id=attempt_id,
             item_id=payload.item_id,
-            exam_item_id=payload.exam_item_id,
+            exam_item_id=exam_item.id,
             org_id=attempt.org_id,
             answer=payload.answer,
             time_spent_seconds=payload.time_spent_seconds,
@@ -232,7 +301,139 @@ class AttemptService:
         session.commit()
         session.refresh(response)
         return response
-    
+
+    @staticmethod
+    def _keep_late_answer(
+        session: Session, attempt: AttemptModel, exam_item: ExamItem,
+        payload: SaveResponseRequest, now: datetime, deadline: datetime,
+    ) -> LateResponseModel:
+        """One late answer per question: a newer one replaces an undecided older one."""
+        last_on_time: datetime | None = session.exec(
+            select(func.max(ResponseModel.updated_at)).where(
+                ResponseModel.attempt_id == attempt.id, col(ResponseModel.updated_at) <= deadline,
+            )
+        ).one()
+        late = session.exec(
+            select(LateResponseModel).where(
+                LateResponseModel.attempt_id == attempt.id,
+                LateResponseModel.item_id == exam_item.item_id,
+                LateResponseModel.status == "pending",
+            )
+        ).first() or LateResponseModel(
+            attempt_id=attempt.id, org_id=attempt.org_id,
+            item_id=exam_item.item_id, exam_item_id=exam_item.id,
+        )
+        late.answer = payload.answer
+        late.received_at = now
+        late.seconds_late = round((now - deadline).total_seconds(), 1)
+        late.last_on_time_save_at = last_on_time
+        session.add(late)
+        session.commit()
+        session.refresh(late)
+        return late
+
+    @staticmethod
+    def late_pending_counts(session: Session, attempt_ids: list[UUID]) -> dict[UUID, int]:
+        """Per attempt: late answers waiting for a decision."""
+        if not attempt_ids:
+            return {}
+        rows = session.exec(
+            select(LateResponseModel.attempt_id, func.count())
+            .where(col(LateResponseModel.attempt_id).in_(attempt_ids), LateResponseModel.status == "pending")
+            .group_by(LateResponseModel.attempt_id)
+        ).all()
+        return {attempt_id: int(n) for attempt_id, n in rows}
+
+    @staticmethod
+    def late_answers_for(
+        session: Session, attempt: AttemptModel, items: dict[UUID, ItemModel], responses: list[ResponseModel],
+    ) -> list[LateAnswerRead]:
+        lates = session.exec(
+            select(LateResponseModel).where(LateResponseModel.attempt_id == attempt.id)
+            .order_by(col(LateResponseModel.received_at))
+        ).all()
+        if not lates:
+            return []
+        missing = [l.item_id for l in lates if l.item_id not in items]
+        if missing:
+            items = {**items, **{i.id: i for i in session.exec(select(ItemModel).where(col(ItemModel.id).in_(missing))).all()}}
+        saved: dict[UUID, ResponseModel] = {r.item_id: r for r in responses}
+        out: list[LateAnswerRead] = []
+        for l in lates:
+            item = items.get(l.item_id)
+            current = saved.get(l.item_id)
+            out.append(LateAnswerRead(
+                id=l.id, item_id=l.item_id, exam_item_id=l.exam_item_id,
+                question_text=item.question_text if item else "[question no longer available]",
+                item_type=str(getattr(item.item_type, "value", item.item_type)) if item else None,
+                answer=l.answer, current_answer=current.answer if current else None,
+                received_at=l.received_at, seconds_late=l.seconds_late,
+                last_on_time_save_at=l.last_on_time_save_at, status=l.status, decided_at=l.decided_at,
+            ))
+        return out
+
+    @staticmethod
+    def decide_late_answer(
+        session: Session, late_id: UUID, accept: bool, current_user: CurrentUser,
+    ) -> AttemptDetailRead:
+        """
+        Accept: the late answer replaces the saved one and is marked like any
+        other (auto-marked, or sent to the marking queue); the attempt is re-scored.
+        Reject: kept on record, the score is unchanged.
+        """
+        late = session.get(LateResponseModel, late_id)
+        if late is None or late.org_id != current_user.org_id:
+            raise HTTPException(status_code=404, detail="Late answer not found.")
+        attempt = session.get(AttemptModel, late.attempt_id)
+        exam = session.get(ExamModel, attempt.exam_id) if attempt else None
+        if attempt is None or exam is None:
+            raise HTTPException(status_code=404, detail="Attempt not found.")
+        ExamService._assert_can_view(session, exam, current_user, P.RESULTS_MARK)
+        if late.status != "pending":
+            raise HTTPException(status_code=409, detail=f"This late answer was already {late.status}.")
+
+        if accept:
+            exam_item = session.exec(
+                select(ExamItem).where(ExamItem.exam_id == exam.id, ExamItem.item_id == late.item_id)
+            ).first()
+            if exam_item is None:
+                raise HTTPException(status_code=409, detail="This question is no longer on the exam.")
+            item_data = AttemptService._get_items_for_scoring(session, [late.item_id]).get(late.item_id)
+            response = session.exec(
+                select(ResponseModel).where(
+                    ResponseModel.attempt_id == attempt.id, ResponseModel.item_id == late.item_id,
+                )
+            ).first() or ResponseModel(
+                attempt_id=attempt.id, item_id=late.item_id, exam_item_id=exam_item.id, org_id=attempt.org_id,
+            )
+            response.answer = late.answer
+            response.updated_at = datetime.now(timezone.utc)
+            response.reviewed_by = None
+            response.reviewed_at = None
+            if item_data:
+                score = score_answer(
+                    str(getattr(item_data.get("item_type"), "value", item_data.get("item_type"))),
+                    item_data.get("correct_answers"), late.answer, exam_item.marks, exam_item.negative_marks,
+                    auto_mark_short_answers=bool(exam.auto_mark_short_answers),
+                )
+                response.is_correct = score.is_correct
+                response.marks_awarded = score.marks_awarded
+            session.add(response)
+            session.flush()
+            responses = list(session.exec(select(ResponseModel).where(ResponseModel.attempt_id == attempt.id)).all())
+            AttemptService.recompute_score(session, attempt, exam, responses)
+            session.add(attempt)
+
+        late.status = "accepted" if accept else "rejected"
+        late.decided_by = current_user.id
+        late.decided_at = datetime.now(timezone.utc)
+        session.add(late)
+        _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED, {
+            "field": "late_answer", "attempt_id": str(attempt.id), "item_id": str(late.item_id),
+            "decision": late.status, "seconds_late": late.seconds_late,
+        })
+        session.commit()
+        return AttemptService.get_attempt_detail_for_staff(session, attempt.id, current_user)
 
     @staticmethod
     def submit(
@@ -282,26 +483,37 @@ class AttemptService:
             exam_for_check: ExamModel = ExamService._get_exam(session, owner.exam_id, current_user.org_id)
             ExamService._assert_can_view(session, exam_for_check, current_user, P.RESULTS_MARK)
 
-        resp.marks_awarded = payload.marks_awarded
-        resp.is_correct = payload.marks_awarded > 0
-        resp.reviewed_by = reviewer_id
-        resp.review_notes = payload.review_notes
-        session.add(resp)
-
-        # Recalculate attempt score
         attempt = session.exec(
             select(AttemptModel).where(AttemptModel.id == resp.attempt_id)
         ).first()
+        if attempt is None:
+            raise HTTPException(status_code=404, detail="Response not found.")
+        if attempt.status in (AttemptStatus.STARTED, AttemptStatus.RESET):
+            raise HTTPException(status_code=409, detail="This attempt hasn't been submitted yet.")
+        exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+        if exam is None:
+            raise HTTPException(status_code=404, detail="Exam not found.")
 
-        if attempt:
-            all_responses = session.exec(
-                select(ResponseModel).where(ResponseModel.attempt_id == attempt.id)
-            ).all()
-            attempt.final_score = max(0.0, sum(
-                (r.marks_awarded or 0.0) for r in all_responses
-            ))
-            attempt.scored_by = str(reviewer_id)
-            session.add(attempt)
+        exam_item = AttemptService._exam_items(session, exam.id).get(resp.item_id)
+        if exam_item is None:
+            raise HTTPException(status_code=422, detail="This answer isn't for a question on the exam.")
+        max_marks: float = exam_item.marks
+        if payload.marks_awarded < 0 or payload.marks_awarded > max_marks:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Marks must be between 0 and {max_marks:g} for this question.",
+            )
+
+        resp.marks_awarded = payload.marks_awarded
+        resp.is_correct = verdict(payload.marks_awarded, max_marks)
+        resp.reviewed_by = reviewer_id
+        resp.review_notes = (payload.review_notes or "").strip() or None
+        resp.reviewed_at = datetime.now(timezone.utc)
+        session.add(resp)
+        session.flush()
+
+        attempt.scored_by = str(reviewer_id)
+        AttemptService.recompute_score(session, attempt, exam)
 
         session.commit()
         session.refresh(resp)
@@ -379,6 +591,82 @@ class AttemptService:
 
 
     @staticmethod
+    def responses_for_student(session: Session, attempt_id: UUID, user_id: UUID) -> list[ResponseRead]:
+        """The candidate's saved answers; marks left out unless the exam shows results."""
+        attempt = AttemptService.get_attempt(session, attempt_id, user_id)
+        exam = session.get(ExamModel, attempt.exam_id)
+        hide: bool = exam is not None and not exam.show_result_immediately
+        out: list[ResponseRead] = []
+        for r in session.exec(select(ResponseModel).where(ResponseModel.attempt_id == attempt_id)).all():
+            read = ResponseRead.model_validate(r, from_attributes=True)
+            if hide:
+                read.is_correct = read.marks_awarded = read.review_notes = None
+            out.append(read)
+        return out
+
+    @staticmethod
+    def review_for_student(session: Session, attempt_id: UUID, user_id: UUID) -> AttemptReviewRead:
+        """
+        A candidate's own look back at a finished attempt: only when the exam
+        allows review. Marks, correct answers and comments only when it also
+        shows results. Marking guides are never included.
+        """
+        attempt = AttemptService.get_attempt(session, attempt_id, user_id)
+        if attempt.status not in CLOSED_ATTEMPT_STATUSES:
+            raise HTTPException(status_code=409, detail="You can review this exam once it's submitted.")
+        exam = session.get(ExamModel, attempt.exam_id)
+        if exam is None:
+            raise HTTPException(status_code=404, detail="Exam not found.")
+        if not exam.allow_review:
+            raise HTTPException(status_code=403, detail="Reviewing answers isn't allowed for this exam.")
+        show: bool = bool(exam.show_result_immediately)
+
+        sections = ExamService.get_sections_with_items_internal(session, exam.id)
+        exam_items = [ei for section in sections for ei in section.items]
+        items: dict[UUID, ItemModel] = {
+            i.id: i for i in session.exec(
+                select(ItemModel).where(col(ItemModel.id).in_([ei.item_id for ei in exam_items]))
+            ).all()
+        } if exam_items else {}
+        responses: dict[UUID, ResponseModel] = {
+            r.item_id: r for r in session.exec(
+                select(ResponseModel).where(ResponseModel.attempt_id == attempt.id)
+            ).all()
+        }
+        out: list[ReviewItem] = []
+        for ei in exam_items:
+            item = items.get(ei.item_id)
+            if item is None:
+                continue
+            item_type: str = str(getattr(item.item_type, "value", item.item_type))
+            r = responses.get(ei.item_id)
+            written: bool = item_type in ("short_answer", "essay")
+            options = [
+                AttemptOptionRead(key=str(o.get("key")), text=str(o.get("text", "")))
+                for o in (item.options or []) if isinstance(o, dict)
+            ] or None
+            out.append(ReviewItem(
+                item_id=item.id, question_text=item.question_text, item_type=item_type,
+                options=options, answer=r.answer if r is not None else None, marks=ei.marks,
+                marks_awarded=r.marks_awarded if show and r is not None else None,
+                is_correct=r.is_correct if show and r is not None else None,
+                correct_answers=(
+                    item.correct_answers if show and item_type != "essay" and item.correct_answers else None
+                ),
+                review_notes=r.review_notes if show and r is not None else None,
+                awaiting_marking=bool(written and r is not None and r.marks_awarded is None),
+            ))
+        return AttemptReviewRead(
+            attempt_id=attempt.id, exam_id=exam.id, exam_title=exam.title, show_result=show,
+            total_marks=exam.total_marks,
+            final_score=attempt.final_score if show else None,
+            percentage=attempt.percentage if show else None,
+            passed=attempt.passed if show else None,
+            awaiting_marking=AttemptService.awaiting_marking(session, [attempt.id]).get(attempt.id, 0),
+            items=out,
+        )
+
+    @staticmethod
     def get_exam_content(session: Session, attempt_id: UUID, student_id: UUID) -> AttemptExamRead:
         attempt = AttemptService.get_attempt(session, attempt_id, student_id)
 
@@ -420,10 +708,13 @@ class AttemptService:
                     item_type=content["item_type"],
                     options=content.get("options"),
                     marks=exam_item.marks,
+                    word_limit=content.get("word_limit"),
                 ))
 
             if exam.shuffle_options:
                 items = AttemptService._shuffle_options(items, attempt_id)
+            if exam.shuffle_questions:
+                items = AttemptService._shuffle_items(items, attempt_id, section.id)
 
             sections.append(AttemptSectionRead(
                 id=section.id,
@@ -500,10 +791,18 @@ class AttemptService:
         return shuffled
 
     @staticmethod
+    def _shuffle_items(items: list[AttemptItemRead], attempt_id: UUID, section_id: UUID) -> list[AttemptItemRead]:
+        """Questions within a section, in a stable order per attempt (refreshes keep it)."""
+        rng = random.Random(f"{attempt_id}:{section_id}")
+        shuffled = items.copy()
+        rng.shuffle(shuffled)
+        return shuffled
+
+    @staticmethod
     def _shuffle_options(items: list[AttemptItemRead], attempt_id: UUID) -> list[AttemptItemRead]:
         rng = random.Random(str(attempt_id))
         for item in items:
-            if item.options:
+            if item.options and item.item_type not in FIXED_OPTION_TYPES:
                 rng.shuffle(item.options)
         return items
 
@@ -544,9 +843,10 @@ class AttemptService:
     def get_cohort_attempts(
         session: Session,
         exam_id: UUID,
-        cohort_id: UUID,
+        cohort_id: UUID | None,
         current_user: CurrentUser,
     ) -> list[CohortAttemptSummary]:
+        """Attempts by students assigned through a cohort, or (cohort_id None) assigned one by one."""
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.RESULTS_VIEW)
 
@@ -557,16 +857,21 @@ class AttemptService:
                 .where(
                     AttemptModel.exam_id == exam_id,
                     AttemptModel.org_id == current_user.org_id,
-                    ExamAssignment.cohort_id == cohort_id,
+                    ExamAssignment.cohort_id == cohort_id if cohort_id is not None
+                    else col(ExamAssignment.cohort_id).is_(None),
                 )
             ).all()
         )
 
+        waiting: dict[UUID, int] = AttemptService.awaiting_marking(session, [a.id for a in attempts])
+        late: dict[UUID, int] = AttemptService.late_pending_counts(session, [a.id for a in attempts])
         summaries: list[CohortAttemptSummary] = [
             CohortAttemptSummary(
                 id=a.id, student_id=a.student_id, status=a.status,
                 submitted_at=a.submitted_at, final_score=a.final_score,
                 percentage=a.percentage, passed=a.passed,
+                awaiting_marking=waiting.get(a.id, 0),
+                late_answers=late.get(a.id, 0),
             )
             for a in attempts
         ]
@@ -611,31 +916,42 @@ class AttemptService:
             select(ResponseModel).where(ResponseModel.attempt_id == attempt_id)
         ).all()
 
-        item_ids = [r.item_id for r in responses]
-        # item_bank_client = ItemBankClient()
-        # item_bank = await item_bank_client.get_items_for_scoring(item_ids)  # teacher view — answer keys OK here
+        items: dict[UUID, ItemModel] = {
+            i.id: i for i in session.exec(
+                select(ItemModel).where(col(ItemModel.id).in_({r.item_id for r in responses}))
+            ).all()
+        } if responses else {}
+        exam_items = AttemptService._exam_items(session, attempt.exam_id)
+        order: dict[UUID, int] = {ei.item_id: ei.order for ei in exam_items.values()}
 
-        # items = ItemService.get_by_ids_for_scoring(session, item_ids)
-        item_bank = AttemptService._get_items_for_scoring(session, item_ids)
-
-        response_details = [
-            AttemptResponseDetail(
+        response_details = []
+        for r in sorted(responses, key=lambda r: order.get(r.item_id, 10**6)):
+            item = items.get(r.item_id)
+            exam_item = exam_items.get(r.item_id)
+            response_details.append(AttemptResponseDetail(
                 item_id=r.item_id,
-                question_text=item_bank.get(r.item_id, {}).get("question_text", "[item unavailable]"),
+                response_id=r.id,
+                exam_item_id=exam_item.id if exam_item else r.exam_item_id,
+                item_type=getattr(item.item_type, "value", None) if item else None,
+                question_text=item.question_text if item else "[question no longer available]",
                 answer=r.answer,
-                correct_answers=item_bank.get(r.item_id, {}).get("correct_answers"),
+                correct_answers=item.correct_answers if item else None,
                 is_correct=r.is_correct,
                 marks_awarded=r.marks_awarded,
-            )
-            for r in responses
-        ]
+                max_marks=exam_item.marks if exam_item else (item.marks if item else None),
+                marking_guide=item.marking_guide if item else None,
+                review_notes=r.review_notes,
+                reviewed_at=r.reviewed_at,
+            ))
 
         return AttemptDetailRead(
             id=attempt.id, student_id=attempt.student_id, exam_id=attempt.exam_id,
             status=attempt.status, started_at=attempt.started_at, submitted_at=attempt.submitted_at,
             raw_score=attempt.raw_score, final_score=attempt.final_score,
             percentage=attempt.percentage, passed=attempt.passed,
+            awaiting_marking=sum(1 for r in responses if r.marks_awarded is None),
             responses=response_details,
+            late_answers=AttemptService.late_answers_for(session, attempt, items, list(responses)),
         )
 
 
@@ -660,9 +976,12 @@ class AttemptService:
         if not attempt:
             raise HTTPException(status_code=404, detail="Attempt not found.")
 
-        # 1. Wipe responses so the student gets a clean slate.
+        # 1. Wipe responses (and any late answers) so the student gets a clean slate.
         session.exec(
             delete(ResponseModel).where(ResponseModel.attempt_id == attempt_id)
+        )
+        session.exec(
+            delete(LateResponseModel).where(LateResponseModel.attempt_id == attempt_id)
         )
 
         # 2. Soft-clear violations: keep the rows as evidence, but stop them
@@ -693,6 +1012,7 @@ class AttemptService:
         attempt.scored_at = None
         attempt.scored_by = None
         session.add(attempt)
+        AttemptService._set_assignment_status(session, attempt, AssignmentStatus.ASSIGNED)
 
         # 4. Optionally reschedule the assignment.
         if payload.new_scheduled_at:
@@ -787,6 +1107,66 @@ class AttemptService:
 
 
     @staticmethod
+    def awaiting_marking(session: Session, attempt_ids: list[UUID]) -> dict[UUID, int]:
+        """Per attempt: answers still waiting for a person to mark them."""
+        if not attempt_ids:
+            return {}
+        rows = session.exec(
+            select(ResponseModel.attempt_id, func.count())
+            .where(col(ResponseModel.attempt_id).in_(attempt_ids), col(ResponseModel.marks_awarded).is_(None))
+            .group_by(ResponseModel.attempt_id)
+        ).all()
+        return {attempt_id: int(n) for attempt_id, n in rows}
+
+    @staticmethod
+    def attempt_of(session: Session, response: ResponseModel) -> AttemptModel | None:
+        return session.get(AttemptModel, response.attempt_id)
+
+    @staticmethod
+    def _exam_items(session: Session, exam_id: UUID) -> dict[UUID, ExamItem]:
+        """The exam's questions keyed by ITEM id (one entry per question per exam)."""
+        return {
+            ei.item_id: ei for ei in session.exec(select(ExamItem).where(ExamItem.exam_id == exam_id)).all()
+        }
+
+    @staticmethod
+    def recompute_score(
+        session: Session,
+        attempt: AttemptModel,
+        exam: ExamModel,
+        responses: list[ResponseModel] | None = None,
+        pass_mark: float | None = None,
+    ) -> int:
+        """
+        Totals, percentage and pass/fail from the answers' marks. Out of the
+        whole exam (questions left unanswered count as 0), not just the ones
+        answered. Returns how many answers still wait for a person to mark;
+        pass/fail is only decided once that's 0. Doesn't commit.
+        """
+        if responses is None:
+            responses = list(session.exec(
+                select(ResponseModel).where(ResponseModel.attempt_id == attempt.id)
+            ).all())
+        total_possible: float = sum(ei.marks for ei in AttemptService._exam_items(session, exam.id).values())
+        if total_possible <= 0:
+            total_possible = exam.total_marks or 0.0
+
+        on_exam = AttemptService._exam_items(session, exam.id)
+        responses = [r for r in responses if r.item_id in on_exam]
+        awarded: list[float] = [r.marks_awarded for r in responses if r.marks_awarded is not None]
+        pending: int = sum(1 for r in responses if r.marks_awarded is None)
+
+        attempt.raw_score = sum(m for m in awarded if m > 0)
+        attempt.final_score = max(0.0, sum(awarded))
+        attempt.percentage = round(attempt.final_score / total_possible * 100, 2) if total_possible else 0.0
+        attempt.scored_at = datetime.now(timezone.utc)
+
+        threshold = pass_threshold(pass_mark if pass_mark is not None else exam.pass_mark)
+        attempt.passed = None if pending or threshold is None else attempt.percentage >= threshold - 1e-9
+        session.add(attempt)
+        return pending
+
+    @staticmethod
     def _finalize_submission(
         session: Session,
         attempt: AttemptModel,
@@ -806,60 +1186,43 @@ class AttemptService:
 
         item_ids = [r.item_id for r in responses]
         item_bank = AttemptService._get_items_for_scoring(session, item_ids)
-
-        raw_score = 0.0
-        final_score = 0.0
-        total_possible = sum(v.get("marks", 1.0) for v in item_bank.values())
+        exam_items = AttemptService._exam_items(session, exam.id)
 
         for resp in responses:
             item_data = item_bank.get(resp.item_id)
-            if not item_data:
-                continue
-
-            item_type = item_data.get("item_type")
-            correct = item_data.get("correct_answers", [])
-            marks = item_data.get("marks", 1.0)
-            neg = item_data.get("negative_marks", 0.0)
-
-            if item_type in ("mcq_single", "mcq_multi", "true_false", "numeric"):
-                student_answer = sorted(a.strip().lower() for a in (resp.answer or []))
-                correct_answer = sorted(a.strip().lower() for a in (correct or []))
-
-                if student_answer == correct_answer:
-                    resp.is_correct = True
-                    resp.marks_awarded = marks
-                    raw_score += marks
-                    final_score += marks
-                elif resp.answer:
-                    resp.is_correct = False
-                    resp.marks_awarded = -neg
-                    final_score -= neg
-                else:
-                    resp.is_correct = False
-                    resp.marks_awarded = 0.0
-            else:
+            exam_item = exam_items.get(resp.item_id)
+            if not item_data or exam_item is None:
+                # Not a question on this exam: never scored.
                 resp.is_correct = None
-                resp.marks_awarded = None
-
+                resp.marks_awarded = 0.0
+                session.add(resp)
+                continue
+            # The exam's snapshot of the marks, so editing a question later
+            # doesn't change an exam that has already run.
+            marks: float = exam_item.marks if exam_item else item_data.get("marks", 1.0)
+            neg: float = exam_item.negative_marks if exam_item else item_data.get("negative_marks", 0.0)
+            score = score_answer(
+                str(getattr(item_data.get("item_type"), "value", item_data.get("item_type"))),
+                item_data.get("correct_answers"), resp.answer, marks, neg,
+                auto_mark_short_answers=bool(exam.auto_mark_short_answers),
+            )
+            resp.is_correct = score.is_correct
+            resp.marks_awarded = score.marks_awarded
             session.add(resp)
 
         attempt.status = final_status
-        attempt.submitted_at = datetime.now(timezone.utc)
-        attempt.raw_score = raw_score
-        attempt.final_score = max(0.0, final_score)
-        attempt.percentage = round((attempt.final_score / total_possible * 100), 2) if total_possible else 0.0
-        attempt.scored_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        # Closed because time ran out (possibly noticed later): record the deadline itself.
+        attempt.submitted_at = min(now, AttemptService._deadline(attempt, exam)) if auto else now
         attempt.scored_by = (
             "violation_termination" if final_status == AttemptStatus.TERMINATED
             else "auto_expired" if auto
             else "auto"
         )
-
-        effective_pass_mark = pass_mark if pass_mark is not None else exam.pass_mark
-        if effective_pass_mark is not None:
-            attempt.passed = attempt.final_score >= effective_pass_mark
+        AttemptService.recompute_score(session, attempt, exam, list(responses), pass_mark=pass_mark)
 
         session.add(attempt)
+        AttemptService._set_assignment_status(session, attempt, AssignmentStatus.SUBMITTED)
         session.commit()
         session.refresh(attempt)
         return attempt
@@ -901,8 +1264,14 @@ class AttemptService:
 
 
     @staticmethod
-    def _to_attempt_read(session: Session, attempt: AttemptModel) -> AttemptRead:
+    def _to_attempt_read(session: Session, attempt: AttemptModel, for_student: bool = False) -> AttemptRead:
+        """
+        for_student: the candidate's own view. If the exam doesn't show results,
+        scores and pass/fail are left out.
+        """
         exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
+        show_result: bool = bool(exam.show_result_immediately) if exam else True
+        hide: bool = for_student and not show_result
         now = datetime.now(timezone.utc)
 
         started_at = attempt.started_at if attempt.started_at.tzinfo else attempt.started_at.replace(tzinfo=timezone.utc)
@@ -918,9 +1287,16 @@ class AttemptService:
             id=attempt.id, exam_id=attempt.exam_id, assignment_id=attempt.assignment_id, student_id=attempt.student_id,
             status=attempt.status, attempt_number=attempt.attempt_number,
             started_at=attempt.started_at, submitted_at=attempt.submitted_at,
-            raw_score=attempt.raw_score, final_score=attempt.final_score,
-            percentage=attempt.percentage, passed=attempt.passed,
+            raw_score=None if hide else attempt.raw_score,
+            final_score=None if hide else attempt.final_score,
+            percentage=None if hide else attempt.percentage,
+            passed=None if hide else attempt.passed,
             expires_at=expires_at, remaining_seconds=remaining, server_time=now,
+            show_result=show_result, allow_review=bool(exam.allow_review) if exam else False,
+            awaiting_marking=(
+                0 if attempt.status == AttemptStatus.STARTED
+                else AttemptService.awaiting_marking(session, [attempt.id]).get(attempt.id, 0)
+            ),
         )
 
     @staticmethod

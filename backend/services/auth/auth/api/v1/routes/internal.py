@@ -21,6 +21,7 @@ class UserSummaryResponse(BaseModel):
     lastname: str
     email: str | None
     role: UserRole | None
+    institution_id: str | None = None   # the org's own number for the person (e.g. student number)
 
 
 class BulkUserRequest(BaseModel):
@@ -94,6 +95,7 @@ def get_users_bulk_internal(
             lastname=user.lastname,
             email=user.email,
             role=membership.role if membership else None,
+            institution_id=membership.institution_id if membership else None,
         )
         for user, membership in results
     ]

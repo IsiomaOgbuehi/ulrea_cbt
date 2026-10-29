@@ -4,9 +4,14 @@ from enum import Enum
 class ItemType(str, Enum):
     MCQ_SINGLE = "mcq_single"       # one correct answer
     MCQ_MULTI = "mcq_multi"         # multiple correct answers
-    SHORT_ANSWER = "short_answer"   # free text, manual review
+    SHORT_ANSWER = "short_answer"   # one line; auto-marked against accepted answers, else marked by a person
     NUMERIC = "numeric"             # number answer, auto-marked
     TRUE_FALSE = "true_false"
+    ESSAY = "essay"                 # long rich-text answer; always marked by a person (marking guide)
+
+
+# Answers someone has to mark (unless a short answer matches an accepted answer).
+WRITTEN_TYPES: frozenset[ItemType] = frozenset({ItemType.SHORT_ANSWER, ItemType.ESSAY})
 
 
 class ItemStatus(str, Enum):

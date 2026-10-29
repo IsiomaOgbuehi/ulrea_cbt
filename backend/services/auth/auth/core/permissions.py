@@ -46,6 +46,8 @@ class P(str, Enum):
     EXAMS_DELETE = "exams.delete"
     EXAMS_OVERRIDE_STATUS = "exams.override_status"
     EXAMS_AUDIT_LOG = "exams.audit_log"
+    EXAMS_CHANGE_ATTEMPTS = "exams.change_attempts"
+    EXAMS_RELEASE_RESULTS = "exams.release_results"
     # Results & monitoring
     RESULTS_VIEW = "results.view"
     RESULTS_EXPORT = "results.export"
@@ -99,6 +101,8 @@ CATALOG: dict[P, PermissionInfo] = {
     P.EXAMS_DELETE: PermissionInfo("Exams", "Delete exams", "Delete exams.", implies=(P.EXAMS_VIEW,)),
     P.EXAMS_OVERRIDE_STATUS: PermissionInfo("Exams", "Override exam status", "Force an exam into any status, skipping the approval flow.", implies=(P.EXAMS_VIEW,)),
     P.EXAMS_AUDIT_LOG: PermissionInfo("Exams", "View exam activity", "See the activity log of an exam.", implies=(P.EXAMS_VIEW,)),
+    P.EXAMS_RELEASE_RESULTS: PermissionInfo("Exams", "Show or hide results", "Choose whether candidates see their results, after an exam is approved, live or closed.", scoped=True, implies=(P.EXAMS_VIEW,)),
+    P.EXAMS_CHANGE_ATTEMPTS: PermissionInfo("Exams", "Change attempts allowed", "Change how many attempts candidates get after an exam is approved or live.", scoped=True, implies=(P.EXAMS_VIEW,)),
 
     P.RESULTS_VIEW: PermissionInfo("Results", "View results", "See attempts, scores and answers.", scoped=True),
     P.RESULTS_EXPORT: PermissionInfo("Results", "Export results", "Download results to Excel.", scoped=True, implies=(P.RESULTS_VIEW,)),

@@ -22,7 +22,7 @@ from cbt_service.database.models.enums.exam_enum import (
     ExamStatus,
     AssignmentStatus,
 )
-from .helpers import report_violation, set_max_violations
+from .helpers import ensure_on_exam, report_violation, set_max_violations
 
 
 # The exam is created by the signed-in teacher, so they may mark its answers.
@@ -118,6 +118,7 @@ def save_response(
     answer=None,
 ):
     iid = str(item_id or uuid4())
+    ensure_on_exam(attempt_id, iid)
 
     response = client.post(
         f"/api/v1/attempts/{attempt_id}/responses",
@@ -290,6 +291,7 @@ def test_can_flag_response_for_review(
 
     item_id = uuid4()
     iid = str(item_id)
+    ensure_on_exam(attempt["id"], iid)
 
     response = client.post(
         f"/api/v1/attempts/{attempt['id']}/responses",
@@ -409,10 +411,18 @@ def test_teacher_can_manually_review_response(
         student_headers,
     )
 
+    # A 5-mark question on the exam (marks are capped at the question's marks).
+    from cbt_service.database.models.exam import ExamItem
+    question_id = uuid4()
+    with Session(engine) as session:
+        session.add(ExamItem(id=question_id, exam_id=EXAM_ID, item_id=question_id, org_id=ORG_ID, marks=5.0))
+        session.commit()
+
     resp = save_response(
         client,
         student_headers,
         attempt["id"],
+        item_id=question_id,
     )
 
     submit_response = client.post(
@@ -437,7 +447,7 @@ def test_teacher_can_manually_review_response(
     data = review_response.json()
 
     assert data["marks_awarded"] == 4.5
-    assert data["is_correct"] is True
+    assert data["is_correct"] is None          # partial credit (4.5 of 5)
 
 
 def test_student_cannot_manually_review(

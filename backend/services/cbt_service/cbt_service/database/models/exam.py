@@ -51,6 +51,11 @@ class ExamModel(SQLModel, table=True):
     shuffle_options: bool = Field(default=False)
     show_result_immediately: bool = Field(default=True)
     allow_review: bool = Field(default=True)                    # can student review answers
+    # Short answers matching an accepted answer get full marks automatically.
+    # Off (the default): every written answer is marked by a person.
+    auto_mark_short_answers: bool = Field(default=False)
+    # Candidates see "1 of 2 attempts used" on their exam list. Off by default.
+    show_attempts_used: bool = Field(default=False)
     max_attempts: int = Field(default=1)
     max_violations: int | None = None  # None = no limit enforced
 
