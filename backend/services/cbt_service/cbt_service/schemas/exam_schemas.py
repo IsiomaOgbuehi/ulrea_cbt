@@ -236,6 +236,35 @@ class AssignCohortRequest(BaseModel):
     scheduled_at: datetime | None = None
 
 
+class CohortAssignResult(BaseModel):
+    """What assigning a cohort did (POST .../assign_cohort?summary=true)."""
+    cohort_id: UUID
+    members: int            # active students in the cohort now
+    added: int              # newly assigned by this call
+    already_assigned: int   # skipped: already had this exam (from this or another cohort)
+
+
+class CohortNewMember(BaseModel):
+    id: UUID
+    name: str | None = None
+    student_number: str | None = None
+
+
+class CohortAssignPreview(BaseModel):
+    """Who assigning a cohort now would add (nothing is changed)."""
+    cohort_id: UUID
+    members: int                    # active students in the cohort now
+    already_assigned: int           # already have this exam
+    new_count: int                  # would be added
+    new_members: list[CohortNewMember]   # the first ones, by name (up to `limit`)
+
+
+class AssignedCohortRead(BaseModel):
+    """A cohort assigned to the exam and how many students it brought."""
+    cohort_id: UUID
+    students: int
+
+
 class UserSummary(BaseModel):
     id: UUID
     firstname: str

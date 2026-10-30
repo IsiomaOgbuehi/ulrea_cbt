@@ -17,7 +17,7 @@ from cbt_service.database.models.exam import (
 )
 from cbt_service.database.models.enums.exam_enum import ExamStatus, AssignmentStatus
 from cbt_service.database.models.enums.enums import UserRole
-from cbt_service.schemas.exam_schemas import ExamMaxAttemptsUpdate, ExamShowResultsUpdate
+from cbt_service.schemas.exam_schemas import AssignedCohortRead, ExamMaxAttemptsUpdate, ExamShowResultsUpdate
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 from cbt_service.schemas.exam_schemas import (
     ExamCreate, ExamDeleteResponse, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
@@ -1078,7 +1078,12 @@ class ExamService:
         session: Session, exam_id: UUID, cohort_id: UUID,
         scheduled_at: datetime | None, current_user: CurrentUser,
         student_ids: list[UUID],
-    ) -> list[ExamAssignment]:
+    ) -> tuple[list[ExamAssignment], int]:
+        """
+        Assign the cohort's students. Students who already have the exam are
+        skipped, so assigning a cohort again only adds members who joined since.
+        Returns (the members' assignments, how many were newly created).
+        """
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
             raise HTTPException(status_code=400, detail="Students can only be assigned to approved or active exams.")
@@ -1103,7 +1108,33 @@ class ExamService:
                 exam_id, cohort_id,
             )
 
-        return ExamService._load_assignments(session, exam_id, unique_ids)
+        return ExamService._load_assignments(session, exam_id, unique_ids), created
+
+    @staticmethod
+    def unassigned_of(session: Session, exam_id: UUID, student_ids: list[UUID]) -> list[UUID]:
+        """Of these students, the ones who don't have the exam yet (in the given order)."""
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        have: set[UUID] = set()
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
+            have.update(session.exec(
+                select(ExamAssignment.student_id).where(
+                    ExamAssignment.exam_id == exam_id, col(ExamAssignment.student_id).in_(chunk),
+                )
+            ).all())
+        return [s for s in unique_ids if s not in have]
+
+    @staticmethod
+    def assigned_cohorts(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[AssignedCohortRead]:
+        """Cohorts assigned to the exam, with how many students each brought."""
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
+        rows = session.exec(
+            select(ExamAssignment.cohort_id, func.count())
+            .where(ExamAssignment.exam_id == exam_id, col(ExamAssignment.cohort_id).is_not(None))
+            .group_by(col(ExamAssignment.cohort_id))
+        ).all()
+        return [AssignedCohortRead(cohort_id=cid, students=int(n)) for cid, n in rows if cid is not None]
 
 
 
