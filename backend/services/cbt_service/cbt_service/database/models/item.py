@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON, DateTime, Index, String
+from sqlalchemy import Column, JSON, DateTime, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .enums.item_subject_enums import ItemSource, ItemStatus, ItemType
@@ -53,6 +53,11 @@ class ItemModel(SQLModel, table=True):
     options: list[dict] | None = Field(default=None, sa_column=Column(json_type))
     correct_answers: list[str] | None = Field(default=None, sa_column=Column(json_type))
     explanation: str | None = None                               # shown after exam
+    # How marks are given for written answers (short answer / essay). For
+    # markers (and AI marking) only: never sent to students.
+    marking_guide: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # Essays: optional word limit shown to students while they write.
+    word_limit: int | None = Field(default=None)
 
     # ----------------------------------------------------------------
     # Scoring

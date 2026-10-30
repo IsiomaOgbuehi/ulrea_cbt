@@ -1077,14 +1077,16 @@ def list_students(
     status: MembershipStatus | None = Query(default=None),
     cohort_id: UUID | None = Query(default=None),
     name: str | None = Query(default=None, description="Search by student first/last name"),
+    graduated: bool | None = Query(default=None, description="true: graduated from a cohort; false: never graduated"),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
 ):
     rows, total = UserManagementService.list_students(
         session=session, org_id=ctx.membership.org_id,
-        status=status, cohort_id=cohort_id, name=name, 
+        status=status, cohort_id=cohort_id, name=name, graduated=graduated,
         page=page, per_page=per_page,
     )
+    graduations = CohortService.graduations_for(session, [user.id for user, _ in rows], ctx.membership.org_id)
     return PaginatedStudentResponse(
         total=total, page=page, per_page=per_page,
         students=[
@@ -1092,6 +1094,7 @@ def list_students(
                 id=user.id, firstname=user.firstname, lastname=user.lastname,
                 email=user.email, access_code=user.access_code,
                 status=membership.status, created_at=membership.created_at,
+                graduations=graduations.get(user.id, []),
             )
             for user, membership in rows
         ],

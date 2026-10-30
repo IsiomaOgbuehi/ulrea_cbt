@@ -1,3 +1,4 @@
+from sqlmodel.sql.expression import SelectOfScalar
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
@@ -254,6 +255,16 @@ class ViolationService:
             .where(ExamViolation.exam_id == exam_id)
             .order_by(ExamViolation.occurred_at)
         ).all()
+
+    @staticmethod
+    def exam_violations_stmt(session: Session, exam_id: UUID, current_user) -> "SelectOfScalar[ExamViolation]":
+        """The exam's violations, newest first (for paging; checks access)."""
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user, P.VIOLATIONS_VIEW)
+        return (
+            select(ExamViolation).where(ExamViolation.exam_id == exam_id)
+            .order_by(col(ExamViolation.occurred_at).desc(), col(ExamViolation.id))
+        )
 
     @staticmethod
     def mark_reviewed(session: Session, violation_id: UUID, current_user) -> ExamViolation:

@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
@@ -8,19 +9,32 @@ from cbt_service.schemas.item_subject_schemas import ExamItemDetailRead, ItemRea
 from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
+from cbt_service.schemas.exam_schemas import ExamMaxAttemptsUpdate, ExamShowResultsUpdate
 from cbt_service.schemas.exam_schemas import (
-    AssignCohortRequest, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
+    AssignCohortRequest, AssignedCohortRead, StudentUnfinishedExams, UnfinishedExamsRequest, CohortAssignPreview, CohortAssignResult, CohortNewMember, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
     ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate, UserSummary
 )
 from cbt_service.services.exam_service import ExamService
+from cbt_service.services.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, page_of, total_pages
+from typing import Any
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
 from cbt_service.clients.auth_client import AuthClient
 from cbt_service.core.permissions import P
 from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+
+def _paged(items: list[Any], total: int | None, page: int | None, page_size: int) -> Any:
+    """The full list when no page was asked for, else a page."""
+    if page is None or total is None:
+        return items
+    return PaginatedResponse(items=items, total=total, page=page, page_size=page_size,
+                             total_pages=total_pages(total, page_size))
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -126,6 +140,32 @@ def update_exam(
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_EDIT)),
 ):
     exam = ExamService.update(session, exam_id, payload, current_user)
+    return ExamService.to_reads(session, [exam])[0]
+
+
+''' CHANGE ATTEMPTS ALLOWED (APPROVED / LIVE) 🔁 '''
+@router.patch("/{exam_id}/max-attempts", response_model=ExamRead)
+def update_max_attempts(
+    exam_id: UUID,
+    payload: ExamMaxAttemptsUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_CHANGE_ATTEMPTS)),
+) -> ExamRead:
+    """Change how many attempts candidates get, once the exam is approved or live."""
+    exam = ExamService.update_max_attempts(session, exam_id, payload, current_user)
+    return ExamService.to_reads(session, [exam])[0]
+
+
+''' SHOW / HIDE RESULTS (APPROVED / LIVE / CLOSED) 📣 '''
+@router.patch("/{exam_id}/show-results", response_model=ExamRead)
+def update_show_results(
+    exam_id: UUID,
+    payload: ExamShowResultsUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_RELEASE_RESULTS)),
+) -> ExamRead:
+    """Show candidates their scores and pass/fail (or hide them again)."""
+    exam = ExamService.update_show_results(session, exam_id, payload, current_user)
     return ExamService.to_reads(session, [exam])[0]
 
 
@@ -301,19 +341,28 @@ async def assign_students(
 
 
 ''' LIST ASSIGNMENTS 📋 '''
-@router.get("/{exam_id}/assignments", response_model=list[ExamAssignmentRead])
+@router.get("/{exam_id}/assignments", response_model=PaginatedResponse[ExamAssignmentRead] | list[ExamAssignmentRead])
 async def list_assignments(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
-):
-    assignments: list[ExamAssignmentRead] = await run_in_threadpool(
-    ExamService.get_assignments, session, exam_id, current_user)
+) -> PaginatedResponse[ExamAssignmentRead] | list[ExamAssignmentRead]:
+    total: int | None = None
+    if page is not None:
+        rows, total = await run_in_threadpool(
+            lambda: page_of(session, ExamService.assignments_stmt(session, exam_id, current_user), page, page_size)
+        )
+        assignments: list[ExamAssignmentRead] = [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in rows]
+    else:
+        assignments = await run_in_threadpool(
+        ExamService.get_assignments, session, exam_id, current_user)
     # DB work done: free the connection before the auth-service call.
     await release_connection(session)
 
     if not assignments:
-            return assignments
+        return _paged(assignments, total, page, page_size)
 
     auth_client = AuthClient(redis_client)
     users: dict[str, UserSummary] = await auth_client.get_users_bulk(
@@ -327,7 +376,7 @@ async def list_assignments(
         name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
         enriched.append(assignment.model_copy(update={"student_name": name}))
 
-    return enriched
+    return _paged(enriched, total, page, page_size)
 
 
 # --------------------------------------------------------
@@ -335,14 +384,20 @@ async def list_assignments(
 # --------------------------------------------------------
 
 ''' AUDIT LOG 📜 '''
-@router.get("/{exam_id}/audit", response_model=list[ExamAuditLogRead])
+@router.get("/{exam_id}/audit", response_model=PaginatedResponse[ExamAuditLogRead] | list[ExamAuditLogRead])
 def get_audit_log(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_AUDIT_LOG)),
-):
-    logs = ExamService.get_audit_log(session, exam_id, current_user)
-    return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
+) -> PaginatedResponse[ExamAuditLogRead] | list[ExamAuditLogRead]:
+    """Oldest first; with page, newest first."""
+    if page is None:
+        logs = ExamService.get_audit_log(session, exam_id, current_user)
+        return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
+    rows, total = page_of(session, ExamService.audit_stmt(session, exam_id, current_user), page, page_size)
+    return _paged([ExamAuditLogRead.model_validate(l, from_attributes=True) for l in rows], total, page, page_size)
 
 
 # --------------------------------------------------------
@@ -350,17 +405,20 @@ def get_audit_log(
 # --------------------------------------------------------
 
 ''' ASSIGN COHORT TO EXAM 🎓 '''
-@router.post("/{exam_id}/assign_cohort", response_model=list[ExamAssignmentRead])
+@router.post("/{exam_id}/assign_cohort", response_model=CohortAssignResult | list[ExamAssignmentRead])
 async def assign_cohort(
     exam_id: UUID,
     payload: AssignCohortRequest,
     session: SessionDep,
+    summary: bool = Query(default=False, description="Return counts (added / already assigned) instead of the assignments"),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
-):
+) -> CohortAssignResult | list[ExamAssignmentRead]:
     """
     Assign all active students in a cohort to this exam.
     Fetches student list from auth service.
     Graduated cohorts cannot be assigned new exams.
+    Students who already have the exam are left as they are, so assigning a
+    cohort again (e.g. while the exam is live) only adds new members.
     """
     # 1. Cheap DB checks first: 404 / 403 / 400 return before any network call.
     await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
@@ -376,14 +434,15 @@ async def assign_cohort(
     except HTTPException:
         raise   # 400 graduated / 404 not found / 502 from the client: pass through
     except Exception:
+        logger.exception("Fetching members of cohort %s for exam %s failed", payload.cohort_id, exam_id)
         raise HTTPException(status_code=502, detail="Could not fetch cohort members from auth service.")
 
     if not student_ids:
         raise HTTPException(status_code=400, detail="Cohort has no active students.")
 
     # 3. Do the assignment.
-    assignments = await run_in_threadpool(
-    ExamService.assign_cohort,
+    assignments, created = await run_in_threadpool(
+        ExamService.assign_cohort,
         session=session,
         exam_id=exam_id,
         cohort_id=payload.cohort_id,
@@ -391,7 +450,82 @@ async def assign_cohort(
         current_user=current_user,
         student_ids=student_ids,
     )
+    if summary:
+        members: int = len(set(student_ids))
+        return CohortAssignResult(
+            cohort_id=payload.cohort_id, members=members, added=created, already_assigned=members - created,
+        )
     return [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in assignments]
+
+
+''' PREVIEW ASSIGNING A COHORT 👀 '''
+@router.get("/{exam_id}/assign_cohort/preview", response_model=CohortAssignPreview)
+async def preview_assign_cohort(
+    exam_id: UUID,
+    session: SessionDep,
+    cohort_id: UUID = Query(...),
+    limit: int = Query(default=20, ge=0, le=200, description="How many new members to name"),
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
+) -> CohortAssignPreview:
+    """Who assigning this cohort now would add: members who don't have the exam yet. Changes nothing."""
+    await run_in_threadpool(ExamService.assert_assignable, session, exam_id, current_user)
+    await release_connection(session)
+
+    auth_client = AuthClient(redis_client)
+    try:
+        student_ids: list[UUID] = await auth_client.get_cohort_student_ids(
+            cohort_id=cohort_id, org_id=current_user.org_id,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Fetching members of cohort %s for exam %s failed", cohort_id, exam_id)
+        raise HTTPException(status_code=502, detail="Could not fetch cohort members from auth service.")
+
+    members: list[UUID] = list(dict.fromkeys(student_ids))
+    new_ids: list[UUID] = await run_in_threadpool(ExamService.unassigned_of, session, exam_id, members)
+    await release_connection(session)
+
+    named: list[CohortNewMember] = []
+    shown: list[UUID] = new_ids[:limit]
+    if shown:
+        users: dict[str, UserSummary] = await auth_client.get_users_bulk(shown, org_id=current_user.org_id)
+        for sid in shown:
+            user: UserSummary | None = users.get(str(sid))
+            name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
+            named.append(CohortNewMember(
+                id=sid, name=name or None, student_number=getattr(user, "institution_id", None) if user else None,
+            ))
+        named.sort(key=lambda m: (m.name or "").casefold())
+    return CohortAssignPreview(
+        cohort_id=cohort_id, members=len(members), already_assigned=len(members) - len(new_ids),
+        new_count=len(new_ids), new_members=named,
+    )
+
+
+''' UNFINISHED EXAMS FOR STUDENTS ⏳ '''
+@router.post("/unfinished-for-students", response_model=list[StudentUnfinishedExams])
+def unfinished_for_students(
+    payload: UnfinishedExamsRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> list[StudentUnfinishedExams]:
+    """
+    Open exams the given students haven't finished (only students who have
+    any are listed). Used to warn before graduating or moving students.
+    """
+    return ExamService.unfinished_for_students(session, payload.student_ids, current_user)
+
+
+''' COHORTS ASSIGNED TO EXAM 🎓 '''
+@router.get("/{exam_id}/assigned-cohorts", response_model=list[AssignedCohortRead])
+def list_assigned_cohorts(
+    exam_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
+) -> list[AssignedCohortRead]:
+    """Cohorts already assigned to the exam, with how many students each brought."""
+    return ExamService.assigned_cohorts(session, exam_id, current_user)
 
 
 ''' SUPER ADMIN: OVERRIDE EXAM STATUS 🔧 '''
@@ -418,17 +552,24 @@ def override_exam_status(
 
 
 ''' LIST EXAM QUESTIONS WITH CONTENT 🧐 '''
-@router.get("/{exam_id}/questions", response_model=list[ExamItemDetailRead])
+@router.get("/{exam_id}/questions", response_model=PaginatedResponse[ExamItemDetailRead] | list[ExamItemDetailRead])
 def list_exam_questions(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
-):
-    rows = ExamService.get_items_with_content(session, exam_id, current_user)
-    return [
+) -> PaginatedResponse[ExamItemDetailRead] | list[ExamItemDetailRead]:
+    total: int | None = None
+    if page is None:
+        rows = ExamService.get_items_with_content(session, exam_id, current_user)
+    else:
+        rows, total = page_of(session, ExamService.items_with_content_stmt(session, exam_id, current_user), page, page_size)
+    reads = [
         ExamItemDetailRead(
             **ExamItemRead.model_validate(exam_item, from_attributes=True).model_dump(),
             item=ItemRead.model_validate(item, from_attributes=True),
         )
         for exam_item, item in rows
     ]
+    return _paged(reads, total, page, page_size)

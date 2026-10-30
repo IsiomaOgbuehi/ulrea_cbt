@@ -20,6 +20,9 @@ class ExamCreate(BaseModel):
     shuffle_options: bool = False
     show_result_immediately: bool = True
     allow_review: bool = True
+    auto_mark_short_answers: bool = False   # off: short answers are marked by a person
+    show_attempts_used: bool = False        # candidates see "1 of 2 attempts used"
+    extra_time_seconds: int = Field(default=30, ge=0, le=1800)   # added to every candidate's time
     max_attempts: int = 1
     max_violations: int | None = None
     # Optional scope inside the subject. Empty = whole subject (as before).
@@ -35,6 +38,28 @@ class ExamCreate(BaseModel):
         return self
 
 
+class ExamMaxAttemptsUpdate(BaseModel):
+    """
+    Change how many attempts candidates get, and whether they see how many
+    they've used, once an exam is approved or live. Send either or both.
+    """
+    max_attempts: int | None = Field(default=None, ge=1, le=100)
+    show_attempts_used: bool | None = None
+    # Applies straight away, including to candidates already sitting the exam.
+    extra_time_seconds: int | None = Field(default=None, ge=0, le=1800)
+
+    @model_validator(mode="after")
+    def something_to_change(self) -> "ExamMaxAttemptsUpdate":
+        if self.max_attempts is None and self.show_attempts_used is None and self.extra_time_seconds is None:
+            raise ValueError("Send max_attempts, show_attempts_used or extra_time_seconds.")
+        return self
+
+
+class ExamShowResultsUpdate(BaseModel):
+    """Show candidates their results (or hide them again) once an exam is approved, live or closed."""
+    show_result_immediately: bool
+
+
 class ExamUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
@@ -47,6 +72,9 @@ class ExamUpdate(BaseModel):
     shuffle_options: bool | None = None
     show_result_immediately: bool | None = None
     allow_review: bool | None = None
+    auto_mark_short_answers: bool | None = None   # only while the exam is a draft / sent back
+    show_attempts_used: bool | None = None
+    extra_time_seconds: int | None = Field(default=None, ge=0, le=1800)
     max_attempts: int | None = None
     max_violations: int | None = None
     bank_id: UUID | None = None            # send null to clear
@@ -75,6 +103,9 @@ class ExamRead(BaseModel):
     shuffle_options: bool
     show_result_immediately: bool
     allow_review: bool
+    auto_mark_short_answers: bool = False
+    show_attempts_used: bool = False
+    extra_time_seconds: int = 30
     max_attempts: int
     created_at: datetime
     updated_at: datetime
@@ -82,6 +113,8 @@ class ExamRead(BaseModel):
     topic_ids: list[UUID] = Field(default_factory=list)
     period_id: UUID | None = None
     item_count: int = 0          # questions in the exam
+    written_count: int = 0                 # short answers + essays (the Marking tab shows when > 0)
+    short_answer_count: int = 0
     assigned_count: int = 0      # candidates assigned
     submitted_count: int = 0     # of those, how many have submitted
 
@@ -203,6 +236,50 @@ class AssignCohortRequest(BaseModel):
     scheduled_at: datetime | None = None
 
 
+class CohortAssignResult(BaseModel):
+    """What assigning a cohort did (POST .../assign_cohort?summary=true)."""
+    cohort_id: UUID
+    members: int            # active students in the cohort now
+    added: int              # newly assigned by this call
+    already_assigned: int   # skipped: already had this exam (from this or another cohort)
+
+
+class CohortNewMember(BaseModel):
+    id: UUID
+    name: str | None = None
+    student_number: str | None = None
+
+
+class CohortAssignPreview(BaseModel):
+    """Who assigning a cohort now would add (nothing is changed)."""
+    cohort_id: UUID
+    members: int                    # active students in the cohort now
+    already_assigned: int           # already have this exam
+    new_count: int                  # would be added
+    new_members: list[CohortNewMember]   # the first ones, by name (up to `limit`)
+
+
+class UnfinishedExamsRequest(BaseModel):
+    student_ids: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class UnfinishedExam(BaseModel):
+    exam_id: UUID
+    title: str
+    status: str                 # assigned (not started) | started
+
+
+class StudentUnfinishedExams(BaseModel):
+    student_id: UUID
+    exams: list[UnfinishedExam]
+
+
+class AssignedCohortRead(BaseModel):
+    """A cohort assigned to the exam and how many students it brought."""
+    cohort_id: UUID
+    students: int
+
+
 class UserSummary(BaseModel):
     id: UUID
     firstname: str
@@ -233,12 +310,24 @@ class MyAssignmentRead(BaseModel):
     status: AssignmentStatus            # assignment status: pending / scheduled / etc.
     scheduled_at: datetime | None
     duration_minutes: int
+    extra_time_seconds: int = 0
     effective_start: datetime | None   # ← new
     effective_end: datetime | None     # ← new
     can_attempt: bool                  # ← new — computed server-side, frontend just reads it
     start_time: datetime | None
     end_time: datetime | None
     has_attempted: bool     # so the frontend can show "resume" vs "start"
+    # Attempts, worked out from the student's attempts (not the assignment status).
+    # Both left out (None) unless the exam shows candidates their attempts used.
+    max_attempts: int | None = None
+    attempts_used: int | None = None            # attempts started or finished (resets don't count)
+    show_attempts_used: bool = False
+    in_progress_attempt_id: UUID | None = None  # an attempt to resume (started, or reset by staff)
+    restart: bool = False                       # that attempt was reset by staff: it starts afresh
+    latest_attempt_id: UUID | None = None       # the latest finished attempt, for "View result"
+    can_retake: bool = False                    # finished before, attempts left, window open
+    show_result: bool = True
+    allow_review: bool = False
 
 
 class ExamStatusUpdate(BaseModel):

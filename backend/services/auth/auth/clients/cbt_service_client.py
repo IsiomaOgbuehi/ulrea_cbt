@@ -31,5 +31,17 @@ class CBTServiceClient:
 
         return [UUID(uid) for uid in response.json()]
 
+    async def get_cohort_exam_assignment_count(self, cohort_id: UUID, org_id: UUID) -> int:
+        """How many exam assignments came through this cohort."""
+        url = f"{self.base_url}/internal/cohorts/{cohort_id}/exam-assignment-count"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url, params={"org_id": str(org_id)}, headers=self.headers)
+        except httpx.RequestError:
+            raise HTTPException(status_code=503, detail="Unable to reach exam service. Please try again.")
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Unexpected error from exam service.")
+        return int(response.json())
+
 
 cbt_service_client = CBTServiceClient()

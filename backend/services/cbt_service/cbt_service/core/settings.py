@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    AUTH_SERVICE_URL: str = "http://localhost:9000/api/v1"
+    AUTH_SERVICE_URL: str = "http://localhost:9000"   # base URL; a trailing /api/v1 is tolerated
     INTERNAL_SECRET: str | None = None  # must match auth service
 
 

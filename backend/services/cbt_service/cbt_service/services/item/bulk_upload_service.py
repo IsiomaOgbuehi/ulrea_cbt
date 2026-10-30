@@ -30,6 +30,7 @@ from cbt_service.services.item.item_service import ItemService
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.difficulty_service import DifficultyScope
+from cbt_service.services.marking.scoring import clean_accepted_answers
 from cbt_service.core.permissions import P
 from cbt_service.services.item.utils.item_answer_utils import (
     assert_correct_answers_valid,
@@ -51,7 +52,7 @@ REQUIRED_COLUMNS = {"question_text", "item_type"}
 OPTIONAL_COLUMNS = {
     "option_a", "option_b", "option_c", "option_d", "option_e",
     "correct_answers", "explanation", "marks", "negative_marks",
-    "tags", "difficulty", "topics",
+    "tags", "difficulty", "topics", "marking_guide", "word_limit",
 }
 
 VALID_TYPES = {t.value for t in ItemType}
@@ -195,9 +196,9 @@ def _map_edu_expression_row(get) -> dict:
       Difficulty Level  E/M/H           -> easy/medium/hard
       Question Type     M               -> mcq_single (mcq_multi if Correct Answer has a comma)
                         T               -> true_false
-                        F (fill blank)  -> short_answer, expected text kept in correct_answers
-                                           (manual review; NOT auto-graded)
-                        S (subjective)  -> short_answer, no answer key
+                        F (fill blank)  -> short_answer, expected text is the accepted answer
+                                           (auto-marked; markers can still adjust)
+                        S (subjective)  -> essay, marked by a person
       Correct Answer    1-based index   -> option letter A-E
       Option6 with a value              -> row rejected (we support 5 options)
       Hint                              -> prepended to explanation
@@ -273,7 +274,7 @@ def _map_edu_expression_row(get) -> dict:
         row["correct_answers"] = _safe_str(get("fill in the blanks")).strip()
 
     elif q_type == "S":
-        row["item_type"] = "short_answer"
+        row["item_type"] = "essay"          # subjective: marked by a person
         row["correct_answers"] = ""
 
     else:
@@ -319,8 +320,16 @@ def _validate_row(row: dict, row_num: int):
 
     raw_correct = row.get("correct_answers") or row.get("correct_answer")
     correct_answers = _parse_correct_answers(raw_correct)
+    written: bool = raw_type in (ItemType.SHORT_ANSWER.value, ItemType.ESSAY.value)
 
-    if raw_type == ItemType.TRUE_FALSE.value:
+    if written:
+        # Accepted answers for short answers are separated by | (answers may contain commas).
+        options = None
+        correct_answers = (
+            clean_accepted_answers(_safe_str(raw_correct).split("|"))
+            if raw_type == ItemType.SHORT_ANSWER.value else None
+        )
+    elif raw_type == ItemType.TRUE_FALSE.value:
         correct_answers = normalize_boolean_answer(correct_answers)
     else:
         correct_answers = normalize_correct_answers(options, correct_answers)
@@ -355,6 +364,16 @@ def _validate_row(row: dict, row_num: int):
     if raw_type == ItemType.NUMERIC.value and not correct_answers:
         return None, f"Row {row_num}: numeric requires correct_answers"
 
+    word_limit: int | None = None
+    raw_limit: str = _safe_str(row.get("word_limit")).strip()
+    if raw_limit and raw_type == ItemType.ESSAY.value:
+        try:
+            word_limit = int(float(raw_limit))
+        except ValueError:
+            return None, f"Row {row_num}: word_limit must be a whole number"
+        if not 1 <= word_limit <= 20_000:
+            return None, f"Row {row_num}: word_limit must be between 1 and 20000"
+
     return {
         "question_text": question_text,
         "item_type": raw_type,
@@ -365,6 +384,8 @@ def _validate_row(row: dict, row_num: int):
         "negative_marks": negative_marks,
         "tags": _parse_tags(row.get("tags")),
         "difficulty": difficulty,
+        "marking_guide": (_safe_str(row.get("marking_guide")).strip() or None) if written else None,
+        "word_limit": word_limit,
     }, None
 
 
@@ -392,6 +413,7 @@ class BulkUploadService:
             "option_a", "option_b", "option_c", "option_d", "option_e",
             "correct_answers", "explanation",
             "marks", "negative_marks", "tags", "difficulty", "topics",
+            "marking_guide", "word_limit",
         ]
         ws.append(headers)
 
@@ -400,7 +422,9 @@ class BulkUploadService:
             ["Prime numbers?", "mcq_multi", "2", "3", "4", "5", "", "A,B,D", "", 2, 0.5, "math", "medium"],
             ["Sky is blue", "true_false", "True", "False", "", "", "", "True", "", 1, 0, "general", "easy"],
             ["Speed of light?", "numeric", "", "", "", "", "", "299792458", "", 2, 0, "physics", "hard"],
-            ["Describe photosynthesis", "short_answer", "", "", "", "", "", "", "Manual review", 5, 0, "biology", "medium"],
+            ["Capital of Nigeria?", "short_answer", "", "", "", "", "", "Abuja | FCT Abuja", "", 1, 0, "geography", "easy", "", "", ""],
+            ["Describe photosynthesis", "essay", "", "", "", "", "", "", "", 5, 0, "biology", "medium", "",
+             "2 marks: light energy -> chemical energy. 2 marks: inputs (CO2, water) and outputs (glucose, oxygen). 1 mark: role of chlorophyll.", 200],
         ]
         for r in examples:
             ws.append(r)
@@ -409,15 +433,17 @@ class BulkUploadService:
         instructions = [
             ["Column", "Required", "Description"],
             ["question_text", "Yes", "The question text"],
-            ["item_type", "Yes", "mcq_single | mcq_multi | true_false | numeric | short_answer"],
+            ["item_type", "Yes", "mcq_single | mcq_multi | true_false | numeric | short_answer | essay"],
             ["option_a to option_e", "For MCQ/TF", "Answer options (at least 2 for MCQ)"],
-            ["correct_answers", "For most types", "Option key (A, B...). Multi: comma-separated (A,C). Numeric: the number."],
+            ["correct_answers", "For most types", "Option key (A, B...). Multi: comma-separated (A,C). Numeric: the number. Short answer: accepted answers separated by | (marked automatically, ignoring case and spacing; blank = marked by a person). Essay: leave blank."],
             ["explanation", "No", "Shown to candidate after exam"],
             ["marks", "No", "Points awarded. Default: 1"],
             ["negative_marks", "No", "Points deducted for wrong answer. Default: 0"],
             ["tags", "No", "Comma-separated tags e.g. algebra,chapter-3"],
             ["difficulty", "No", difficulty_help],
             ["topics", "No", "Topics from this subject, separated by ; e.g. Ethics; Compliance > Anti-money laundering. Must already exist in the subject."],
+            ["marking_guide", "No", "Short answer / essay: how marks are given. Only markers see it, never students."],
+            ["word_limit", "No", "Essay: the most words students should write (shown while they write)."],
         ]
         for row in instructions:
             ws_info.append(row)
@@ -445,6 +471,7 @@ class BulkUploadService:
         # caller's org, and teachers must be assigned to it.
         ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, bank_id, current_user, P.QUESTIONS_MANAGE)
         PeriodScope.validate(session, period_id, current_user.org_id)
         topic_lookup: dict[str, UUID] | None = None  # loaded only if a row has topics
 

@@ -4,7 +4,10 @@ from datetime import datetime
 from typing import Generic, TypeVar
 
 from cbt_service.schemas.exam_schemas import ExamItemRead
-from cbt_service.database.models.enums.item_subject_enums import ItemSource, ItemType, ItemStatus, SubjectStatus
+from cbt_service.database.models.enums.item_subject_enums import (
+    WRITTEN_TYPES, ItemSource, ItemType, ItemStatus, SubjectStatus,
+)
+from cbt_service.services.marking.scoring import clean_accepted_answers
 from cbt_service.database.models.enums.enums import UserRole
 
 
@@ -73,6 +76,8 @@ class ItemCreate(BaseModel):
     bank_id: UUID | None = None                          # bank (class/level...) in the subject; optional
     topic_ids: list[UUID] = Field(default_factory=list)  # topics in the subject this question tests
     period_id: UUID | None = None                        # session/term (year/cycle...) it was prepared for
+    marking_guide: str | None = Field(default=None, max_length=20_000)   # markers only, never students
+    word_limit: int | None = Field(default=None, ge=1, le=20_000)        # essays
 
     @field_validator("options")
     @classmethod
@@ -120,6 +125,17 @@ class ItemCreate(BaseModel):
     
     @model_validator(mode="after")
     def validate_item(self):
+        if self.item_type in WRITTEN_TYPES:
+            # No options; for short answers, correct_answers are the accepted answers.
+            self.options = None
+            self.correct_answers = (
+                clean_accepted_answers(self.correct_answers)
+                if self.item_type == ItemType.SHORT_ANSWER else None
+            )
+            if self.item_type != ItemType.ESSAY:
+                self.word_limit = None
+            return self
+        self.word_limit = None
         if self.item_type in (
             ItemType.MCQ_SINGLE,
             ItemType.MCQ_MULTI,
@@ -162,6 +178,8 @@ class ItemUpdate(BaseModel):
     bank_id: UUID | None = None            # send null to take the question out of its bank
     topic_ids: list[UUID] | None = None    # replaces the question's topics when sent
     period_id: UUID | None = None          # send null to clear
+    marking_guide: str | None = Field(default=None, max_length=20_000)
+    word_limit: int | None = Field(default=None, ge=1, le=20_000)
 
 
 class ItemRead(BaseModel):
@@ -186,6 +204,8 @@ class ItemRead(BaseModel):
     bank_id: UUID | None = None
     topic_ids: list[UUID] = Field(default_factory=list)
     period_id: UUID | None = None
+    marking_guide: str | None = None       # staff only (ItemRead is never sent to students)
+    word_limit: int | None = None
 
 
 T = TypeVar("T")
@@ -239,6 +259,7 @@ class UserSummary(BaseModel):
     lastname: str
     email: str | None
     role: UserRole
+    institution_id: str | None = None   # the org's own number for the person (e.g. student number)
 
 
 class SubjectSummary(BaseModel):
@@ -289,12 +310,13 @@ class ItemForScoringRead(BaseModel):
 
 
 class ItemForDisplayRead(BaseModel):
-    """Student-facing — no correct_answers field, ever."""
+    """Student-facing — no correct_answers or marking_guide field, ever."""
     id: UUID
     question_text: str
     item_type: ItemType
     options: list[dict] | None = None
     marks: float
+    word_limit: int | None = None
 
 
 class ExamItemDetailRead(ExamItemRead):

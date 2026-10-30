@@ -12,6 +12,7 @@ from cbt_service.services.item.utils.item_answer_utils import normalize_correct_
 from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.difficulty_service import DifficultyScope
+from cbt_service.services.marking.scoring import clean_accepted_answers
 from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.attempt import ResponseModel
@@ -69,6 +70,7 @@ class ItemService:
     ) -> ItemModel:
         ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, payload.bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, payload.bank_id, current_user, P.QUESTIONS_MANAGE)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, subject_id, payload.topic_ids, current_user.org_id
         )
@@ -88,6 +90,8 @@ class ItemService:
             options=[opt.model_dump() for opt in payload.options] if payload.options else None,
             correct_answers=payload.correct_answers,
             explanation=payload.explanation,
+            marking_guide=(payload.marking_guide or "").strip() or None,
+            word_limit=payload.word_limit,
             marks=payload.marks,
             negative_marks=payload.negative_marks,
             tags=payload.tags or [],
@@ -123,6 +127,11 @@ class ItemService:
             ItemModel.subject_id == subject_id,
             ItemModel.org_id == current_user.org_id,
         )
+
+        # Staff limited to their subjects see unbanked questions plus their banks.
+        visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
+        if visible is not None:
+            query = query.where(visible)
 
         # Teachers only see their own items; admins and above see everything
         # if current_user.role == UserRole.TEACHER:
@@ -186,8 +195,9 @@ class ItemService:
         if not item:
             raise HTTPException(status_code=404, detail="Item not found.")
 
-        # Check subject access
+        # Check subject access, then bank access.
         ItemService._assert_subject_access(session, item.subject_id, current_user, perm)
+        ScopeService.assert_bank_access(session, item.bank_id, current_user, perm)
         return item
 
     @staticmethod
@@ -208,6 +218,7 @@ class ItemService:
             )
         if "bank_id" in update_data and update_data["bank_id"] != item.bank_id:
             ScopeService.validate_bank(session, item.subject_id, update_data["bank_id"], current_user.org_id)
+            ScopeService.assert_bank_access(session, update_data["bank_id"], current_user, P.QUESTIONS_MANAGE)
         if "period_id" in update_data and update_data["period_id"] != item.period_id:
             PeriodScope.validate(session, update_data["period_id"], current_user.org_id)
         if "difficulty" in update_data:
@@ -228,7 +239,23 @@ class ItemService:
         #     assert_correct_answers_valid(new_options, new_correct)
         #     update_data["correct_answers"] = new_correct
 
-        if "options" in update_data or "correct_answers" in update_data:
+        if "marking_guide" in update_data:
+            update_data["marking_guide"] = (update_data["marking_guide"] or "").strip() or None
+        if item.item_type in (ItemType.SHORT_ANSWER, ItemType.ESSAY):
+            update_data.pop("options", None)
+            if "correct_answers" in update_data:
+                update_data["correct_answers"] = (
+                    clean_accepted_answers(update_data["correct_answers"])
+                    if item.item_type == ItemType.SHORT_ANSWER else None
+                )
+            if item.item_type != ItemType.ESSAY:
+                update_data.pop("word_limit", None)
+        else:
+            update_data.pop("word_limit", None)
+
+        if item.item_type not in (ItemType.SHORT_ANSWER, ItemType.ESSAY) and (
+            "options" in update_data or "correct_answers" in update_data
+        ):
             new_options = update_data.get("options", item.options)
             incoming_correct = update_data.get("correct_answers", item.correct_answers)
             new_correct = normalize_correct_answers(new_options, incoming_correct)
@@ -237,6 +264,8 @@ class ItemService:
 
         for key, value in update_data.items():
             setattr(item, key, value)
+        if "marks" in update_data or "negative_marks" in update_data:
+            ItemService._sync_draft_exam_marks(session, item)
         if new_topic_ids is not None:
             ScopeService.set_item_topics(session, item.id, new_topic_ids)
 
@@ -296,6 +325,25 @@ class ItemService:
         #     )
 
 
+
+    @staticmethod
+    def _sync_draft_exam_marks(session: Session, item: ItemModel) -> None:
+        """Exams still being built follow the question's new marks; ones past draft keep theirs."""
+        rows = session.exec(
+            select(ExamItem, ExamModel)
+            .join(ExamModel, col(ExamModel.id) == col(ExamItem.exam_id))
+            .where(
+                ExamItem.item_id == item.id,
+                ExamItem.org_id == item.org_id,
+                col(ExamModel.status).in_(EDITABLE_EXAM_STATUSES),
+            )
+        ).all()
+        for exam_item, exam in rows:
+            exam.total_marks = max(0.0, exam.total_marks - exam_item.marks + item.marks)
+            exam_item.marks = item.marks
+            exam_item.negative_marks = item.negative_marks
+            session.add(exam_item)
+            session.add(exam)
 
     @staticmethod
     def usage(session: Session, item_id: UUID, current_user: CurrentUser) -> ItemUsageRead:

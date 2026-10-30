@@ -299,7 +299,8 @@ def test_admin_can_graduate_cohort(client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200, resp.json()
-    assert resp.json()["status"] == "graduated"
+    # Graduating keeps the cohort open for the next set by default.
+    assert resp.json()["cohort"]["status"] == "active"
 
 
 def test_teacher_cannot_create_cohort(client):
@@ -786,7 +787,7 @@ def test_move_nonexistent_student_returns_404(client):
     )
     assert resp.status_code == 404, resp.json()
 
-def test_move_student_to_graduated_cohort_returns_400(client):
+def test_move_student_to_archived_cohort_returns_400(client):
     token = get_super_admin_token(client)
     cohort_1_id = _create_cohort(client, token, COHORT_PAYLOAD)["id"]
     cohort_2_id = _create_cohort(client, token, COHORT_2_PAYLOAD)["id"]
@@ -795,7 +796,7 @@ def test_move_student_to_graduated_cohort_returns_400(client):
 
     graduate_resp = client.post(
         f"/api/v1/cohorts/{cohort_2_id}/graduate",
-        json={"graduation_date": "2025-06-01"},
+        json={"then": "archive"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert graduate_resp.status_code == 200, graduate_resp.json()

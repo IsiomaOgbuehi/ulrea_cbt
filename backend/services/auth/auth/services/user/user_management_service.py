@@ -26,6 +26,8 @@ from auth.services.membership_service import MembershipService
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
 from auth.database.schema.cohort.cohort_db import CohortMember, CohortModel, TeacherCohortAssignment
+from auth.database.schema.cohort.enum import MemberStatus
+from sqlalchemy import exists
 from auth.services.teacher_cohort_service import TeacherCohortService
 from auth.services.role_service import SYSTEM_ROLES
 
@@ -428,6 +430,7 @@ class UserManagementService:
                 CohortMember.cohort_id == cohort_id,
                 CohortMember.student_id == student_id,
                 CohortMember.org_id == org_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
             )
         ).first()
 
@@ -878,6 +881,7 @@ class UserManagementService:
         cohort_id: UUID | None = None,
         page: int = 1,
         per_page: int = 20,
+        graduated: bool | None = None,
     ) -> tuple[list[tuple[UserModel, OrgMembership]], int]:
         base = (
             select(UserModel, OrgMembership)
@@ -893,7 +897,15 @@ class UserManagementService:
         if cohort_id:
             base = base.join(
                 CohortMember, CohortMember.student_id == UserModel.id
-            ).where(CohortMember.cohort_id == cohort_id)
+            ).where(CohortMember.cohort_id == cohort_id, CohortMember.status == MemberStatus.ACTIVE.value)
+        if graduated is not None:
+            # Graduated from at least one cohort in this organisation (or not).
+            has_graduated = exists().where(
+                CohortMember.student_id == UserModel.id,
+                CohortMember.org_id == org_id,
+                CohortMember.status == MemberStatus.GRADUATED.value,
+            )
+            base = base.where(has_graduated if graduated else ~has_graduated)
         
         if name:
             pattern = f"%{name.strip().lower()}%"
@@ -929,7 +941,7 @@ class UserManagementService:
             q = q.where(OrgMembership.status == status)
         if cohort_id:
             q = q.join(CohortMember, CohortMember.student_id == UserModel.id).where(
-                CohortMember.cohort_id == cohort_id
+                CohortMember.cohort_id == cohort_id, CohortMember.status == MemberStatus.ACTIVE.value
             )
         if name:
             pattern = f"%{name.strip().lower()}%"

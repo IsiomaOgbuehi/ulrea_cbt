@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -9,6 +9,10 @@ from cbt_service.clients.auth_client import AuthClient
 from cbt_service.database.models.exam import ExamModel
 from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
+from cbt_service.schemas.attempt_schemas import AttemptPage, AttemptReviewRead, LateAnswerDecision, LateSaveRead
+from cbt_service.services.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from cbt_service.database.models.attempt import LateResponseModel
+from fastapi.responses import JSONResponse
 from cbt_service.schemas.attempt_schemas import (
     AttemptDetailRead,
     AttemptExamRead,
@@ -23,6 +27,9 @@ from cbt_service.schemas.attempt_schemas import (
     CurrentUser,
 )
 from cbt_service.services.attempt_service import AttemptService, build_exam_attempts_workbook
+from cbt_service.schemas.marking_schemas import ReviewResult
+from cbt_service.database.models.attempt import ResponseModel
+from sqlmodel import col, func, select
 from cbt_service.core.permissions import P
 from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
@@ -45,7 +52,7 @@ def start_attempt(
         org_id=current_user.org_id,
     )
     # return AttemptRead.model_validate(attempt, from_attributes=True)
-    return AttemptService._to_attempt_read(session, attempt)
+    return AttemptService._to_attempt_read(session, attempt, for_student=True)
 
 
 ''' GET ATTEMPT 🔍 '''
@@ -57,7 +64,7 @@ def get_attempt(
 ):
     attempt = AttemptService.get_attempt(session, attempt_id, current_user.id)
     # return AttemptRead.model_validate(attempt, from_attributes=True)
-    return AttemptService._to_attempt_read(session, attempt)
+    return AttemptService._to_attempt_read(session, attempt, for_student=True)
 
 
 ''' SAVE RESPONSE 💾 '''
@@ -68,13 +75,19 @@ def save_response(
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Autosave a student's answer. Call on every answer change."""
+    """
+    Autosave a student's answer. Call on every answer change. After time is
+    up, an answer delayed by the connection gets 202 and is kept for staff to
+    review (it doesn't change the score).
+    """
     response = AttemptService.save_response(
         session=session,
         attempt_id=attempt_id,
         payload=payload,
         student_id=current_user.id,
     )
+    if isinstance(response, LateResponseModel):
+        return JSONResponse(status_code=202, content=LateSaveRead().model_dump())
     return ResponseRead.model_validate(response, from_attributes=True)
 
 
@@ -85,8 +98,18 @@ def get_responses(
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    responses = AttemptService.get_responses(session, attempt_id, current_user.id)
-    return [ResponseRead.model_validate(r, from_attributes=True) for r in responses]
+    return AttemptService.responses_for_student(session, attempt_id, current_user.id)
+
+
+''' REVIEW MY ANSWERS (STUDENT) 🔎 '''
+@router.get("/{attempt_id}/review", response_model=AttemptReviewRead)
+def review_attempt(
+    attempt_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> AttemptReviewRead:
+    """The candidate's own answers to a finished attempt, if the exam allows review."""
+    return AttemptService.review_for_student(session, attempt_id, current_user.id)
 
 
 ''' SUBMIT ATTEMPT ✅ '''
@@ -110,18 +133,21 @@ def submit_attempt(
         pass_mark=pass_mark,
     )
     # return AttemptRead.model_validate(attempt, from_attributes=True)
-    return AttemptService._to_attempt_read(session, attempt)
+    return AttemptService._to_attempt_read(session, attempt, for_student=True)
 
 
 ''' MANUAL REVIEW ✍️ '''
-@router.post("/responses/{response_id}/review", response_model=ResponseRead)
+@router.post("/responses/{response_id}/review", response_model=ReviewResult)
 def manual_review(
     response_id: UUID,
     payload: ManualReviewRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(require_permission(P.RESULTS_MARK)),
-):
-    """Teacher or admin manually marks a short answer response."""
+) -> ReviewResult:
+    """
+    Mark (or re-mark) one answer: 0 to the question's marks. The attempt's
+    score, percentage and pass/fail are recalculated straight away.
+    """
     response = AttemptService.manual_review(
         session=session,
         response_id=response_id,
@@ -129,7 +155,19 @@ def manual_review(
         reviewer_id=current_user.id,
         current_user=current_user,
     )
-    return ResponseRead.model_validate(response, from_attributes=True)
+    attempt = AttemptService.attempt_of(session, response)
+    pending: int = int(session.exec(
+        select(func.count()).select_from(ResponseModel).where(
+            ResponseModel.attempt_id == response.attempt_id, col(ResponseModel.marks_awarded).is_(None),
+        )
+    ).one())
+    return ReviewResult.model_validate({
+        **ResponseRead.model_validate(response, from_attributes=True).model_dump(),
+        "attempt_final_score": attempt.final_score if attempt else None,
+        "attempt_percentage": attempt.percentage if attempt else None,
+        "attempt_passed": attempt.passed if attempt else None,
+        "attempt_pending": pending,
+    })
 
 
 
@@ -148,7 +186,7 @@ def get_attempt_exam(
 
 
 # ''' COHORT ATTEMPTS 📊 '''
-# @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
+# @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
 # def get_cohort_attempts(
 #     exam_id: UUID,
 #     cohort_id: UUID,
@@ -157,34 +195,79 @@ def get_attempt_exam(
 # ):
 #     return AttemptService.get_cohort_attempts(session, exam_id, cohort_id, current_user)
 
-''' COHORT ATTEMPTS 📊 '''
-@router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
-async def get_cohort_attempts(
-    exam_id: UUID,
-    cohort_id: UUID,
-    session: SessionDep,
-    current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
-) -> list[CohortAttemptSummary]:
-    summaries: list[CohortAttemptSummary] = await run_in_threadpool(
-        AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
-    )
-    # DB work done: free the connection before the auth-service call.
-    await release_connection(session)
+async def _with_names(summaries: list[CohortAttemptSummary], org_id: UUID) -> list[CohortAttemptSummary]:
     if not summaries:
         return summaries
-
-    auth_client = AuthClient(redis_client)
-    users: dict[str, UserSummary] = await auth_client.get_users_bulk(
-        [s.student_id for s in summaries],
-        org_id=current_user.org_id,
+    users: dict[str, UserSummary] = await AuthClient(redis_client).get_users_bulk(
+        [s.student_id for s in summaries], org_id=org_id,
     )
-
     enriched: list[CohortAttemptSummary] = []
     for s in summaries:
         user: UserSummary | None = users.get(str(s.student_id))
         name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
         enriched.append(s.model_copy(update={"student_name": name}))
     return enriched
+
+
+''' COHORT ATTEMPTS 📊 '''
+@router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
+async def get_cohort_attempts(
+    exam_id: UUID,
+    cohort_id: UUID,
+    session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number (with stats over all attempts); leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
+) -> AttemptPage | list[CohortAttemptSummary]:
+    if page is not None:
+        result: AttemptPage = await run_in_threadpool(
+            AttemptService.attempts_page, session, exam_id, cohort_id, current_user, page, page_size,
+        )
+        await release_connection(session)
+        result.items = await _with_names(result.items, current_user.org_id)
+        return result
+    summaries: list[CohortAttemptSummary] = await run_in_threadpool(
+        AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
+    )
+    # Done with the DB before waiting on the auth service.
+    await release_connection(session)
+    return await _with_names(summaries, current_user.org_id)
+
+
+''' INDIVIDUALLY ASSIGNED ATTEMPTS 📊 '''
+@router.get("/exams/{exam_id}/individual/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
+async def get_individual_attempts(
+    exam_id: UUID,
+    session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number (with stats over all attempts); leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
+) -> AttemptPage | list[CohortAttemptSummary]:
+    """Attempts by students assigned to the exam one by one (not through a cohort)."""
+    if page is not None:
+        result: AttemptPage = await run_in_threadpool(
+            AttemptService.attempts_page, session, exam_id, None, current_user, page, page_size,
+        )
+        await release_connection(session)
+        result.items = await _with_names(result.items, current_user.org_id)
+        return result
+    summaries: list[CohortAttemptSummary] = await run_in_threadpool(
+        AttemptService.get_cohort_attempts, session, exam_id, None, current_user,
+    )
+    await release_connection(session)
+    return await _with_names(summaries, current_user.org_id)
+
+
+''' DECIDE ON A LATE ANSWER (STAFF) ⏱️ '''
+@router.post("/late-answers/{late_id}/decision", response_model=AttemptDetailRead)
+def decide_late_answer(
+    late_id: UUID,
+    payload: LateAnswerDecision,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.RESULTS_MARK)),
+) -> AttemptDetailRead:
+    """Accept (replaces the saved answer and re-scores) or reject an answer that arrived after time ran out."""
+    return AttemptService.decide_late_answer(session, late_id, payload.accept, current_user)
 
 
 ''' ATTEMPT DETAIL (STAFF VIEW) 🔍 '''

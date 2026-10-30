@@ -191,7 +191,7 @@ def test_edu_hint_is_prepended_to_explanation(client, teacher_headers, subject):
 
 
 def test_edu_fill_blank_imports_as_short_answer(client, teacher_headers, subject):
-    """Fill-in-the-blank is kept for manual review, i.e. stored as short_answer."""
+    """Fill-in-the-blank becomes a short answer whose accepted answer is the expected text."""
     content = edu_file([
         edu_row(**{"Question Type": "F", "Question": "Sky colour blank", "Fill in the blanks": "blue"}),
     ])
@@ -202,6 +202,14 @@ def test_edu_fill_blank_imports_as_short_answer(client, teacher_headers, subject
 
     item = find_item(client, teacher_headers, subject["id"], "Sky colour blank")
     assert item["item_type"] == "short_answer"
+    assert item["correct_answers"] == ["blue"]       # the accepted answer: auto-marked
+
+
+def test_edu_subjective_imports_as_essay(client, teacher_headers, subject):
+    content = edu_file([edu_row(**{"Question Type": "S", "Question": "Explain gravity subjective"})])
+    assert upload(client, teacher_headers, subject["id"], "export.xlsx", content).json()["successful_rows"] == 1
+    item = find_item(client, teacher_headers, subject["id"], "Explain gravity subjective")
+    assert item["item_type"] == "essay" and item["correct_answers"] is None
 
 
 def test_edu_true_false_matches_native_true_false(client, teacher_headers, subject):
@@ -380,3 +388,21 @@ def test_edu_difficulty_codes_names_and_custom_levels(client, admin_headers, tea
     assert find_item(client, teacher_headers, subject["id"], "Edu name Hard")["difficulty"] == "hard"
     assert find_item(client, teacher_headers, subject["id"], "Edu custom")["difficulty"] == "olympiad"
     assert find_item(client, teacher_headers, subject["id"], "Edu blank")["difficulty"] == "medium"
+
+
+def test_native_written_questions_with_accepted_answers_and_marking_guide(client, teacher_headers, subject):
+    headers = ["question_text", "item_type", "correct_answers", "marks", "marking_guide", "word_limit"]
+    content = _workbook_bytes(headers, [
+        ["Capital of Nigeria bulk", "short_answer", "Abuja | FCT, Abuja | ", 1, "", ""],
+        ["Essay on democracy bulk", "essay", "", 5, "2 marks: definition. 3 marks: examples.", 250],
+        ["Bad limit bulk", "essay", "", 5, "", "lots"],
+    ])
+    data = upload(client, teacher_headers, subject["id"], "q.xlsx", content).json()
+    assert data["successful_rows"] == 2 and data["failed_rows"] == 1, data
+    assert "word_limit" in data["errors"][0]["error"]
+
+    short = find_item(client, teacher_headers, subject["id"], "Capital of Nigeria bulk")
+    assert short["correct_answers"] == ["Abuja", "FCT, Abuja"]       # | separates, commas kept
+    essay = find_item(client, teacher_headers, subject["id"], "Essay on democracy bulk")
+    assert essay["item_type"] == "essay" and essay["word_limit"] == 250
+    assert essay["marking_guide"] == "2 marks: definition. 3 marks: examples."

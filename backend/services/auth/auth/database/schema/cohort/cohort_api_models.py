@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Generic, TypeVar
+from pydantic import BaseModel, Field, model_validator
+from typing import Generic, Literal, TypeVar
 from uuid import UUID
 from datetime import datetime
 
@@ -37,7 +37,18 @@ class CohortRead(BaseModel):
 
 
 class GraduateCohortRequest(BaseModel):
-    reason: str | None = None       # optional note e.g. "End of 2024/2025 session"
+    """
+    Graduate every current student. The cohort then stays open for the next
+    set of students ("keep_open", the default) or is archived ("archive").
+    """
+    note: str | None = Field(default=None, max_length=300)   # e.g. "2024/2025 session"
+    reason: str | None = None       # older name for `note`
+    then: Literal["keep_open", "archive"] = "keep_open"
+
+
+class GraduateCohortResult(BaseModel):
+    cohort: "CohortRead"
+    graduated: int                  # students graduated by this call
 
 class AddMembersRequest(BaseModel):
     student_ids: list[UUID]
@@ -81,6 +92,10 @@ class CohortMemberRead(BaseModel):
     email: str | None = None
     access_code: str | None = None
     institution_id: str | None = None
+    # active | graduated | left, and when / why it ended (graduated or left)
+    status: str = "active"
+    ended_at: datetime | None = None
+    end_note: str | None = None
 
 
 
@@ -104,3 +119,39 @@ class MyCohortRead(BaseModel):
     name: str
     status: str
     student_count: int
+
+MemberAction = Literal["graduate", "move", "remove"]
+
+
+class MemberActionRequest(BaseModel):
+    """Graduate, move or remove chosen students. The cohort itself carries on."""
+    action: MemberAction
+    student_ids: list[UUID] = Field(min_length=1, max_length=5000)
+    target_cohort_id: UUID | None = None     # required for "move"
+    note: str | None = Field(default=None, max_length=300)   # e.g. "2024/2025 session"
+
+    @model_validator(mode="after")
+    def _target(self) -> "MemberActionRequest":
+        if self.action == "move" and self.target_cohort_id is None:
+            raise ValueError("Choose the cohort to move the students to.")
+        return self
+
+
+class MemberActionResult(BaseModel):
+    action: MemberAction
+    done: int                       # students graduated / moved / removed
+    skipped: list[SkippedMember]    # e.g. reason "not_an_active_member"
+    target_cohort_id: UUID | None = None
+    added_to_target: int = 0        # for "move": new members of the target (others were already in it)
+
+
+class StudentGraduation(BaseModel):
+    cohort_id: UUID
+    cohort_name: str
+    graduated_at: datetime | None
+
+
+class CohortDeletableRead(BaseModel):
+    """Whether a cohort can be deleted for good: only if it never had students or exams."""
+    deletable: bool
+    reason: str | None = None

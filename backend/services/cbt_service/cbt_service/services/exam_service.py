@@ -18,6 +18,10 @@ from cbt_service.database.models.exam import (
 from cbt_service.database.models.enums.exam_enum import ExamStatus, AssignmentStatus
 from cbt_service.database.models.enums.enums import UserRole
 from cbt_service.schemas.exam_schemas import (
+    AssignedCohortRead, ExamMaxAttemptsUpdate, ExamShowResultsUpdate, StudentUnfinishedExams, UnfinishedExam,
+)
+from cbt_service.database.models.enums.attempt_enum import AttemptStatus
+from cbt_service.schemas.exam_schemas import (
     ExamCreate, ExamDeleteResponse, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
     ExamItemAdd, AssignStudentsRequest, ApprovalAction, CurrentUser, MyAssignmentRead, ExamRead,
     ExamPhase, ExamPhaseCounts,
@@ -28,8 +32,9 @@ from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.difficulty_service import DifficultyScope
 from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
-from cbt_service.database.models.enums.item_subject_enums import ItemStatus
+from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
 from sqlalchemy import exists
+from sqlmodel.sql.expression import Select, SelectOfScalar
 
 
 def _log(
@@ -169,6 +174,7 @@ class ExamService:
     @staticmethod
     def create(session: Session, payload: ExamCreate, current_user: CurrentUser) -> ExamModel:
         ScopeService.validate_bank(session, payload.subject_id, payload.bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, payload.bank_id, current_user)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, payload.subject_id, payload.topic_ids, current_user.org_id
         )
@@ -383,6 +389,89 @@ class ExamService:
         return exam
 
 
+    # Exams whose attempts allowed can still change: approved, or live.
+    ATTEMPTS_CHANGEABLE_STATUSES: tuple[ExamStatus, ...] = (ExamStatus.APPROVED, ExamStatus.ACTIVE)
+
+    @staticmethod
+    def update_max_attempts(
+        session: Session, exam_id: UUID, payload: ExamMaxAttemptsUpdate, current_user: CurrentUser,
+    ) -> ExamModel:
+        """
+        After approval only the attempts allowed may change (drafts use the
+        normal edit). Lowering it never removes attempts already made; it only
+        stops new ones.
+        """
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_CHANGE_ATTEMPTS)
+        if exam.status not in ExamService.ATTEMPTS_CHANGEABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Change attempts with Edit exam while the exam is a draft or sent back."
+                    if exam.status in (ExamStatus.DRAFT, ExamStatus.REJECTED)
+                    else "Attempts can only be changed while the exam is approved or live."
+                ),
+            )
+        changed: bool = False
+        old: int = exam.max_attempts or 1
+        if payload.max_attempts is not None and payload.max_attempts != old:
+            exam.max_attempts = payload.max_attempts
+            _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
+                 {"field": "max_attempts", "from": old, "to": payload.max_attempts})
+            changed = True
+        old_show: bool = bool(exam.show_attempts_used)
+        if payload.show_attempts_used is not None and payload.show_attempts_used != old_show:
+            exam.show_attempts_used = payload.show_attempts_used
+            _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
+                 {"field": "show_attempts_used", "from": old_show, "to": payload.show_attempts_used})
+            changed = True
+        old_extra: int = exam.extra_time_seconds or 0
+        if payload.extra_time_seconds is not None and payload.extra_time_seconds != old_extra:
+            exam.extra_time_seconds = payload.extra_time_seconds
+            _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
+                 {"field": "extra_time_seconds", "from": old_extra, "to": payload.extra_time_seconds})
+            changed = True
+        if not changed:
+            return exam
+        exam.updated_at = datetime.now(timezone.utc)
+        session.add(exam)
+        session.commit()
+        session.refresh(exam)
+        return exam
+
+    # Results can be shown or hidden from approval on, including after the exam closes.
+    RESULTS_RELEASABLE_STATUSES: tuple[ExamStatus, ...] = (
+        ExamStatus.APPROVED, ExamStatus.ACTIVE, ExamStatus.CLOSED,
+    )
+
+    @staticmethod
+    def update_show_results(
+        session: Session, exam_id: UUID, payload: ExamShowResultsUpdate, current_user: CurrentUser,
+    ) -> ExamModel:
+        """Release results to candidates (or hide them again) after approval."""
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_RELEASE_RESULTS)
+        if exam.status not in ExamService.RESULTS_RELEASABLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Set this with Edit exam while the exam is a draft or sent back."
+                    if exam.status in (ExamStatus.DRAFT, ExamStatus.REJECTED)
+                    else "Results can only be shown or hidden once the exam is approved, live or closed."
+                ),
+            )
+        old: bool = bool(exam.show_result_immediately)
+        if payload.show_result_immediately == old:
+            return exam
+        exam.show_result_immediately = payload.show_result_immediately
+        exam.updated_at = datetime.now(timezone.utc)
+        session.add(exam)
+        _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
+             {"field": "show_result_immediately", "from": old, "to": payload.show_result_immediately})
+        session.commit()
+        session.refresh(exam)
+        return exam
+
     @staticmethod
     def update(
         session: Session, exam_id: UUID,
@@ -393,8 +482,20 @@ class ExamService:
 
         data: dict[str, Any] = payload.model_dump(exclude_unset=True)
         new_topic_ids: list[UUID] | None = data.pop("topic_ids", None)
+        if data.get("auto_mark_short_answers") is None:
+            data.pop("auto_mark_short_answers", None)
+        elif (
+            data["auto_mark_short_answers"] != exam.auto_mark_short_answers
+            and ExamStatus(exam.status) not in (ExamStatus.DRAFT, ExamStatus.REJECTED)
+        ):
+            # Students may already have answers marked one way.
+            raise HTTPException(
+                status_code=409,
+                detail="How short answers are marked can only be changed while the exam is a draft.",
+            )
         if "bank_id" in data and data["bank_id"] != exam.bank_id:
             ScopeService.validate_bank(session, exam.subject_id, data["bank_id"], current_user.org_id)
+            ScopeService.assert_bank_access(session, data["bank_id"], current_user)
         if "period_id" in data and data["period_id"] != exam.period_id:
             PeriodScope.validate(session, data["period_id"], current_user.org_id)
         if new_topic_ids is not None:
@@ -566,25 +667,31 @@ class ExamService:
         # and not archived. Ones already in the exam are skipped below, so they
         # aren't re-checked.
         new_ids: list[UUID] = [i for i in dict.fromkeys(payload.item_ids) if i not in existing_item_ids]
+        # The exam keeps its own copy of each question's marks (so editing the
+        # question later doesn't change an exam that has run).
+        item_marks: dict[UUID, tuple[float, float]] = {}
         if new_ids:
-            usable: set[UUID] = set(
-                session.exec(
-                    select(ItemModel.id).where(
-                        col(ItemModel.id).in_(new_ids),
-                        ItemModel.org_id == current_user.org_id,
-                        ItemModel.subject_id == exam.subject_id,
-                        ItemModel.status != ItemStatus.ARCHIVED,
-                    )
-                ).all()
-            )
+            # ...and only questions in banks the caller can use (or in no bank).
+            visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
+            for item_id, marks, negative_marks in session.exec(
+                select(ItemModel.id, ItemModel.marks, ItemModel.negative_marks).where(
+                    col(ItemModel.id).in_(new_ids),
+                    ItemModel.org_id == current_user.org_id,
+                    ItemModel.subject_id == exam.subject_id,
+                    ItemModel.status != ItemStatus.ARCHIVED,
+                    *([visible] if visible is not None else []),
+                )
+            ).all():
+                item_marks[item_id] = (float(marks), float(negative_marks or 0.0))
+            usable: set[UUID] = set(item_marks)
             invalid: list[str] = [str(i) for i in new_ids if i not in usable]
             if invalid:
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "message": (
-                            "Some questions can't be added: they aren't in this exam's subject "
-                            "or are archived."
+                            "Some questions can't be added: they aren't in this exam's subject, "
+                            "are archived, or are in a bank you haven't been given."
                         ),
                         "item_ids": invalid,
                     },
@@ -594,9 +701,11 @@ class ExamService:
         for item_id in dict.fromkeys(payload.item_ids):
             if item_id in existing_item_ids:
                 continue
+            marks, negative_marks = item_marks.get(item_id, (1.0, 0.0))
             exam_item = ExamItem(
                 exam_id=exam_id, section_id=payload.section_id, item_id=item_id,
                 org_id=current_user.org_id, order=next_order,
+                marks=marks, negative_marks=negative_marks,
             )
             session.add(exam_item)
             added.append(exam_item)
@@ -661,6 +770,7 @@ class ExamService:
         ExamService._assert_can_edit(session, exam, current_user)
         if payload.bank_id is not None:
             ScopeService.get_bank(session, exam.subject_id, payload.bank_id, current_user.org_id)
+            ScopeService.assert_bank_access(session, payload.bank_id, current_user)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, exam.subject_id, payload.topic_ids, current_user.org_id
         )
@@ -671,6 +781,9 @@ class ExamService:
             ItemModel.status == ItemStatus.ACTIVE,
             ~exists().where(ExamItem.exam_id == exam_id, ExamItem.item_id == ItemModel.id),
         ]
+        visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
+        if visible is not None:
+            conditions.append(visible)
         if payload.bank_id is not None:
             conditions.append(ItemModel.bank_id == payload.bank_id)
         if topic_ids:
@@ -714,6 +827,8 @@ class ExamService:
         topics: dict[UUID, list[UUID]] = ScopeService.topic_ids_by_exam(session, ids)
         names: dict[UUID, str | None] = subject_names or {}
         item_counts: dict[UUID, int] = {}
+        written: dict[UUID, int] = {}
+        short: dict[UUID, int] = {}
         assigned: dict[UUID, int] = {}
         submitted: dict[UUID, int] = {}
         if ids:
@@ -723,6 +838,15 @@ class ExamService:
                 .group_by(col(ExamItem.exam_id))
             ).all():
                 item_counts[exam_id] = int(n)
+            for exam_id, item_type, n in session.exec(
+                select(ExamItem.exam_id, ItemModel.item_type, func.count())
+                .join(ItemModel, col(ItemModel.id) == col(ExamItem.item_id))
+                .where(col(ExamItem.exam_id).in_(ids), col(ItemModel.item_type).in_([ItemType.SHORT_ANSWER, ItemType.ESSAY]))
+                .group_by(col(ExamItem.exam_id), col(ItemModel.item_type))
+            ).all():
+                written[exam_id] = written.get(exam_id, 0) + int(n)
+                if str(getattr(item_type, "value", item_type)).lower() == "short_answer":
+                    short[exam_id] = short.get(exam_id, 0) + int(n)
             for exam_id, n_all, n_done in session.exec(
                 select(
                     ExamAssignment.exam_id,
@@ -737,6 +861,8 @@ class ExamService:
                 **e.model_dump(),
                 "topic_ids": topics.get(e.id, []),
                 "item_count": item_counts.get(e.id, 0),
+                "written_count": written.get(e.id, 0),
+                "short_answer_count": short.get(e.id, 0),
                 "assigned_count": assigned.get(e.id, 0),
                 "submitted_count": submitted.get(e.id, 0),
                 **({"subject_name": names[e.id]} if e.id in names else {}),
@@ -915,11 +1041,17 @@ class ExamService:
 
     @staticmethod
     def get_assignments(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamAssignment]:
+        return list(session.exec(ExamService.assignments_stmt(session, exam_id, current_user)).all())
+
+    @staticmethod
+    def assignments_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "SelectOfScalar[ExamAssignment]":
+        """The exam's assignments, oldest first (checks access)."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
-        return session.exec(
+        return (
             select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
-        ).all()
+            .order_by(col(ExamAssignment.created_at), col(ExamAssignment.id))
+        )
 
     @staticmethod
     def get_audit_log(
@@ -931,6 +1063,15 @@ class ExamService:
                 ExamAuditLog.exam_id == exam_id
             ).order_by(ExamAuditLog.created_at)
         ).all()
+
+    @staticmethod
+    def audit_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "SelectOfScalar[ExamAuditLog]":
+        """The exam's activity, newest first (for paging)."""
+        ExamService._get_exam(session, exam_id, current_user.org_id)
+        return (
+            select(ExamAuditLog).where(ExamAuditLog.exam_id == exam_id)
+            .order_by(col(ExamAuditLog.created_at).desc(), col(ExamAuditLog.id))
+        )
     
 
 
@@ -939,7 +1080,12 @@ class ExamService:
         session: Session, exam_id: UUID, cohort_id: UUID,
         scheduled_at: datetime | None, current_user: CurrentUser,
         student_ids: list[UUID],
-    ) -> list[ExamAssignment]:
+    ) -> tuple[list[ExamAssignment], int]:
+        """
+        Assign the cohort's students. Students who already have the exam are
+        skipped, so assigning a cohort again only adds members who joined since.
+        Returns (the members' assignments, how many were newly created).
+        """
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         if exam.status not in (ExamStatus.APPROVED, ExamStatus.ACTIVE):
             raise HTTPException(status_code=400, detail="Students can only be assigned to approved or active exams.")
@@ -964,7 +1110,65 @@ class ExamService:
                 exam_id, cohort_id,
             )
 
-        return ExamService._load_assignments(session, exam_id, unique_ids)
+        return ExamService._load_assignments(session, exam_id, unique_ids), created
+
+    @staticmethod
+    def unassigned_of(session: Session, exam_id: UUID, student_ids: list[UUID]) -> list[UUID]:
+        """Of these students, the ones who don't have the exam yet (in the given order)."""
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        have: set[UUID] = set()
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
+            have.update(session.exec(
+                select(ExamAssignment.student_id).where(
+                    ExamAssignment.exam_id == exam_id, col(ExamAssignment.student_id).in_(chunk),
+                )
+            ).all())
+        return [s for s in unique_ids if s not in have]
+
+    @staticmethod
+    def unfinished_for_students(
+        session: Session, student_ids: list[UUID], current_user: CurrentUser,
+    ) -> list[StudentUnfinishedExams]:
+        """
+        Exams these students still have to sit (not started, or started and
+        not submitted) while the exam is open. Used to warn before graduating
+        or moving students.
+        """
+        now: datetime = datetime.now(timezone.utc)
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        by_student: dict[UUID, list[UnfinishedExam]] = {}
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
+            rows = session.exec(
+                select(ExamAssignment.student_id, ExamModel.id, ExamModel.title, ExamAssignment.status)
+                .join(ExamModel, ExamModel.id == ExamAssignment.exam_id)
+                .where(
+                    ExamAssignment.org_id == current_user.org_id,
+                    col(ExamAssignment.student_id).in_(chunk),
+                    col(ExamAssignment.status).in_([AssignmentStatus.ASSIGNED, AssignmentStatus.STARTED]),
+                    col(ExamModel.status).in_([ExamStatus.APPROVED, ExamStatus.ACTIVE]),
+                    or_(col(ExamModel.end_time).is_(None), col(ExamModel.end_time) > now),
+                )
+                .order_by(col(ExamModel.title))
+            ).all()
+            for sid, eid, title, status in rows:
+                by_student.setdefault(sid, []).append(
+                    UnfinishedExam(exam_id=eid, title=title, status=getattr(status, "value", str(status)))
+                )
+        return [StudentUnfinishedExams(student_id=s, exams=by_student[s]) for s in unique_ids if s in by_student]
+
+    @staticmethod
+    def assigned_cohorts(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[AssignedCohortRead]:
+        """Cohorts assigned to the exam, with how many students each brought."""
+        exam = ExamService._get_exam(session, exam_id, current_user.org_id)
+        ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
+        rows = session.exec(
+            select(ExamAssignment.cohort_id, func.count())
+            .where(ExamAssignment.exam_id == exam_id, col(ExamAssignment.cohort_id).is_not(None))
+            .group_by(col(ExamAssignment.cohort_id))
+        ).all()
+        return [AssignedCohortRead(cohort_id=cid, students=int(n)) for cid, n in rows if cid is not None]
 
 
 
@@ -1040,6 +1244,23 @@ class ExamService:
 
         now = datetime.now(timezone.utc)
 
+        # The student's attempts on these exams, in one query.
+        attempts_by_exam: dict[UUID, list[AttemptModel]] = {}
+        exam_ids: list[UUID] = list({exam.id for _, exam in assignments})
+        if exam_ids:
+            for attempt in session.exec(
+                select(AttemptModel).where(
+                    AttemptModel.student_id == current_user.id,
+                    col(AttemptModel.exam_id).in_(exam_ids),
+                )
+            ).all():
+                attempts_by_exam.setdefault(attempt.exam_id, []).append(attempt)
+        closed: tuple[AttemptStatus, ...] = (AttemptStatus.SUBMITTED, AttemptStatus.SCORED, AttemptStatus.TERMINATED)
+
+        def _when(a: AttemptModel) -> datetime:
+            when = a.submitted_at or a.started_at
+            return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
         results = []
 
         for assignment, exam in assignments:
@@ -1059,14 +1280,42 @@ class ExamService:
                 (effective_end is None or now <= effective_end)
             )
 
+            mine: list[AttemptModel] = attempts_by_exam.get(exam.id, [])
+            resumable: list[AttemptModel] = [
+                a for a in mine if a.status in (AttemptStatus.STARTED, AttemptStatus.RESET)
+            ]
+            finished: list[AttemptModel] = [a for a in mine if a.status in closed]
+            attempts_used: int = sum(1 for a in mine if a.status != AttemptStatus.RESET)
+            max_attempts: int = exam.max_attempts or 1
+            in_progress: AttemptModel | None = (
+                # A started attempt first; else one staff reset for a fresh start.
+                next((a for a in resumable if a.status == AttemptStatus.STARTED), None)
+                or (max(resumable, key=_when) if resumable else None)
+            )
+            latest: AttemptModel | None = max(finished, key=_when) if finished else None
+
             results.append(
                 MyAssignmentRead(
+                    # Counts only when the exam shows them to candidates.
+                    max_attempts=max_attempts if exam.show_attempts_used else None,
+                    attempts_used=attempts_used if exam.show_attempts_used else None,
+                    show_attempts_used=bool(exam.show_attempts_used),
+                    in_progress_attempt_id=in_progress.id if in_progress else None,
+                    restart=in_progress is not None and in_progress.status == AttemptStatus.RESET,
+                    latest_attempt_id=latest.id if latest else None,
+                    can_retake=(
+                        latest is not None and in_progress is None
+                        and attempts_used < max_attempts and can_attempt
+                    ),
+                    show_result=bool(exam.show_result_immediately),
+                    allow_review=bool(exam.allow_review),
                     assignment_id=assignment.id,
                     exam_id=exam.id,
                     exam_title=exam.title,
                     status=assignment.status,
                     scheduled_at=assignment.scheduled_at,
                     duration_minutes=exam.duration_minutes,
+                    extra_time_seconds=exam.extra_time_seconds or 0,
                     start_time=exam.start_time,
                     end_time=exam.end_time,
 
@@ -1074,7 +1323,7 @@ class ExamService:
                     effective_end=effective_end,
                     can_attempt=can_attempt,
 
-                    has_attempted=assignment.status == AssignmentStatus.ASSIGNED,
+                    has_attempted=bool(mine),
                 )
             )
 
@@ -1166,16 +1415,22 @@ class ExamService:
     def get_items_with_content(
         session: Session, exam_id: UUID, current_user: CurrentUser
     ) -> list[tuple[ExamItem, ItemModel]]:
+        return list(session.exec(ExamService.items_with_content_stmt(session, exam_id, current_user)).all())
+
+    @staticmethod
+    def items_with_content_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "Select[tuple[ExamItem, ItemModel]]":
+        """The exam's questions with their content, in exam order (checks access)."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user)
-
-        rows = session.exec(
+        # Section by section (in section order, unsectioned last), then question order,
+        # so a page reads the same as the exam.
+        return (
             select(ExamItem, ItemModel)
             .join(ItemModel, ItemModel.id == ExamItem.item_id)
+            .outerjoin(ExamSection, col(ExamSection.id) == col(ExamItem.section_id))
             .where(
                 ExamItem.exam_id == exam_id,
                 ItemModel.org_id == current_user.org_id,
             )
-            .order_by(ExamItem.order)
-        ).all()
-        return list(rows)
+            .order_by(col(ExamSection.order).asc().nulls_last(), ExamItem.order, col(ExamItem.id))
+        )

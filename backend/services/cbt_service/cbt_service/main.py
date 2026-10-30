@@ -14,7 +14,9 @@ from cbt_service.core.settings import settings
 from cbt_service.core.redis.redis_client import redis_client
 
 from cbt_service.database.database import database_engine as engine
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods, difficulty_levels
+from cbt_service.core.migration_check import check_migrations
+from starlette.concurrency import run_in_threadpool
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods, difficulty_levels, marking, network
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Run migrations before accepting requests
     # run_migrations()
 
+    # Say plainly in the log if the database is behind the code's migrations.
+    await run_in_threadpool(check_migrations, engine)
     get_http_client()  # create the shared httpx client
 
     try:
@@ -107,6 +111,7 @@ app.include_router(items.router, prefix="/api/v1")
 app.include_router(banks_topics.router, prefix="/api/v1")
 app.include_router(periods.router, prefix="/api/v1")
 app.include_router(difficulty_levels.router, prefix="/api/v1")
+app.include_router(marking.router, prefix="/api/v1")
 
 
 # Exam AND ATTEMPT SERVICES
@@ -119,6 +124,9 @@ app.include_router(internal.router)
 # Violations
 app.include_router(violations.router, prefix="/api/v1")
 app.include_router(exam_violations.router, prefix="/api/v1")
+
+# Connection check before an exam
+app.include_router(network.router, prefix="/api/v1")
 
 # Uploaded media (question / option images)
 app.include_router(uploads.router, prefix="/api/v1")

@@ -51,6 +51,24 @@ class QuestionBank(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
+class BankAssignment(SQLModel, table=True):
+    """
+    Staff who may use a bank. People whose question access is limited to their
+    subjects ("assigned" reach) only see the banks they're given here, plus
+    the subject's questions that aren't in any bank. Organisation-wide staff
+    (admins) see every bank.
+    """
+    __tablename__ = "bank_assignments"
+    __table_args__ = (UniqueConstraint("bank_id", "user_id", name="uq_bank_assignments_bank_user"),)
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    org_id: UUID = Field(index=True, nullable=False)
+    bank_id: UUID = Field(foreign_key="question_banks.id", index=True, nullable=False)
+    user_id: UUID = Field(index=True, nullable=False)
+    assigned_by: UUID = Field(nullable=False)
+    created_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
 class Topic(SQLModel, table=True):
     __tablename__ = "topics"
 

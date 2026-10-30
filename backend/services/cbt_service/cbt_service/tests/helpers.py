@@ -41,3 +41,19 @@ def set_max_violations(exam_id: UUID, max_violations: int | None) -> None:
         exam.max_violations = max_violations
         session.add(exam)
         session.commit()
+
+def ensure_on_exam(attempt_id: str | UUID, item_id: str | UUID, marks: float = 1.0) -> None:
+    """Answers are only accepted for questions on the attempt's exam: put this one on it."""
+    from cbt_service.database.models.attempt import AttemptModel
+    from cbt_service.database.models.exam import ExamItem
+
+    with Session(engine) as session:
+        attempt = session.get(AttemptModel, UUID(str(attempt_id)))
+        assert attempt is not None, "attempt not found"
+        iid = UUID(str(item_id))
+        exists = session.exec(
+            select(ExamItem).where(ExamItem.exam_id == attempt.exam_id, ExamItem.item_id == iid)
+        ).first()
+        if exists is None:
+            session.add(ExamItem(exam_id=attempt.exam_id, item_id=iid, org_id=attempt.org_id, marks=marks))
+            session.commit()

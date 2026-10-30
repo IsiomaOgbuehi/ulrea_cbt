@@ -430,6 +430,7 @@ def test_status_auto_submits_expired_attempt(
         ).first()
         assert db_attempt is not None
         db_attempt.started_at = datetime.now(timezone.utc) - timedelta(days=1)
+        db_attempt.clock_started_at = db_attempt.started_at   # questions were sent then
         session.add(db_attempt)
         session.commit()
 

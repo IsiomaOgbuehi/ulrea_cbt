@@ -57,6 +57,25 @@ class BankRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     item_count: int = 0          # active questions in this bank
+    # Staff given this bank (people limited to their subjects only see banks
+    # they're given, plus questions in no bank).
+    staff_ids: list[UUID] = Field(default_factory=list)
+
+
+class StaffBanksSet(BaseModel):
+    """All the banks in one subject a staff member may use (replaces their list there)."""
+    bank_ids: list[UUID] = Field(default_factory=list, max_length=500)
+
+
+class StaffBanksRead(BaseModel):
+    subject_id: UUID
+    user_id: UUID
+    bank_ids: list[UUID]
+
+
+class BankStaffSet(BaseModel):
+    """The full list of staff who may use a bank (replaces the current list)."""
+    user_ids: list[UUID] = Field(default_factory=list, max_length=500)
 
 
 # ----------------------------------------------------------------- topics

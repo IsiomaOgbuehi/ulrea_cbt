@@ -3,6 +3,8 @@ from sqlmodel import SQLModel
 from auth.api.v1.routes import auth, users, internal, cohorts, student, exam_subscriptions, platform_subscriptions, roles
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import database_engine
+from auth.core.migration_check import check_migrations
+from starlette.concurrency import run_in_threadpool
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from redis.asyncio import Redis
@@ -33,6 +35,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Run migrations before accepting requests
     # run_migrations()
     # print(PasswordHasher.create("red"))
+    # Say plainly in the log if the database is behind the code's migrations.
+    await run_in_threadpool(check_migrations, database_engine)
 
     # Startup
     try:
