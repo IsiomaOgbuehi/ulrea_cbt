@@ -69,3 +69,37 @@ def test_preview_names_only_members_without_the_exam(
     assert r["new_count"] == 1 and r["new_members"] == []
     # Previewing changes nothing.
     assert client.get(f"/api/v1/exams/{exam['id']}/assigned-cohorts", headers=admin_headers).json()[0]["students"] == 2
+
+
+def test_unfinished_exams_for_students(
+    client: TestClient, teacher_headers: H, admin_headers: H, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exam = create_approved_exam(client, teacher_headers, admin_headers)
+    busy, free = uuid4(), uuid4()
+    set_members(monkeypatch, [busy])
+    client.post(f"/api/v1/exams/{exam['id']}/assign_cohort", json={"cohort_id": str(uuid4())}, headers=admin_headers)
+    r = client.post("/api/v1/exams/unfinished-for-students",
+                    json={"student_ids": [str(busy), str(free)]}, headers=admin_headers)
+    assert r.status_code == 200, r.json()
+    assert r.json() == [{"student_id": str(busy), "exams": [
+        {"exam_id": exam["id"], "title": exam["title"], "status": "assigned"}]}]
+    # Teachers don't manage cohorts, so they can't ask.
+    assert client.post("/api/v1/exams/unfinished-for-students",
+                       json={"student_ids": [str(busy)]}, headers=teacher_headers).status_code == 403
+
+
+def test_internal_cohort_exam_assignment_count(
+    client: TestClient, teacher_headers: H, admin_headers: H, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cbt_service.core.settings import settings
+    from .conftest import ORG_ID
+    exam = create_approved_exam(client, teacher_headers, admin_headers)
+    cohort, unused = str(uuid4()), str(uuid4())
+    set_members(monkeypatch, [uuid4(), uuid4()])
+    client.post(f"/api/v1/exams/{exam['id']}/assign_cohort", json={"cohort_id": cohort}, headers=admin_headers)
+    monkeypatch.setattr(settings, "INTERNAL_SECRET", "test-internal")
+    h = {"X-Internal-Secret": "test-internal"}
+    assert client.get(f"/internal/cohorts/{cohort}/exam-assignment-count?org_id={ORG_ID}", headers=h).json() == 2
+    assert client.get(f"/internal/cohorts/{unused}/exam-assignment-count?org_id={ORG_ID}", headers=h).json() == 0
+    assert client.get(f"/internal/cohorts/{cohort}/exam-assignment-count?org_id={ORG_ID}",
+                      headers={"X-Internal-Secret": "wrong"}).status_code == 403

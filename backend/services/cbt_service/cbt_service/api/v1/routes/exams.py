@@ -11,7 +11,7 @@ from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
 from cbt_service.schemas.exam_schemas import ExamMaxAttemptsUpdate, ExamShowResultsUpdate
 from cbt_service.schemas.exam_schemas import (
-    AssignCohortRequest, AssignedCohortRead, CohortAssignPreview, CohortAssignResult, CohortNewMember, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
+    AssignCohortRequest, AssignedCohortRead, StudentUnfinishedExams, UnfinishedExamsRequest, CohortAssignPreview, CohortAssignResult, CohortNewMember, ExamCreate, ExamDeleteResponse, ExamUpdate, ExamRead,
     ExamSectionCreate, ExamSectionRead,
     ExamItemAdd, ExamItemRead,
     ApprovalAction, AssignStudentsRequest,
@@ -501,6 +501,20 @@ async def preview_assign_cohort(
         cohort_id=cohort_id, members=len(members), already_assigned=len(members) - len(new_ids),
         new_count=len(new_ids), new_members=named,
     )
+
+
+''' UNFINISHED EXAMS FOR STUDENTS ⏳ '''
+@router.post("/unfinished-for-students", response_model=list[StudentUnfinishedExams])
+def unfinished_for_students(
+    payload: UnfinishedExamsRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> list[StudentUnfinishedExams]:
+    """
+    Open exams the given students haven't finished (only students who have
+    any are listed). Used to warn before graduating or moving students.
+    """
+    return ExamService.unfinished_for_students(session, payload.student_ids, current_user)
 
 
 ''' COHORTS ASSIGNED TO EXAM 🎓 '''

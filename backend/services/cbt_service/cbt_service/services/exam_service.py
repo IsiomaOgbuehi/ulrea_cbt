@@ -17,7 +17,9 @@ from cbt_service.database.models.exam import (
 )
 from cbt_service.database.models.enums.exam_enum import ExamStatus, AssignmentStatus
 from cbt_service.database.models.enums.enums import UserRole
-from cbt_service.schemas.exam_schemas import AssignedCohortRead, ExamMaxAttemptsUpdate, ExamShowResultsUpdate
+from cbt_service.schemas.exam_schemas import (
+    AssignedCohortRead, ExamMaxAttemptsUpdate, ExamShowResultsUpdate, StudentUnfinishedExams, UnfinishedExam,
+)
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 from cbt_service.schemas.exam_schemas import (
     ExamCreate, ExamDeleteResponse, ExamItemInternalRead, ExamSectionInternalRead, ExamUpdate, ExamSectionCreate,
@@ -1123,6 +1125,38 @@ class ExamService:
                 )
             ).all())
         return [s for s in unique_ids if s not in have]
+
+    @staticmethod
+    def unfinished_for_students(
+        session: Session, student_ids: list[UUID], current_user: CurrentUser,
+    ) -> list[StudentUnfinishedExams]:
+        """
+        Exams these students still have to sit (not started, or started and
+        not submitted) while the exam is open. Used to warn before graduating
+        or moving students.
+        """
+        now: datetime = datetime.now(timezone.utc)
+        unique_ids: list[UUID] = list(dict.fromkeys(student_ids))
+        by_student: dict[UUID, list[UnfinishedExam]] = {}
+        for start in range(0, len(unique_ids), _ASSIGN_CHUNK_SIZE):
+            chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
+            rows = session.exec(
+                select(ExamAssignment.student_id, ExamModel.id, ExamModel.title, ExamAssignment.status)
+                .join(ExamModel, ExamModel.id == ExamAssignment.exam_id)
+                .where(
+                    ExamAssignment.org_id == current_user.org_id,
+                    col(ExamAssignment.student_id).in_(chunk),
+                    col(ExamAssignment.status).in_([AssignmentStatus.ASSIGNED, AssignmentStatus.STARTED]),
+                    col(ExamModel.status).in_([ExamStatus.APPROVED, ExamStatus.ACTIVE]),
+                    or_(col(ExamModel.end_time).is_(None), col(ExamModel.end_time) > now),
+                )
+                .order_by(col(ExamModel.title))
+            ).all()
+            for sid, eid, title, status in rows:
+                by_student.setdefault(sid, []).append(
+                    UnfinishedExam(exam_id=eid, title=title, status=getattr(status, "value", str(status)))
+                )
+        return [StudentUnfinishedExams(student_id=s, exams=by_student[s]) for s in unique_ids if s in by_student]
 
     @staticmethod
     def assigned_cohorts(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[AssignedCohortRead]:

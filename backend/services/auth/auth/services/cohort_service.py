@@ -5,13 +5,15 @@ from sqlmodel import Session, select, func, or_, col
 from sqlalchemy.exc import IntegrityError
 
 from auth.database.schema.cohort.cohort_db import CohortModel, CohortMember, CohortStatus, TeacherCohortAssignment
+from auth.database.schema.cohort.enum import MemberStatus
 from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.core.permissions import P
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
-    CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse, SkippedMember
+    CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse, SkippedMember,
+    MemberActionRequest, MemberActionResult, StudentGraduation, GraduateCohortResult,
 )
 from auth.services.user.user_context import UserContext
 
@@ -56,7 +58,8 @@ class CohortService:
     def _member_count(session: Session, cohort_id: UUID) -> int:
         return session.exec(
             select(func.count(CohortMember.id)).where(
-                CohortMember.cohort_id == cohort_id
+                CohortMember.cohort_id == cohort_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
             )
         ).one()
 
@@ -74,7 +77,7 @@ class CohortService:
             return {}
         rows = session.exec(
             select(CohortMember.cohort_id, func.count(CohortMember.id))
-            .where(col(CohortMember.cohort_id).in_(cohort_ids))
+            .where(col(CohortMember.cohort_id).in_(cohort_ids), CohortMember.status == MemberStatus.ACTIVE.value)
             .group_by(CohortMember.cohort_id)
         ).all()
         return {cid: n for cid, n in rows}
@@ -262,32 +265,203 @@ class CohortService:
     # --------------------------------------------------------
 
     @staticmethod
-    def graduate(
-        session: Session,
-        cohort_id: UUID,
-        payload: GraduateCohortRequest,
-        actor: UserModel,
-        org_id: UUID,           # ← explicit, was actor.org_id
-    ) -> CohortRead:
-        cohort = CohortService._get_cohort(session, cohort_id, org_id)
+    def _end(member: CohortMember, status: MemberStatus, actor_id: UUID, note: str | None) -> None:
+        """Close a membership (graduated / left), keeping the row as history. Caller commits."""
+        member.status = status.value
+        member.ended_at = datetime.now(timezone.utc)
+        member.ended_by = actor_id
+        member.end_note = (note or "").strip() or None
 
-        if cohort.status == CohortStatus.GRADUATED:
-            raise HTTPException(status_code=400, detail="Cohort already graduated.")
+    @staticmethod
+    def member_ids(
+        session: Session, cohort_id: UUID, org_id: UUID,
+        status: MemberStatus | None = MemberStatus.ACTIVE, search: str | None = None,
+    ) -> list[UUID]:
+        """Every matching member's student id (for "select all" across pages)."""
+        CohortService._get_cohort(session, cohort_id, org_id)
+        q = (
+            select(CohortMember.student_id)
+            .join(UserModel, UserModel.id == CohortMember.student_id)
+            .where(CohortMember.cohort_id == cohort_id)
+        )
+        if status is not None:
+            q = q.where(CohortMember.status == status.value)
+        if search:
+            term = f"%{search.strip()}%"
+            q = q.where(or_(
+                UserModel.firstname.ilike(term), UserModel.lastname.ilike(term), UserModel.email.ilike(term),
+            ))
+        return list(dict.fromkeys(session.exec(q).all()))
 
+    @staticmethod
+    def member_action(
+        session: Session, cohort_id: UUID, payload: MemberActionRequest, actor: UserModel, org_id: UUID,
+    ) -> MemberActionResult:
+        """
+        Graduate, move or remove chosen students. Only active members are
+        affected; anyone else is listed in `skipped`. The cohort stays open.
+        """
+        cohort: CohortModel = CohortService._get_cohort(session, cohort_id, org_id)
         CohortService._assert_active(cohort)
 
-        cohort.status = CohortStatus.GRADUATED
-        cohort.graduated_at = datetime.now(timezone.utc)
-        cohort.graduated_by = actor.id
-        if payload.reason:
-            cohort.description = (
-                f"{cohort.description or ''} | Graduated: {payload.reason}".strip(" |")
-            )
+        target: CohortModel | None = None
+        if payload.action == "move":
+            assert payload.target_cohort_id is not None   # checked by the request model
+            if payload.target_cohort_id == cohort_id:
+                raise HTTPException(status_code=400, detail="Choose a different cohort to move them to.")
+            target = CohortService._get_cohort(session, payload.target_cohort_id, org_id)
+            CohortService._assert_active(target)
+
+        wanted: list[UUID] = list(dict.fromkeys(payload.student_ids))
+        members: dict[UUID, CohortMember] = {
+            m.student_id: m
+            for m in session.exec(
+                select(CohortMember).where(
+                    CohortMember.cohort_id == cohort_id,
+                    CohortMember.org_id == org_id,
+                    CohortMember.status == MemberStatus.ACTIVE.value,
+                    col(CohortMember.student_id).in_(wanted),
+                )
+            ).all()
+        }
+        skipped: list[SkippedMember] = [
+            SkippedMember(student_id=s, reason="not_an_active_member") for s in wanted if s not in members
+        ]
+
+        if payload.action == "graduate":
+            status, note = MemberStatus.GRADUATED, payload.note
+        elif payload.action == "move":
+            assert target is not None
+            status = MemberStatus.LEFT
+            note = f"Moved to {target.name}" + (f" ({payload.note.strip()})" if payload.note and payload.note.strip() else "")
+        else:
+            status, note = MemberStatus.LEFT, payload.note
+
+        for member in members.values():
+            CohortService._end(member, status, actor.id, note)
+            session.add(member)
+
+        added: int = 0
+        if target is not None and members:
+            already: set[UUID] = set(session.exec(
+                select(CohortMember.student_id).where(
+                    CohortMember.cohort_id == target.id,
+                    CohortMember.status == MemberStatus.ACTIVE.value,
+                    col(CohortMember.student_id).in_(list(members)),
+                )
+            ).all())
+            for sid in members:
+                if sid not in already:
+                    session.add(CohortMember(cohort_id=target.id, student_id=sid, org_id=org_id, added_by=actor.id))
+                    added += 1
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            raise HTTPException(status_code=409, detail="These students changed while you were working. Please try again.")
+
+        return MemberActionResult(
+            action=payload.action, done=len(members), skipped=skipped,
+            target_cohort_id=target.id if target else None, added_to_target=added,
+        )
+
+    @staticmethod
+    def local_deletion_blocker(session: Session, cohort_id: UUID, org_id: UUID) -> str | None:
+        """Why the cohort can't be deleted, from this service's data (None = nothing here)."""
+        CohortService._get_cohort(session, cohort_id, org_id)
+        had_students: bool = session.exec(
+            select(func.count(CohortMember.id)).where(CohortMember.cohort_id == cohort_id)
+        ).one() > 0
+        if had_students:
+            return "It has had students. Archive it instead to keep their history."
+        return None
+
+    @staticmethod
+    def delete_permanently(session: Session, cohort_id: UUID, org_id: UUID) -> None:
+        """Delete a cohort that never had students or exams (caller checks exams first)."""
+        cohort: CohortModel = CohortService._get_cohort(session, cohort_id, org_id)
+        blocker: str | None = CohortService.local_deletion_blocker(session, cohort_id, org_id)
+        if blocker:
+            raise HTTPException(status_code=409, detail=f"This cohort can't be deleted. {blocker}")
+        for assignment in session.exec(
+            select(TeacherCohortAssignment).where(TeacherCohortAssignment.cohort_id == cohort_id)
+        ).all():
+            session.delete(assignment)
+        session.delete(cohort)
+        session.commit()
+
+    @staticmethod
+    def reopen(session: Session, cohort_id: UUID, org_id: UUID) -> CohortRead:
+        """Reopen an archived (or older-style closed) cohort so it can take students again."""
+        cohort: CohortModel = CohortService._get_cohort(session, cohort_id, org_id)
+        if cohort.status not in (CohortStatus.GRADUATED, CohortStatus.ARCHIVED):
+            raise HTTPException(status_code=400, detail="This cohort is already open.")
+        cohort.status = CohortStatus.ACTIVE
+        cohort.graduated_at = None
+        cohort.graduated_by = None
         cohort.updated_at = datetime.now(timezone.utc)
         session.add(cohort)
         session.commit()
         session.refresh(cohort)
         return CohortService._to_read(cohort, session)
+
+    @staticmethod
+    def graduations_for(session: Session, student_ids: list[UUID], org_id: UUID) -> dict[UUID, list[StudentGraduation]]:
+        """Cohorts each student has graduated from (newest first)."""
+        out: dict[UUID, list[StudentGraduation]] = {}
+        if not student_ids:
+            return out
+        rows = session.exec(
+            select(CohortMember.student_id, CohortModel.id, CohortModel.name, CohortMember.ended_at)
+            .join(CohortModel, CohortModel.id == CohortMember.cohort_id)
+            .where(
+                col(CohortMember.student_id).in_(student_ids),
+                CohortMember.org_id == org_id,
+                CohortMember.status == MemberStatus.GRADUATED.value,
+            )
+            .order_by(col(CohortMember.ended_at).desc())
+        ).all()
+        for sid, cid, name, at in rows:
+            out.setdefault(sid, []).append(StudentGraduation(cohort_id=cid, cohort_name=name, graduated_at=at))
+        return out
+
+    @staticmethod
+    def graduate(
+        session: Session,
+        cohort_id: UUID,
+        payload: GraduateCohortRequest,
+        actor: UserModel,
+        org_id: UUID,
+    ) -> GraduateCohortResult:
+        """
+        Graduate every current student (accounts stay active), then keep the
+        cohort open for new students or archive it.
+        """
+        cohort = CohortService._get_cohort(session, cohort_id, org_id)
+        CohortService._assert_active(cohort)
+
+        note: str | None = payload.note if payload.note is not None else payload.reason
+        members: list[CohortMember] = list(session.exec(
+            select(CohortMember).where(
+                CohortMember.cohort_id == cohort_id,
+                CohortMember.org_id == org_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
+            )
+        ).all())
+        for member in members:
+            CohortService._end(member, MemberStatus.GRADUATED, actor.id, note)
+            session.add(member)
+
+        now: datetime = datetime.now(timezone.utc)
+        cohort.graduated_at = now           # last time this cohort graduated a set
+        cohort.graduated_by = actor.id
+        if payload.then == "archive":
+            cohort.status = CohortStatus.ARCHIVED
+        cohort.updated_at = now
+        session.add(cohort)
+        session.commit()
+        session.refresh(cohort)
+        return GraduateCohortResult(cohort=CohortService._to_read(cohort, session), graduated=len(members))
 
     # --------------------------------------------------------
     # MEMBERSHIP
@@ -319,12 +493,13 @@ class CohortService:
             ).all()
         }
 
-        # Query 2: students already in this cohort
+        # Query 2: students already in this cohort (graduated / left ones can rejoin)
         existing_ids: set[UUID] = set(
             session.exec(
                 select(CohortMember.student_id).where(
                     CohortMember.cohort_id == cohort_id,
                     col(CohortMember.student_id).in_(unique_ids),
+                    CohortMember.status == MemberStatus.ACTIVE.value,
                 )
             ).all()
         )
@@ -458,13 +633,16 @@ class CohortService:
                 CohortMember.cohort_id == cohort_id,
                 CohortMember.student_id == student_id,
                 CohortMember.org_id == org_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
             )
         ).first()
 
         if not member:
             raise HTTPException(status_code=404, detail="Student not in this cohort.")
 
-        session.delete(member)
+        # Kept as history ("left"), not deleted.
+        CohortService._end(member, MemberStatus.LEFT, actor.id, None)
+        session.add(member)
         session.commit()
 
     @staticmethod
@@ -475,14 +653,21 @@ class CohortService:
         search: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        status: MemberStatus | None = MemberStatus.ACTIVE,
     ) -> PaginatedResponse[CohortMemberRead]:
         CohortService._get_cohort(session, cohort_id, org_id)
 
         base_query = (
-            select(CohortMember, UserModel)
+            select(CohortMember, UserModel, OrgMembership)
             .join(UserModel, UserModel.id == CohortMember.student_id)
+            .outerjoin(
+                OrgMembership,
+                (OrgMembership.user_id == CohortMember.student_id) & (OrgMembership.org_id == org_id),
+            )
             .where(CohortMember.cohort_id == cohort_id)
         )
+        if status is not None:
+            base_query = base_query.where(CohortMember.status == status.value)
 
         if search:
             term = f"%{search.strip()}%"
@@ -500,7 +685,7 @@ class CohortService:
 
         results = session.exec(
             base_query
-            .order_by(UserModel.lastname, UserModel.firstname)
+            .order_by(UserModel.lastname, UserModel.firstname, col(CohortMember.id))
             .offset((page - 1) * page_size)
             .limit(page_size)
         ).all()
@@ -515,8 +700,12 @@ class CohortService:
                 firstname=user.firstname,
                 lastname=user.lastname,
                 email=user.email,
+                institution_id=membership.institution_id if membership else None,
+                status=member.status,
+                ended_at=member.ended_at,
+                end_note=member.end_note,
             )
-            for member, user in results
+            for member, user, membership in results
         ]
 
         total_pages = (total + page_size - 1) // page_size if total else 0
@@ -551,6 +740,7 @@ class CohortService:
         members = session.exec(
             select(CohortMember.student_id).where(
                 CohortMember.cohort_id == cohort_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
             )
         ).all()
 
@@ -588,17 +778,23 @@ class CohortService:
         if not student_membership:
             raise HTTPException(status_code=404, detail="Student not found in this organization.")
 
+        target: CohortModel = CohortService._get_cohort(session, new_cohort_id, org_id)
+        CohortService._assert_active(target)
         existing = session.exec(
             select(CohortMember)
             .join(CohortModel, CohortModel.id == CohortMember.cohort_id)
             .where(
                 CohortMember.student_id == student_id,
                 CohortModel.org_id == org_id,
+                CohortMember.status == MemberStatus.ACTIVE.value,
+                CohortMember.cohort_id != new_cohort_id,
             )
         ).all()
 
+        # Their old cohorts keep them as history ("left").
         for member in existing:
-            session.delete(member)
+            CohortService._end(member, MemberStatus.LEFT, actor.id, f"Moved to {target.name}")
+            session.add(member)
         session.commit()
 
         return CohortService.add_members(

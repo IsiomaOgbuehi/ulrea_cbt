@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import Column, DateTime, Index, String, UniqueConstraint, text
 
-from .enum import CohortStatus
+from .enum import CohortStatus, MemberStatus
 
 
 class CohortModel(SQLModel, table=True):
@@ -31,12 +31,15 @@ class CohortModel(SQLModel, table=True):
 class CohortMember(SQLModel, table=True):
     __tablename__ = "cohort_members"
 
+    # One active membership per student per cohort. Graduated / left rows are
+    # history, so a student who left can join the same cohort again.
     __table_args__ = (
-        UniqueConstraint(
-            "cohort_id",
-            "student_id",
-            "org_id",
-            name="uq_cohort_member",
+        Index(
+            "uq_cohort_member_active",
+            "cohort_id", "student_id", "org_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
         ),
     )
 
@@ -48,6 +51,14 @@ class CohortMember(SQLModel, table=True):
     org_id: UUID = Field(index=True, nullable=False)
     added_by: UUID = Field(nullable=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Stored as a plain string (validated by MemberStatus) to avoid enum migrations.
+    status: str = Field(
+        default=MemberStatus.ACTIVE.value,
+        sa_column=Column(String(20), nullable=False, server_default=MemberStatus.ACTIVE.value, index=True),
+    )
+    ended_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    ended_by: UUID | None = None
+    end_note: str | None = None     # e.g. "2024/2025 session" or "Moved to JSS3A"
 
 
 class TeacherCohortAssignment(SQLModel, table=True):

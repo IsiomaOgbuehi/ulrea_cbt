@@ -259,6 +259,21 @@ class CohortAssignPreview(BaseModel):
     new_members: list[CohortNewMember]   # the first ones, by name (up to `limit`)
 
 
+class UnfinishedExamsRequest(BaseModel):
+    student_ids: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class UnfinishedExam(BaseModel):
+    exam_id: UUID
+    title: str
+    status: str                 # assigned (not started) | started
+
+
+class StudentUnfinishedExams(BaseModel):
+    student_id: UUID
+    exams: list[UnfinishedExam]
+
+
 class AssignedCohortRead(BaseModel):
     """A cohort assigned to the exam and how many students it brought."""
     cohort_id: UUID

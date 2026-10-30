@@ -1,4 +1,6 @@
 from uuid import UUID
+from typing import Literal
+from auth.database.schema.cohort.enum import MemberStatus
 from fastapi import APIRouter, Depends, Query
 from fastapi.concurrency import run_in_threadpool
 from auth.database.database import SessionDep
@@ -6,9 +8,12 @@ from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.user.enums import UserRole
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, AssignTeacherRequest, CohortCreate, CohortUpdate, CohortRead,
-    AddMembersRequest, CohortMemberRead, GraduateCohortRequest, MyCohortRead, PaginatedResponse, TeacherCohortAssignmentRead
+    AddMembersRequest, CohortDeletableRead, CohortMemberRead, GraduateCohortRequest, GraduateCohortResult, MemberActionRequest, MemberActionResult, MyCohortRead,
+    PaginatedResponse, TeacherCohortAssignmentRead
 )
 from auth.services.cohort_service import CohortService
+from auth.clients.cbt_service_client import cbt_service_client
+from fastapi import HTTPException
 from auth.utility.redis.redis_client import redis_client
 from auth.dependencies.auth_dependencies import get_user_context, require_cohort_access
 from auth.services.user.user_context import UserContext
@@ -123,21 +128,28 @@ def archive_cohort(
 
 
 ''' GRADUATE COHORT 🎓 '''
-@router.post("/{cohort_id}/graduate", response_model=CohortRead)
-def graduate_cohort(
+@router.post("/{cohort_id}/graduate", response_model=GraduateCohortResult)
+async def graduate_cohort(
     cohort_id: UUID,
     payload: GraduateCohortRequest,
     session: SessionDep,
     ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
-):
+) -> GraduateCohortResult:
     """
-    Mark a cohort as graduated.
-    After graduation:
-    - No new students can be added
-    - No new exams can be assigned
-    - All historical data is preserved
+    Graduate every current student in the cohort. Their accounts stay active
+    and their records are kept. Then (`then`):
+    - keep_open (default): the cohort stays open for the next set of students
+    - archive: the cohort is archived (for a group you won't use again)
     """
-    return CohortService.graduate(session=session, cohort_id=cohort_id, payload=payload, actor=ctx.user, org_id=ctx.membership.org_id)
+    result: GraduateCohortResult = await run_in_threadpool(
+        CohortService.graduate, session=session, cohort_id=cohort_id, payload=payload,
+        actor=ctx.user, org_id=ctx.membership.org_id,
+    )
+    try:
+        await redis_client.delete(f"cohort_students:{cohort_id}")
+    except Exception:
+        pass
+    return result
 
 
 ''' ADD MEMBERS TO COHORT 👥 '''
@@ -186,6 +198,7 @@ def get_members(
     search: str | None = Query(None, description="Search by firstname, lastname, or email"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    status: MemberStatus | Literal["all"] = Query(MemberStatus.ACTIVE, description="active (default), graduated, left or all"),
 ):
     """
     Admins can view members of any cohort in their org.
@@ -198,7 +211,58 @@ def get_members(
         search=search,
         page=page,
         page_size=page_size,
+        status=None if status == "all" else status,
     )
+
+
+''' ALL MEMBER IDS (FOR "SELECT ALL") ☑️ '''
+@router.get("/{cohort_id}/members/ids", response_model=list[UUID])
+def get_member_ids(
+    cohort_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
+    search: str | None = Query(None),
+    status: MemberStatus = Query(MemberStatus.ACTIVE),
+) -> list[UUID]:
+    """Every matching member's student id, so "select all" can cover every page."""
+    return CohortService.member_ids(session, cohort_id, ctx.membership.org_id, status, search)
+
+
+''' GRADUATE / MOVE / REMOVE CHOSEN STUDENTS 🎓 '''
+@router.post("/{cohort_id}/members/actions", response_model=MemberActionResult)
+async def member_action(
+    cohort_id: UUID,
+    payload: MemberActionRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> MemberActionResult:
+    """
+    Graduate, move (to another cohort) or remove the chosen students. The
+    cohort stays open for new students; their records are kept as history.
+    Graduated students' accounts stay active (they can still sign in).
+    """
+    result: MemberActionResult = await run_in_threadpool(
+        CohortService.member_action,
+        session=session, cohort_id=cohort_id, payload=payload,
+        actor=ctx.user, org_id=ctx.membership.org_id,
+    )
+    for cid in {cohort_id, *( [result.target_cohort_id] if result.target_cohort_id else [] )}:
+        try:
+            await redis_client.delete(f"cohort_students:{cid}")
+        except Exception:
+            pass
+    return result
+
+
+''' REOPEN A CLOSED COHORT 🔓 '''
+@router.post("/{cohort_id}/reopen", response_model=CohortRead)
+def reopen_cohort(
+    cohort_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> CohortRead:
+    """Reopen an archived (or older-style closed) cohort so it can take students again."""
+    return CohortService.reopen(session, cohort_id, ctx.membership.org_id)
 
 
 ''' ASSIGN TEACHER TO COHORT 🧑‍🏫➕ '''
@@ -257,3 +321,46 @@ def list_cohort_teachers(
         )
         for assignment, teacher in rows
     ]
+
+
+async def _deletion_blocker(session: SessionDep, cohort_id: UUID, org_id: UUID) -> str | None:
+    blocker: str | None = await run_in_threadpool(CohortService.local_deletion_blocker, session, cohort_id, org_id)
+    if blocker:
+        return blocker
+    if await cbt_service_client.get_cohort_exam_assignment_count(cohort_id, org_id) > 0:
+        return "It has been given exams. Archive it instead to keep the results grouped under it."
+    return None
+
+
+''' CAN THIS COHORT BE DELETED? 🗑️ '''
+@router.get("/{cohort_id}/deletable", response_model=CohortDeletableRead)
+async def cohort_deletable(
+    cohort_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> CohortDeletableRead:
+    """Only a cohort that never had students or exams (e.g. made by mistake) can be deleted."""
+    try:
+        blocker: str | None = await _deletion_blocker(session, cohort_id, ctx.membership.org_id)
+    except HTTPException as e:
+        if e.status_code == 404:
+            raise
+        return CohortDeletableRead(deletable=False, reason="Couldn't check its exams right now.")
+    return CohortDeletableRead(deletable=blocker is None, reason=blocker)
+
+
+''' DELETE COHORT PERMANENTLY 🗑️ '''
+@router.delete("/{cohort_id}/permanently", status_code=204)
+async def delete_cohort_permanently(
+    cohort_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.COHORTS_MANAGE)),
+) -> None:
+    """
+    Delete a cohort for good. Refused (409) if it ever had students or exams:
+    archive those instead so their history stays intact.
+    """
+    blocker: str | None = await _deletion_blocker(session, cohort_id, ctx.membership.org_id)
+    if blocker:
+        raise HTTPException(status_code=409, detail=f"This cohort can't be deleted. {blocker}")
+    await run_in_threadpool(CohortService.delete_permanently, session, cohort_id, ctx.membership.org_id)
