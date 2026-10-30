@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from cbt_service.database.database import SessionDep
 from cbt_service.schemas.bank_topic_schemas import (
-    BankCreate, BankRead, BankUpdate, TopicCreate, TopicRead, TopicUpdate,
+    BankCreate, BankRead, BankStaffSet, BankUpdate, StaffBanksRead, StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
 )
 from cbt_service.schemas.item_subject_schemas import CurrentUser
 from cbt_service.services.item.bank_topic_service import BankService, TopicService
@@ -52,6 +52,35 @@ def update_bank(
 ) -> BankRead:
     """Rename, reorder, or restore an archived bank (status=active)."""
     return BankService.update(session, subject_id, bank_id, payload, current_user)
+
+
+''' SET BANK STAFF 👥 '''
+@router.put("/banks/{bank_id}/staff", response_model=BankRead)
+def set_bank_staff(
+    subject_id: UUID,
+    bank_id: UUID,
+    payload: BankStaffSet,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.BANKS_ASSIGN_STAFF)),
+) -> BankRead:
+    """
+    Choose which of the subject's staff may use this bank. Staff limited to
+    their subjects see only the banks they're given, plus questions in no bank.
+    """
+    return BankService.set_staff(session, subject_id, bank_id, payload, current_user)
+
+
+''' SET A STAFF MEMBER'S BANKS 👤 '''
+@router.put("/staff/{user_id}/banks", response_model=StaffBanksRead)
+def set_staff_banks(
+    subject_id: UUID,
+    user_id: UUID,
+    payload: StaffBanksSet,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.BANKS_ASSIGN_STAFF)),
+) -> StaffBanksRead:
+    """Choose which of this subject's banks one staff member may use (from the staff list)."""
+    return BankService.set_banks_for_staff(session, subject_id, user_id, payload, current_user)
 
 
 ''' ARCHIVE BANK 🗄️ '''

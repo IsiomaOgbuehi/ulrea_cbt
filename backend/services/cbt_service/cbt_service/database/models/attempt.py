@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, JSON, DateTime
+from sqlalchemy import Column, JSON, DateTime, UniqueConstraint
 
 from .enums.attempt_enum import AttemptStatus
 
@@ -14,6 +14,11 @@ class AttemptModel(SQLModel, table=True):
     Respects max_attempts from ExamModel.
     """
     __tablename__ = "attempts"
+    # One row per attempt number per student per exam: the database itself
+    # refuses a duplicate if two "start" requests ever race.
+    __table_args__ = (
+        UniqueConstraint("exam_id", "student_id", "attempt_number", name="uq_attempts_exam_student_number"),
+    )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     exam_id: UUID = Field(index=True, nullable=False)
@@ -33,6 +38,12 @@ class AttemptModel(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     time_remaining_seconds: int | None = None
+    # When the exam clock started: the moment the questions were first sent
+    # to the student, not when they pressed "Begin" (on a slow connection the
+    # page can take a while to load). None until then.
+    clock_started_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
     raw_score: float | None = None
     final_score: float | None = None

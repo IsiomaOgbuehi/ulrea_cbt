@@ -6,12 +6,17 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from uuid import UUID
 
+from typing import Any
+
 from fastapi import HTTPException
-from sqlalchemy import delete as sa_delete
+from sqlalchemy import delete as sa_delete, or_
 from sqlmodel import Session, col, select
 
-from cbt_service.database.models.bank_topic import ExamTopic, ItemTopic, QuestionBank, Topic
+from cbt_service.core.permissions import P
+from cbt_service.database.models.bank_topic import BankAssignment, ExamTopic, ItemTopic, QuestionBank, Topic
 from cbt_service.database.models.enums.item_subject_enums import BankStatus
+from cbt_service.database.models.item import ItemModel
+from cbt_service.schemas.current_user import CurrentUser
 
 
 
@@ -38,6 +43,46 @@ class ScopeService:
         bank = ScopeService.get_bank(session, subject_id, bank_id, org_id)
         if bank.status == BankStatus.ARCHIVED.value:
             raise HTTPException(status_code=400, detail=f"Bank '{bank.name}' is archived.")
+
+    # ------------------------------------------------------- bank access
+
+    @staticmethod
+    def allowed_bank_ids(session: Session, current_user: CurrentUser, perm: P = P.QUESTIONS_VIEW) -> set[UUID] | None:
+        """
+        None when the caller sees every bank (organisation-wide reach for `perm`);
+        otherwise the banks they've been assigned. Questions in no bank are
+        always visible to anyone who can see the subject.
+        """
+        if current_user.reach(perm) == "all":
+            return None
+        return set(
+            session.exec(
+                select(BankAssignment.bank_id).where(
+                    BankAssignment.user_id == current_user.id,
+                    BankAssignment.org_id == current_user.org_id,
+                )
+            ).all()
+        )
+
+    @staticmethod
+    def assert_bank_access(
+        session: Session, bank_id: UUID | None, current_user: CurrentUser, perm: P = P.QUESTIONS_VIEW,
+    ) -> None:
+        """403 unless the caller may use this bank (no bank is always fine)."""
+        if bank_id is None:
+            return
+        allowed = ScopeService.allowed_bank_ids(session, current_user, perm)
+        if allowed is not None and bank_id not in allowed:
+            raise HTTPException(status_code=403, detail="You haven't been given access to this bank.")
+
+    @staticmethod
+    def visible_items_condition(allowed: set[UUID] | None) -> Any:
+        """WHERE clause for questions the caller can see (None = no limit)."""
+        if allowed is None:
+            return None
+        if not allowed:
+            return col(ItemModel.bank_id).is_(None)
+        return or_(col(ItemModel.bank_id).is_(None), col(ItemModel.bank_id).in_(allowed))
 
     @staticmethod
     def validate_topics(

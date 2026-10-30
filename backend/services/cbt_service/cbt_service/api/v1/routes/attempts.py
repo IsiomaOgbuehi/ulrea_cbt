@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -9,7 +9,8 @@ from cbt_service.clients.auth_client import AuthClient
 from cbt_service.database.models.exam import ExamModel
 from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import get_current_user
-from cbt_service.schemas.attempt_schemas import AttemptReviewRead, LateAnswerDecision, LateSaveRead
+from cbt_service.schemas.attempt_schemas import AttemptPage, AttemptReviewRead, LateAnswerDecision, LateSaveRead
+from cbt_service.services.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from cbt_service.database.models.attempt import LateResponseModel
 from fastapi.responses import JSONResponse
 from cbt_service.schemas.attempt_schemas import (
@@ -185,7 +186,7 @@ def get_attempt_exam(
 
 
 # ''' COHORT ATTEMPTS 📊 '''
-# @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
+# @router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
 # def get_cohort_attempts(
 #     exam_id: UUID,
 #     cohort_id: UUID,
@@ -209,13 +210,22 @@ async def _with_names(summaries: list[CohortAttemptSummary], org_id: UUID) -> li
 
 
 ''' COHORT ATTEMPTS 📊 '''
-@router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=list[CohortAttemptSummary])
+@router.get("/exams/{exam_id}/cohorts/{cohort_id}/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
 async def get_cohort_attempts(
     exam_id: UUID,
     cohort_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number (with stats over all attempts); leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
-) -> list[CohortAttemptSummary]:
+) -> AttemptPage | list[CohortAttemptSummary]:
+    if page is not None:
+        result: AttemptPage = await run_in_threadpool(
+            AttemptService.attempts_page, session, exam_id, cohort_id, current_user, page, page_size,
+        )
+        await release_connection(session)
+        result.items = await _with_names(result.items, current_user.org_id)
+        return result
     summaries: list[CohortAttemptSummary] = await run_in_threadpool(
         AttemptService.get_cohort_attempts, session, exam_id, cohort_id, current_user,
     )
@@ -225,13 +235,22 @@ async def get_cohort_attempts(
 
 
 ''' INDIVIDUALLY ASSIGNED ATTEMPTS 📊 '''
-@router.get("/exams/{exam_id}/individual/attempts", response_model=list[CohortAttemptSummary])
+@router.get("/exams/{exam_id}/individual/attempts", response_model=AttemptPage | list[CohortAttemptSummary])
 async def get_individual_attempts(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number (with stats over all attempts); leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.RESULTS_VIEW)),
-) -> list[CohortAttemptSummary]:
+) -> AttemptPage | list[CohortAttemptSummary]:
     """Attempts by students assigned to the exam one by one (not through a cohort)."""
+    if page is not None:
+        result: AttemptPage = await run_in_threadpool(
+            AttemptService.attempts_page, session, exam_id, None, current_user, page, page_size,
+        )
+        await release_connection(session)
+        result.items = await _with_names(result.items, current_user.org_id)
+        return result
     summaries: list[CohortAttemptSummary] = await run_in_threadpool(
         AttemptService.get_cohort_attempts, session, exam_id, None, current_user,
     )

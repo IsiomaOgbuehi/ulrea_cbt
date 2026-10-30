@@ -22,6 +22,7 @@ class ExamCreate(BaseModel):
     allow_review: bool = True
     auto_mark_short_answers: bool = False   # off: short answers are marked by a person
     show_attempts_used: bool = False        # candidates see "1 of 2 attempts used"
+    extra_time_seconds: int = Field(default=30, ge=0, le=1800)   # added to every candidate's time
     max_attempts: int = 1
     max_violations: int | None = None
     # Optional scope inside the subject. Empty = whole subject (as before).
@@ -44,11 +45,13 @@ class ExamMaxAttemptsUpdate(BaseModel):
     """
     max_attempts: int | None = Field(default=None, ge=1, le=100)
     show_attempts_used: bool | None = None
+    # Applies straight away, including to candidates already sitting the exam.
+    extra_time_seconds: int | None = Field(default=None, ge=0, le=1800)
 
     @model_validator(mode="after")
     def something_to_change(self) -> "ExamMaxAttemptsUpdate":
-        if self.max_attempts is None and self.show_attempts_used is None:
-            raise ValueError("Send max_attempts, show_attempts_used, or both.")
+        if self.max_attempts is None and self.show_attempts_used is None and self.extra_time_seconds is None:
+            raise ValueError("Send max_attempts, show_attempts_used or extra_time_seconds.")
         return self
 
 
@@ -71,6 +74,7 @@ class ExamUpdate(BaseModel):
     allow_review: bool | None = None
     auto_mark_short_answers: bool | None = None   # only while the exam is a draft / sent back
     show_attempts_used: bool | None = None
+    extra_time_seconds: int | None = Field(default=None, ge=0, le=1800)
     max_attempts: int | None = None
     max_violations: int | None = None
     bank_id: UUID | None = None            # send null to clear
@@ -101,6 +105,7 @@ class ExamRead(BaseModel):
     allow_review: bool
     auto_mark_short_answers: bool = False
     show_attempts_used: bool = False
+    extra_time_seconds: int = 30
     max_attempts: int
     created_at: datetime
     updated_at: datetime
@@ -108,6 +113,8 @@ class ExamRead(BaseModel):
     topic_ids: list[UUID] = Field(default_factory=list)
     period_id: UUID | None = None
     item_count: int = 0          # questions in the exam
+    written_count: int = 0                 # short answers + essays (the Marking tab shows when > 0)
+    short_answer_count: int = 0
     assigned_count: int = 0      # candidates assigned
     submitted_count: int = 0     # of those, how many have submitted
 
@@ -259,6 +266,7 @@ class MyAssignmentRead(BaseModel):
     status: AssignmentStatus            # assignment status: pending / scheduled / etc.
     scheduled_at: datetime | None
     duration_minutes: int
+    extra_time_seconds: int = 0
     effective_start: datetime | None   # ← new
     effective_end: datetime | None     # ← new
     can_attempt: bool                  # ← new — computed server-side, frontend just reads it

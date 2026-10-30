@@ -18,6 +18,8 @@ from cbt_service.schemas.exam_schemas import (
     ExamAssignmentRead, ExamAuditLogRead, CurrentUser, MyAssignmentRead, ExamStatusUpdate, UserSummary
 )
 from cbt_service.services.exam_service import ExamService
+from cbt_service.services.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, page_of, total_pages
+from typing import Any
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
 from cbt_service.clients.auth_client import AuthClient
@@ -25,6 +27,14 @@ from cbt_service.core.permissions import P
 from cbt_service.dependencies import require_candidate_or, require_permission, require_staff
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+def _paged(items: list[Any], total: int | None, page: int | None, page_size: int) -> Any:
+    """The full list when no page was asked for, else a page."""
+    if page is None or total is None:
+        return items
+    return PaginatedResponse(items=items, total=total, page=page, page_size=page_size,
+                             total_pages=total_pages(total, page_size))
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -331,19 +341,28 @@ async def assign_students(
 
 
 ''' LIST ASSIGNMENTS 📋 '''
-@router.get("/{exam_id}/assignments", response_model=list[ExamAssignmentRead])
+@router.get("/{exam_id}/assignments", response_model=PaginatedResponse[ExamAssignmentRead] | list[ExamAssignmentRead])
 async def list_assignments(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
-):
-    assignments: list[ExamAssignmentRead] = await run_in_threadpool(
-    ExamService.get_assignments, session, exam_id, current_user)
+) -> PaginatedResponse[ExamAssignmentRead] | list[ExamAssignmentRead]:
+    total: int | None = None
+    if page is not None:
+        rows, total = await run_in_threadpool(
+            lambda: page_of(session, ExamService.assignments_stmt(session, exam_id, current_user), page, page_size)
+        )
+        assignments: list[ExamAssignmentRead] = [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in rows]
+    else:
+        assignments = await run_in_threadpool(
+        ExamService.get_assignments, session, exam_id, current_user)
     # DB work done: free the connection before the auth-service call.
     await release_connection(session)
 
     if not assignments:
-            return assignments
+        return _paged(assignments, total, page, page_size)
 
     auth_client = AuthClient(redis_client)
     users: dict[str, UserSummary] = await auth_client.get_users_bulk(
@@ -357,7 +376,7 @@ async def list_assignments(
         name: str | None = f"{user.firstname} {user.lastname}".strip() if user else None
         enriched.append(assignment.model_copy(update={"student_name": name}))
 
-    return enriched
+    return _paged(enriched, total, page, page_size)
 
 
 # --------------------------------------------------------
@@ -365,14 +384,20 @@ async def list_assignments(
 # --------------------------------------------------------
 
 ''' AUDIT LOG 📜 '''
-@router.get("/{exam_id}/audit", response_model=list[ExamAuditLogRead])
+@router.get("/{exam_id}/audit", response_model=PaginatedResponse[ExamAuditLogRead] | list[ExamAuditLogRead])
 def get_audit_log(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_AUDIT_LOG)),
-):
-    logs = ExamService.get_audit_log(session, exam_id, current_user)
-    return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
+) -> PaginatedResponse[ExamAuditLogRead] | list[ExamAuditLogRead]:
+    """Oldest first; with page, newest first."""
+    if page is None:
+        logs = ExamService.get_audit_log(session, exam_id, current_user)
+        return [ExamAuditLogRead.model_validate(l, from_attributes=True) for l in logs]
+    rows, total = page_of(session, ExamService.audit_stmt(session, exam_id, current_user), page, page_size)
+    return _paged([ExamAuditLogRead.model_validate(l, from_attributes=True) for l in rows], total, page, page_size)
 
 
 # --------------------------------------------------------
@@ -449,17 +474,24 @@ def override_exam_status(
 
 
 ''' LIST EXAM QUESTIONS WITH CONTENT 🧐 '''
-@router.get("/{exam_id}/questions", response_model=list[ExamItemDetailRead])
+@router.get("/{exam_id}/questions", response_model=PaginatedResponse[ExamItemDetailRead] | list[ExamItemDetailRead])
 def list_exam_questions(
     exam_id: UUID,
     session: SessionDep,
+    page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_VIEW)),
-):
-    rows = ExamService.get_items_with_content(session, exam_id, current_user)
-    return [
+) -> PaginatedResponse[ExamItemDetailRead] | list[ExamItemDetailRead]:
+    total: int | None = None
+    if page is None:
+        rows = ExamService.get_items_with_content(session, exam_id, current_user)
+    else:
+        rows, total = page_of(session, ExamService.items_with_content_stmt(session, exam_id, current_user), page, page_size)
+    reads = [
         ExamItemDetailRead(
             **ExamItemRead.model_validate(exam_item, from_attributes=True).model_dump(),
             item=ItemRead.model_validate(item, from_attributes=True),
         )
         for exam_item, item in rows
     ]
+    return _paged(reads, total, page, page_size)

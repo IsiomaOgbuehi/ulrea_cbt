@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
 from sqlmodel import Session, delete, select, col, delete, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from pydantic import BaseModel
 from typing import Any
@@ -24,6 +25,8 @@ from cbt_service.database.models.exam import ExamAssignment, ExamItem, ExamModel
 from cbt_service.database.models.item import ItemModel
 from cbt_service.services.marking.scoring import pass_threshold, score_answer, verdict
 from cbt_service.services.exam_service import ExamService, _log
+from cbt_service.services.paging import page_of, total_pages
+from sqlmodel.sql.expression import SelectOfScalar
 from cbt_service.database.models.attempt import AttemptModel, LateResponseModel, ResponseModel
 
 from cbt_service.schemas.attempt_schemas import (
@@ -42,6 +45,7 @@ from cbt_service.schemas.attempt_schemas import (
     AttemptReviewRead,
     AttemptOptionRead,
     LateAnswerRead,
+    AttemptPage,
     ResponseRead,
     ReviewItem,
     CurrentUser,
@@ -103,26 +107,30 @@ class AttemptService:
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found.")
 
-        existing = session.exec(
-            select(AttemptModel).where(
-                AttemptModel.exam_id == payload.exam_id,
-                AttemptModel.student_id == student_id,
-            )
-        ).all()
-
         # assignment = session.exec(
         #     select(ExamAssignment).where(ExamAssignment.id == payload.assignment_id)
         # ).first()
+        # Lock the assignment row: two "start" requests arriving together (a
+        # double click, two tabs, a retry on a slow connection) wait for each
+        # other here, so the second sees the attempt the first created instead
+        # of creating a duplicate.
         assignment = session.exec(
             select(ExamAssignment).where(
                 ExamAssignment.id == payload.assignment_id,
                 ExamAssignment.exam_id == payload.exam_id,
                 ExamAssignment.student_id == student_id,
                 ExamAssignment.org_id == org_id,
-            )
+            ).with_for_update()
         ).first()
         if not assignment:
             raise HTTPException(status_code=404, detail="Assignment not found.")
+
+        existing = session.exec(
+            select(AttemptModel).where(
+                AttemptModel.exam_id == payload.exam_id,
+                AttemptModel.student_id == student_id,
+            )
+        ).all()
 
         effective_start, effective_end = ExamService.get_effective_window(exam, assignment)
         now = datetime.now(timezone.utc)
@@ -146,6 +154,7 @@ class AttemptService:
             attempt_to_resume = max(reset_attempts, key=lambda a: a.started_at)
             attempt_to_resume.status = AttemptStatus.STARTED
             attempt_to_resume.started_at = datetime.now(timezone.utc)
+            attempt_to_resume.clock_started_at = None      # starts when the questions are sent
             attempt_to_resume.submitted_at = None
             attempt_to_resume.raw_score = None
             attempt_to_resume.final_score = None
@@ -172,11 +181,26 @@ class AttemptService:
             student_id=student_id,
             org_id=org_id,
             assignment_id=payload.assignment_id,
-            attempt_number=len(existing) + 1,
+            attempt_number=max((a.attempt_number for a in existing), default=0) + 1,
         )
         session.add(attempt)
         AttemptService._set_assignment_status(session, attempt, AssignmentStatus.STARTED)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            # The database's own guard (one row per attempt number): another
+            # request created this attempt a moment ago. Return that one.
+            session.rollback()
+            same = session.exec(
+                select(AttemptModel).where(
+                    AttemptModel.exam_id == payload.exam_id,
+                    AttemptModel.student_id == student_id,
+                    AttemptModel.attempt_number == attempt.attempt_number,
+                )
+            ).first()
+            if same is None:
+                raise
+            return same
         session.refresh(attempt)
         return attempt
 
@@ -222,8 +246,28 @@ class AttemptService:
     #     return response
 
     @staticmethod
-    def _deadline(attempt: AttemptModel, exam: ExamModel) -> datetime:
-        return AttemptService._aware(attempt.started_at) + timedelta(minutes=exam.duration_minutes)
+    def _allowed(exam: ExamModel) -> timedelta:
+        """The candidate's full time: the exam's duration plus its extra time."""
+        return timedelta(minutes=exam.duration_minutes, seconds=exam.extra_time_seconds or 0)
+
+    @staticmethod
+    def _deadline(attempt: AttemptModel, exam: ExamModel) -> datetime | None:
+        """When time runs out; None while the clock hasn't started (questions not yet sent)."""
+        if attempt.clock_started_at is None:
+            return None
+        return AttemptService._aware(attempt.clock_started_at) + AttemptService._allowed(exam)
+
+    @staticmethod
+    def _timing(attempt: AttemptModel, exam: ExamModel | None, now: datetime) -> tuple[datetime, int]:
+        """(expires_at, remaining seconds) for the timer. Before the clock starts: the full time."""
+        if exam is None:
+            return now, 0
+        deadline = AttemptService._deadline(attempt, exam)
+        expires_at = deadline if deadline is not None else now + AttemptService._allowed(exam)
+        remaining = (
+            max(0, int((expires_at - now).total_seconds())) if attempt.status == AttemptStatus.STARTED else 0
+        )
+        return expires_at, remaining
 
     @staticmethod
     def save_response(
@@ -252,16 +296,17 @@ class AttemptService:
 
         now = datetime.now(timezone.utc)
         deadline = AttemptService._deadline(attempt, exam)
-        if attempt.status == AttemptStatus.STARTED and now >= deadline:
+        if attempt.status == AttemptStatus.STARTED and deadline is not None and now >= deadline:
             attempt = AttemptService._finalize_submission(session, attempt, exam, auto=True)
 
         if attempt.status != AttemptStatus.STARTED:
             closed_by_time: bool = (
-                attempt.status in (AttemptStatus.SUBMITTED, AttemptStatus.SCORED)
+                deadline is not None
+                and attempt.status in (AttemptStatus.SUBMITTED, AttemptStatus.SCORED)
                 and attempt.submitted_at is not None
                 and AttemptService._aware(attempt.submitted_at) >= deadline - CLOCK_SLACK
             )
-            if exam_item is not None and closed_by_time and now <= deadline + LATE_WINDOW:
+            if exam_item is not None and closed_by_time and deadline is not None and now <= deadline + LATE_WINDOW:
                 return AttemptService._keep_late_answer(session, attempt, exam_item, payload, now, deadline)
             raise HTTPException(
                 status_code=409,
@@ -579,6 +624,7 @@ class AttemptService:
             violation_count=count,
             max_violations=exam.max_violations if exam else None,
             server_time=read.server_time,
+            clock_started=read.clock_started,
         )
 
     @staticmethod
@@ -725,10 +771,24 @@ class AttemptService:
         if exam.shuffle_questions:
             sections = AttemptService._shuffle_sections(sections, attempt_id)
 
+        # The clock starts now, when the questions are first sent: time spent
+        # loading the page on a slow connection doesn't count.
+        now = datetime.now(timezone.utc)
+        if attempt.status == AttemptStatus.STARTED and attempt.clock_started_at is None:
+            attempt.clock_started_at = now
+            session.add(attempt)
+            session.commit()
+            session.refresh(attempt)
+        expires_at, remaining = AttemptService._timing(attempt, exam, now)
+
         return AttemptExamRead(
             attempt_id=attempt.id,
             exam_id=attempt.exam_id,
             duration_minutes=exam.duration_minutes,
+            extra_time_seconds=exam.extra_time_seconds or 0,
+            expires_at=expires_at,
+            remaining_seconds=remaining,
+            server_time=now,
             shuffle_questions=exam.shuffle_questions,
             shuffle_options=exam.shuffle_options,
             sections=sections,
@@ -847,27 +907,43 @@ class AttemptService:
         current_user: CurrentUser,
     ) -> list[CohortAttemptSummary]:
         """Attempts by students assigned through a cohort, or (cohort_id None) assigned one by one."""
+        attempts: list[AttemptModel] = list(session.exec(
+            AttemptService.cohort_attempts_stmt(session, exam_id, cohort_id, current_user)
+        ).all())
+        summaries: list[CohortAttemptSummary] = AttemptService.summaries(session, attempts)
+
+        # Done with the DB: return the connection to the pool now, so it isn't
+        # held while the router waits on the auth service.
+        session.close()
+        return summaries
+    
+
+    @staticmethod
+    def cohort_attempts_stmt(
+        session: Session, exam_id: UUID, cohort_id: UUID | None, current_user: CurrentUser,
+    ) -> "SelectOfScalar[AttemptModel]":
+        """Attempts by a cohort's students (cohort_id None: assigned one by one); checks access."""
         exam: ExamModel = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.RESULTS_VIEW)
-
-        attempts: list[AttemptModel] = list(
-            session.exec(
-                select(AttemptModel)
-                .join(ExamAssignment, ExamAssignment.id == AttemptModel.assignment_id)
-                .where(
-                    AttemptModel.exam_id == exam_id,
-                    AttemptModel.org_id == current_user.org_id,
-                    ExamAssignment.cohort_id == cohort_id if cohort_id is not None
-                    else col(ExamAssignment.cohort_id).is_(None),
-                )
-            ).all()
+        return (
+            select(AttemptModel)
+            .join(ExamAssignment, ExamAssignment.id == AttemptModel.assignment_id)
+            .where(
+                AttemptModel.exam_id == exam_id,
+                AttemptModel.org_id == current_user.org_id,
+                ExamAssignment.cohort_id == cohort_id if cohort_id is not None
+                else col(ExamAssignment.cohort_id).is_(None),
+            )
+            .order_by(col(AttemptModel.submitted_at).desc().nulls_first(), col(AttemptModel.id))
         )
 
+    @staticmethod
+    def summaries(session: Session, attempts: list[AttemptModel]) -> list[CohortAttemptSummary]:
         waiting: dict[UUID, int] = AttemptService.awaiting_marking(session, [a.id for a in attempts])
         late: dict[UUID, int] = AttemptService.late_pending_counts(session, [a.id for a in attempts])
-        summaries: list[CohortAttemptSummary] = [
+        return [
             CohortAttemptSummary(
-                id=a.id, student_id=a.student_id, status=a.status,
+                id=a.id, student_id=a.student_id, status=a.status, attempt_number=a.attempt_number,
                 submitted_at=a.submitted_at, final_score=a.final_score,
                 percentage=a.percentage, passed=a.passed,
                 awaiting_marking=waiting.get(a.id, 0),
@@ -876,11 +952,35 @@ class AttemptService:
             for a in attempts
         ]
 
-        # Done with the DB: return the connection to the pool now, so it isn't
-        # held while the router waits on the auth service.
-        session.close()
-        return summaries
-    
+    @staticmethod
+    def attempts_page(
+        session: Session, exam_id: UUID, cohort_id: UUID | None, current_user: CurrentUser,
+        page: int, page_size: int,
+    ) -> AttemptPage:
+        """One page of attempts, with stats over all of them (fully marked ones only)."""
+        stmt = AttemptService.cohort_attempts_stmt(session, exam_id, cohort_id, current_user)
+        rows, total = page_of(session, stmt, page, page_size)
+        ids_subq = stmt.order_by(None).with_only_columns(col(AttemptModel.id)).subquery()
+        pending_ids = select(ResponseModel.attempt_id).where(col(ResponseModel.marks_awarded).is_(None))
+        scored = session.exec(
+            select(
+                func.count(),
+                func.avg(AttemptModel.percentage),
+                func.count().filter(col(AttemptModel.passed).is_(True)),
+            ).where(
+                col(AttemptModel.id).in_(select(ids_subq)),
+                col(AttemptModel.percentage).is_not(None),
+                col(AttemptModel.id).not_in(pending_ids),
+            )
+        ).one()
+        n_scored: int = int(scored[0] or 0)
+        return AttemptPage(
+            items=AttemptService.summaries(session, rows), total=total, page=page, page_size=page_size,
+            total_pages=total_pages(total, page_size),
+            scored=n_scored,
+            mean_percentage=round(float(scored[1]), 2) if n_scored else None,
+            pass_rate=round(int(scored[2] or 0) / n_scored * 100, 2) if n_scored else None,
+        )
 
     @staticmethod
     def _get_items_for_scoring(session: Session, item_ids: list[UUID]) -> dict[UUID, dict[str, Any]]: # list[ItemForScoringRead]:
@@ -1025,7 +1125,7 @@ class AttemptService:
                 ).first()
                 assignment.scheduled_at = payload.new_scheduled_at
                 assignment.deadline_override = (
-                    payload.new_scheduled_at + timedelta(minutes=exam.duration_minutes)
+                    payload.new_scheduled_at + AttemptService._allowed(exam)
                     if exam else None
                 )
                 session.add(assignment)
@@ -1213,7 +1313,8 @@ class AttemptService:
         attempt.status = final_status
         now = datetime.now(timezone.utc)
         # Closed because time ran out (possibly noticed later): record the deadline itself.
-        attempt.submitted_at = min(now, AttemptService._deadline(attempt, exam)) if auto else now
+        deadline = AttemptService._deadline(attempt, exam)
+        attempt.submitted_at = min(now, deadline) if auto and deadline is not None else now
         attempt.scored_by = (
             "violation_termination" if final_status == AttemptStatus.TERMINATED
             else "auto_expired" if auto
@@ -1238,12 +1339,8 @@ class AttemptService:
         if not exam:
             return attempt
 
-        started_at = attempt.started_at
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-
-        deadline = started_at + timedelta(minutes=exam.duration_minutes)
-        if datetime.now(timezone.utc) < deadline:
+        deadline = AttemptService._deadline(attempt, exam)
+        if deadline is None or datetime.now(timezone.utc) < deadline:
             return attempt
 
         return AttemptService._finalize_submission(session, attempt, exam, auto=True)
@@ -1255,10 +1352,8 @@ class AttemptService:
     ) -> AttemptModel:
         if attempt.status != AttemptStatus.STARTED:
             return attempt
-        deadline = AttemptService._aware(attempt.started_at) + timedelta(
-            minutes=exam.duration_minutes
-        )
-        if datetime.now(timezone.utc) < deadline:
+        deadline = AttemptService._deadline(attempt, exam)
+        if deadline is None or datetime.now(timezone.utc) < deadline:
             return attempt
         return AttemptService._finalize_submission(session, attempt, exam, auto=True)
 
@@ -1274,14 +1369,7 @@ class AttemptService:
         hide: bool = for_student and not show_result
         now = datetime.now(timezone.utc)
 
-        started_at = attempt.started_at if attempt.started_at.tzinfo else attempt.started_at.replace(tzinfo=timezone.utc)
-        expires_at = started_at + timedelta(minutes=exam.duration_minutes) if exam else started_at
-
-        remaining = (
-            max(0, int((expires_at - now).total_seconds()))
-            if attempt.status == AttemptStatus.STARTED
-            else 0
-        )
+        expires_at, remaining = AttemptService._timing(attempt, exam, now)
 
         return AttemptRead(
             id=attempt.id, exam_id=attempt.exam_id, assignment_id=attempt.assignment_id, student_id=attempt.student_id,
@@ -1293,6 +1381,7 @@ class AttemptService:
             passed=None if hide else attempt.passed,
             expires_at=expires_at, remaining_seconds=remaining, server_time=now,
             show_result=show_result, allow_review=bool(exam.allow_review) if exam else False,
+            clock_started=attempt.clock_started_at is not None,
             awaiting_marking=(
                 0 if attempt.status == AttemptStatus.STARTED
                 else AttemptService.awaiting_marking(session, [attempt.id]).get(attempt.id, 0)
@@ -1302,15 +1391,7 @@ class AttemptService:
     @staticmethod
     def _to_attempt_read_new(attempt: AttemptModel, exam: ExamModel | None) -> AttemptRead:
         now = datetime.now(timezone.utc)
-        started_at = AttemptService._aware(attempt.started_at)
-        expires_at = (
-            started_at + timedelta(minutes=exam.duration_minutes) if exam else started_at
-        )
-        remaining = (
-            max(0, int((expires_at - now).total_seconds()))
-            if attempt.status == AttemptStatus.STARTED
-            else 0
-        )
+        expires_at, remaining = AttemptService._timing(attempt, exam, now)
         return AttemptRead(
             id=attempt.id, exam_id=attempt.exam_id, assignment_id=attempt.assignment_id,
             student_id=attempt.student_id, status=attempt.status,
@@ -1319,6 +1400,7 @@ class AttemptService:
             final_score=attempt.final_score, percentage=attempt.percentage,
             passed=attempt.passed, expires_at=expires_at,
             remaining_seconds=remaining, server_time=now,
+            clock_started=attempt.clock_started_at is not None,
         )
 
 
@@ -1333,8 +1415,8 @@ class AttemptService:
             exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
             if not exam:
                 continue
-            started_at = attempt.started_at if attempt.started_at.tzinfo else attempt.started_at.replace(tzinfo=timezone.utc)
-            if now >= started_at + timedelta(minutes=exam.duration_minutes):
+            deadline = AttemptService._deadline(attempt, exam)
+            if deadline is not None and now >= deadline:
                 asyncio.run(AttemptService._finalize_submission(session, attempt, exam, auto=True))
                 expired += 1
         return expired
@@ -1579,7 +1661,8 @@ def build_exam_attempts_workbook(
                 # Answer exists but correctness is not yet determined.
                 question_results.append("-")
 
-        started_at = attempt.started_at
+        # Time taken counts from when the clock started (questions sent).
+        started_at = attempt.clock_started_at or attempt.started_at
         submitted_at = attempt.submitted_at
 
         started_on = (

@@ -30,8 +30,9 @@ from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.difficulty_service import DifficultyScope
 from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic
-from cbt_service.database.models.enums.item_subject_enums import ItemStatus
+from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
 from sqlalchemy import exists
+from sqlmodel.sql.expression import Select, SelectOfScalar
 
 
 def _log(
@@ -171,6 +172,7 @@ class ExamService:
     @staticmethod
     def create(session: Session, payload: ExamCreate, current_user: CurrentUser) -> ExamModel:
         ScopeService.validate_bank(session, payload.subject_id, payload.bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, payload.bank_id, current_user)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, payload.subject_id, payload.topic_ids, current_user.org_id
         )
@@ -421,6 +423,12 @@ class ExamService:
             _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
                  {"field": "show_attempts_used", "from": old_show, "to": payload.show_attempts_used})
             changed = True
+        old_extra: int = exam.extra_time_seconds or 0
+        if payload.extra_time_seconds is not None and payload.extra_time_seconds != old_extra:
+            exam.extra_time_seconds = payload.extra_time_seconds
+            _log(session, exam.id, exam.org_id, current_user.id, ExamAction.UPDATED,
+                 {"field": "extra_time_seconds", "from": old_extra, "to": payload.extra_time_seconds})
+            changed = True
         if not changed:
             return exam
         exam.updated_at = datetime.now(timezone.utc)
@@ -485,6 +493,7 @@ class ExamService:
             )
         if "bank_id" in data and data["bank_id"] != exam.bank_id:
             ScopeService.validate_bank(session, exam.subject_id, data["bank_id"], current_user.org_id)
+            ScopeService.assert_bank_access(session, data["bank_id"], current_user)
         if "period_id" in data and data["period_id"] != exam.period_id:
             PeriodScope.validate(session, data["period_id"], current_user.org_id)
         if new_topic_ids is not None:
@@ -660,12 +669,15 @@ class ExamService:
         # question later doesn't change an exam that has run).
         item_marks: dict[UUID, tuple[float, float]] = {}
         if new_ids:
+            # ...and only questions in banks the caller can use (or in no bank).
+            visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
             for item_id, marks, negative_marks in session.exec(
                 select(ItemModel.id, ItemModel.marks, ItemModel.negative_marks).where(
                     col(ItemModel.id).in_(new_ids),
                     ItemModel.org_id == current_user.org_id,
                     ItemModel.subject_id == exam.subject_id,
                     ItemModel.status != ItemStatus.ARCHIVED,
+                    *([visible] if visible is not None else []),
                 )
             ).all():
                 item_marks[item_id] = (float(marks), float(negative_marks or 0.0))
@@ -676,8 +688,8 @@ class ExamService:
                     status_code=400,
                     detail={
                         "message": (
-                            "Some questions can't be added: they aren't in this exam's subject "
-                            "or are archived."
+                            "Some questions can't be added: they aren't in this exam's subject, "
+                            "are archived, or are in a bank you haven't been given."
                         ),
                         "item_ids": invalid,
                     },
@@ -756,6 +768,7 @@ class ExamService:
         ExamService._assert_can_edit(session, exam, current_user)
         if payload.bank_id is not None:
             ScopeService.get_bank(session, exam.subject_id, payload.bank_id, current_user.org_id)
+            ScopeService.assert_bank_access(session, payload.bank_id, current_user)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, exam.subject_id, payload.topic_ids, current_user.org_id
         )
@@ -766,6 +779,9 @@ class ExamService:
             ItemModel.status == ItemStatus.ACTIVE,
             ~exists().where(ExamItem.exam_id == exam_id, ExamItem.item_id == ItemModel.id),
         ]
+        visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
+        if visible is not None:
+            conditions.append(visible)
         if payload.bank_id is not None:
             conditions.append(ItemModel.bank_id == payload.bank_id)
         if topic_ids:
@@ -809,6 +825,8 @@ class ExamService:
         topics: dict[UUID, list[UUID]] = ScopeService.topic_ids_by_exam(session, ids)
         names: dict[UUID, str | None] = subject_names or {}
         item_counts: dict[UUID, int] = {}
+        written: dict[UUID, int] = {}
+        short: dict[UUID, int] = {}
         assigned: dict[UUID, int] = {}
         submitted: dict[UUID, int] = {}
         if ids:
@@ -818,6 +836,15 @@ class ExamService:
                 .group_by(col(ExamItem.exam_id))
             ).all():
                 item_counts[exam_id] = int(n)
+            for exam_id, item_type, n in session.exec(
+                select(ExamItem.exam_id, ItemModel.item_type, func.count())
+                .join(ItemModel, col(ItemModel.id) == col(ExamItem.item_id))
+                .where(col(ExamItem.exam_id).in_(ids), col(ItemModel.item_type).in_([ItemType.SHORT_ANSWER, ItemType.ESSAY]))
+                .group_by(col(ExamItem.exam_id), col(ItemModel.item_type))
+            ).all():
+                written[exam_id] = written.get(exam_id, 0) + int(n)
+                if str(getattr(item_type, "value", item_type)).lower() == "short_answer":
+                    short[exam_id] = short.get(exam_id, 0) + int(n)
             for exam_id, n_all, n_done in session.exec(
                 select(
                     ExamAssignment.exam_id,
@@ -832,6 +859,8 @@ class ExamService:
                 **e.model_dump(),
                 "topic_ids": topics.get(e.id, []),
                 "item_count": item_counts.get(e.id, 0),
+                "written_count": written.get(e.id, 0),
+                "short_answer_count": short.get(e.id, 0),
                 "assigned_count": assigned.get(e.id, 0),
                 "submitted_count": submitted.get(e.id, 0),
                 **({"subject_name": names[e.id]} if e.id in names else {}),
@@ -1010,11 +1039,17 @@ class ExamService:
 
     @staticmethod
     def get_assignments(session: Session, exam_id: UUID, current_user: CurrentUser) -> list[ExamAssignment]:
+        return list(session.exec(ExamService.assignments_stmt(session, exam_id, current_user)).all())
+
+    @staticmethod
+    def assignments_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "SelectOfScalar[ExamAssignment]":
+        """The exam's assignments, oldest first (checks access)."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
-        return session.exec(
+        return (
             select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
-        ).all()
+            .order_by(col(ExamAssignment.created_at), col(ExamAssignment.id))
+        )
 
     @staticmethod
     def get_audit_log(
@@ -1026,6 +1061,15 @@ class ExamService:
                 ExamAuditLog.exam_id == exam_id
             ).order_by(ExamAuditLog.created_at)
         ).all()
+
+    @staticmethod
+    def audit_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "SelectOfScalar[ExamAuditLog]":
+        """The exam's activity, newest first (for paging)."""
+        ExamService._get_exam(session, exam_id, current_user.org_id)
+        return (
+            select(ExamAuditLog).where(ExamAuditLog.exam_id == exam_id)
+            .order_by(col(ExamAuditLog.created_at).desc(), col(ExamAuditLog.id))
+        )
     
 
 
@@ -1206,6 +1250,7 @@ class ExamService:
                     status=assignment.status,
                     scheduled_at=assignment.scheduled_at,
                     duration_minutes=exam.duration_minutes,
+                    extra_time_seconds=exam.extra_time_seconds or 0,
                     start_time=exam.start_time,
                     end_time=exam.end_time,
 
@@ -1305,16 +1350,22 @@ class ExamService:
     def get_items_with_content(
         session: Session, exam_id: UUID, current_user: CurrentUser
     ) -> list[tuple[ExamItem, ItemModel]]:
+        return list(session.exec(ExamService.items_with_content_stmt(session, exam_id, current_user)).all())
+
+    @staticmethod
+    def items_with_content_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "Select[tuple[ExamItem, ItemModel]]":
+        """The exam's questions with their content, in exam order (checks access)."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user)
-
-        rows = session.exec(
+        # Section by section (in section order, unsectioned last), then question order,
+        # so a page reads the same as the exam.
+        return (
             select(ExamItem, ItemModel)
             .join(ItemModel, ItemModel.id == ExamItem.item_id)
+            .outerjoin(ExamSection, col(ExamSection.id) == col(ExamItem.section_id))
             .where(
                 ExamItem.exam_id == exam_id,
                 ItemModel.org_id == current_user.org_id,
             )
-            .order_by(ExamItem.order)
-        ).all()
-        return list(rows)
+            .order_by(col(ExamSection.order).asc().nulls_last(), ExamItem.order, col(ExamItem.id))
+        )

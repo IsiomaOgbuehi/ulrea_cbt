@@ -7,11 +7,12 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
-from cbt_service.database.models.bank_topic import ExamTopic, ItemTopic, QuestionBank, Topic
+from cbt_service.database.models.bank_topic import BankAssignment, ExamTopic, ItemTopic, QuestionBank, Topic
+from cbt_service.database.models.subject import SubjectAssignment
 from cbt_service.database.models.enums.item_subject_enums import BankStatus, ItemStatus
 from cbt_service.database.models.item import ItemModel
 from cbt_service.schemas.bank_topic_schemas import (
-    BankCreate, BankRead, BankUpdate, TopicCreate, TopicRead, TopicUpdate,
+    BankCreate, BankRead, BankStaffSet, BankUpdate, StaffBanksRead, StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
 )
 from cbt_service.schemas.item_subject_schemas import CurrentUser
 from cbt_service.services.item.item_service import ItemService
@@ -40,8 +41,24 @@ class BankService:
         return {bank_id: int(count) for bank_id, count in rows if bank_id is not None}
 
     @staticmethod
-    def _to_read(bank: QuestionBank, item_count: int = 0) -> BankRead:
-        return BankRead.model_validate({**bank.model_dump(), "item_count": item_count})
+    def _staff_ids(session: Session, bank_ids: list[UUID]) -> dict[UUID, list[UUID]]:
+        out: dict[UUID, list[UUID]] = {}
+        if not bank_ids:
+            return out
+        rows = session.exec(
+            select(BankAssignment.bank_id, BankAssignment.user_id)
+            .where(col(BankAssignment.bank_id).in_(bank_ids))
+            .order_by(col(BankAssignment.created_at))
+        ).all()
+        for bank_id, user_id in rows:
+            out.setdefault(bank_id, []).append(user_id)
+        return out
+
+    @staticmethod
+    def _to_read(bank: QuestionBank, item_count: int = 0, staff_ids: list[UUID] | None = None) -> BankRead:
+        return BankRead.model_validate(
+            {**bank.model_dump(), "item_count": item_count, "staff_ids": staff_ids or []}
+        )
 
     @staticmethod
     def list(
@@ -53,9 +70,16 @@ class BankService:
         )
         if not include_archived:
             query = query.where(QuestionBank.status == BankStatus.ACTIVE.value)
+        # Staff limited to their subjects only see the banks they've been given.
+        allowed = ScopeService.allowed_bank_ids(session, current_user)
+        if allowed is not None:
+            if not allowed:
+                return []
+            query = query.where(col(QuestionBank.id).in_(allowed))
         banks = session.exec(query.order_by(col(QuestionBank.position), col(QuestionBank.name))).all()
         counts = BankService._item_counts(session, subject_id)
-        return [BankService._to_read(b, counts.get(b.id, 0)) for b in banks]
+        staff = BankService._staff_ids(session, [b.id for b in banks])
+        return [BankService._to_read(b, counts.get(b.id, 0), staff.get(b.id)) for b in banks]
 
     @staticmethod
     def create(session: Session, subject_id: UUID, payload: BankCreate, current_user: CurrentUser) -> BankRead:
@@ -71,9 +95,16 @@ class BankService:
             position=payload.position,
         )
         session.add(bank)
+        # Someone who only sees their own banks keeps access to the one they made.
+        if ScopeService.allowed_bank_ids(session, current_user) is not None:
+            session.flush()
+            session.add(BankAssignment(
+                org_id=current_user.org_id, bank_id=bank.id,
+                user_id=current_user.id, assigned_by=current_user.id,
+            ))
         BankService._commit_unique(session, payload.name)
         session.refresh(bank)
-        return BankService._to_read(bank)
+        return BankService._to_read(bank, 0, BankService._staff_ids(session, [bank.id]).get(bank.id))
 
     @staticmethod
     def update(
@@ -81,6 +112,7 @@ class BankService:
     ) -> BankRead:
         ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
         bank = ScopeService.get_bank(session, subject_id, bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, bank.id, current_user, P.BANKS_TOPICS_MANAGE)
         for key, value in payload.model_dump(exclude_unset=True).items():
             if key in ("kind", "status") and value is not None:
                 value = value.value
@@ -89,7 +121,106 @@ class BankService:
         session.add(bank)
         BankService._commit_unique(session, bank.name)
         session.refresh(bank)
-        return BankService._to_read(bank, BankService._item_counts(session, subject_id).get(bank.id, 0))
+        return BankService._to_read(
+            bank,
+            BankService._item_counts(session, subject_id).get(bank.id, 0),
+            BankService._staff_ids(session, [bank.id]).get(bank.id),
+        )
+
+    @staticmethod
+    def set_staff(
+        session: Session, subject_id: UUID, bank_id: UUID, payload: BankStaffSet, current_user: CurrentUser,
+    ) -> BankRead:
+        """
+        Replace who may use the bank. Everyone listed must be assigned to the
+        subject (staff with organisation-wide access see every bank anyway).
+        """
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_ASSIGN_STAFF)
+        bank = ScopeService.get_bank(session, subject_id, bank_id, current_user.org_id)
+        wanted: list[UUID] = list(dict.fromkeys(payload.user_ids))
+        on_subject: set[UUID] = set(
+            session.exec(
+                select(SubjectAssignment.assigned_to).where(
+                    SubjectAssignment.subject_id == subject_id,
+                    SubjectAssignment.org_id == current_user.org_id,
+                    col(SubjectAssignment.assigned_to).in_(wanted),
+                )
+            ).all()
+        ) if wanted else set()
+        missing: list[str] = [str(u) for u in wanted if u not in on_subject]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "Only staff assigned to this subject can be given its banks.", "user_ids": missing},
+            )
+        current: dict[UUID, BankAssignment] = {
+            a.user_id: a
+            for a in session.exec(select(BankAssignment).where(BankAssignment.bank_id == bank.id)).all()
+        }
+        for user_id, assignment in current.items():
+            if user_id not in on_subject:
+                session.delete(assignment)
+        for user_id in wanted:
+            if user_id not in current:
+                session.add(BankAssignment(
+                    org_id=current_user.org_id, bank_id=bank.id,
+                    user_id=user_id, assigned_by=current_user.id,
+                ))
+        session.commit()
+        return BankService._to_read(
+            bank,
+            BankService._item_counts(session, subject_id).get(bank.id, 0),
+            BankService._staff_ids(session, [bank.id]).get(bank.id),
+        )
+
+    @staticmethod
+    def set_banks_for_staff(
+        session: Session, subject_id: UUID, user_id: UUID, payload: StaffBanksSet, current_user: CurrentUser,
+    ) -> StaffBanksRead:
+        """Replace which of the subject's banks one staff member may use."""
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_ASSIGN_STAFF)
+        on_subject = session.exec(
+            select(SubjectAssignment.id).where(
+                SubjectAssignment.subject_id == subject_id,
+                SubjectAssignment.org_id == current_user.org_id,
+                SubjectAssignment.assigned_to == user_id,
+            )
+        ).first()
+        if on_subject is None:
+            raise HTTPException(status_code=400, detail="Assign this person to the subject before giving them its banks.")
+        wanted: list[UUID] = list(dict.fromkeys(payload.bank_ids))
+        subject_banks: set[UUID] = set(
+            session.exec(
+                select(QuestionBank.id).where(
+                    QuestionBank.subject_id == subject_id, QuestionBank.org_id == current_user.org_id,
+                )
+            ).all()
+        )
+        missing: list[str] = [str(b) for b in wanted if b not in subject_banks]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "Some banks aren't in this subject.", "bank_ids": missing},
+            )
+        current: dict[UUID, BankAssignment] = {
+            a.bank_id: a
+            for a in session.exec(
+                select(BankAssignment).where(
+                    BankAssignment.user_id == user_id,
+                    col(BankAssignment.bank_id).in_(subject_banks),
+                )
+            ).all()
+        } if subject_banks else {}
+        for bank_id, assignment in current.items():
+            if bank_id not in wanted:
+                session.delete(assignment)
+        for bank_id in wanted:
+            if bank_id not in current:
+                session.add(BankAssignment(
+                    org_id=current_user.org_id, bank_id=bank_id, user_id=user_id, assigned_by=current_user.id,
+                ))
+        session.commit()
+        return StaffBanksRead(subject_id=subject_id, user_id=user_id, bank_ids=wanted)
 
     @staticmethod
     def archive(session: Session, subject_id: UUID, bank_id: UUID, current_user: CurrentUser) -> BankRead:

@@ -280,6 +280,7 @@ def _age(attempt_id: str, minutes: int, seconds: int) -> None:
         new_start = datetime.now(timezone.utc) - timedelta(minutes=minutes, seconds=seconds)
         shift = new_start - started
         row.started_at = new_start
+        row.clock_started_at = new_start
         session.add(row)
         for r in session.exec(select(ResponseModel).where(ResponseModel.attempt_id == row.id)).all():
             updated = r.updated_at if r.updated_at.tzinfo else r.updated_at.replace(tzinfo=timezone.utc)
@@ -293,7 +294,7 @@ def _save(client: TestClient, h: H, attempt_id: str, item: dict[str, Any], answe
 
 
 def test_time_is_strict_and_late_answers_never_change_the_score(client: TestClient, student_headers: H, admin_headers: H) -> None:
-    exam = _exam(duration_minutes=10)
+    exam = _exam(duration_minutes=10, extra_time_seconds=0)
     attempt = _start(client, student_headers, exam)
     q1, q2 = _content(client, student_headers, attempt["id"])[:2]
     assert _save(client, student_headers, attempt["id"], q1, ["B"]).status_code == 200   # on time, wrong
@@ -324,7 +325,7 @@ def test_time_is_strict_and_late_answers_never_change_the_score(client: TestClie
 
 def test_late_answers_only_for_attempts_closed_by_time_and_within_the_window(client: TestClient, student_headers: H, teacher_headers: H) -> None:
     # Submitted early by the student: anything after is refused outright.
-    exam = _exam(duration_minutes=10, max_attempts=2)
+    exam = _exam(duration_minutes=10, max_attempts=2, extra_time_seconds=0)
     attempt = _start(client, student_headers, exam)
     q1 = _content(client, student_headers, attempt["id"])[0]
     client.post(f"{V1}/attempts/{attempt['id']}/submit", headers=student_headers)
@@ -337,7 +338,7 @@ def test_late_answers_only_for_attempts_closed_by_time_and_within_the_window(cli
 
 
 def test_late_answer_decisions_need_marking_permission(client: TestClient, student_headers: H, admin_headers: H) -> None:
-    exam = _exam(duration_minutes=10)
+    exam = _exam(duration_minutes=10, extra_time_seconds=0)
     attempt = _start(client, student_headers, exam)
     q1 = _content(client, student_headers, attempt["id"])[0]
     _age(attempt["id"], 10, 5)
@@ -409,3 +410,123 @@ def test_a_reset_attempt_is_offered_as_a_fresh_start(client: TestClient, student
     assert r.status_code == 200, r.json()
     row = _mine(client, student_headers, exam)
     assert (row["restart"], row["in_progress_attempt_id"], row["status"]) == (True, attempt["id"], "assigned")
+
+
+def test_starting_twice_never_duplicates_an_attempt(client: TestClient, student_headers: H, admin_headers: H) -> None:
+    from cbt_service.database.models.attempt import AttemptModel
+    exam = _exam(max_attempts=2)
+    first = _start(client, student_headers, exam)
+    assert _start(client, student_headers, exam)["id"] == first["id"]          # resumes, no new row
+    client.post(f"{V1}/attempts/{first['id']}/submit", headers=student_headers)
+    client.post(f"{V1}/attempts/{first['id']}/reset", json={"reason": "Power cut"}, headers=admin_headers)
+    again = _start(client, student_headers, exam)
+    again2 = _start(client, student_headers, exam)
+    assert again["id"] == again2["id"] == first["id"] and again["attempt_number"] == 1   # reset reuses the row
+    with Session(engine) as session:
+        rows = session.exec(select(AttemptModel).where(AttemptModel.exam_id == exam["exam_id"])).all()
+    assert len(rows) == 1
+
+
+def test_the_database_refuses_a_duplicate_attempt_number(client: TestClient, student_headers: H) -> None:
+    from sqlalchemy.exc import IntegrityError
+    from cbt_service.database.models.attempt import AttemptModel
+    exam = _exam()
+    first = _start(client, student_headers, exam)
+    with Session(engine) as session:
+        session.add(AttemptModel(
+            exam_id=exam["exam_id"], student_id=STUDENT_ID, org_id=ORG_ID,
+            assignment_id=exam["assignment_id"], attempt_number=first["attempt_number"],
+        ))
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+
+# ------------------------------------------------------------- clock and extra time
+
+def test_clock_starts_when_the_questions_are_sent_not_on_begin(client: TestClient, student_headers: H) -> None:
+    exam = _exam(duration_minutes=10, extra_time_seconds=0)
+    attempt = _start(client, student_headers, exam)
+    assert attempt["clock_started"] is False and attempt["remaining_seconds"] == 600
+    # A slow page load: 5 minutes pass before the questions are fetched. The clock hasn't run.
+    _age(attempt["id"], 5, 0)
+    from cbt_service.database.models.attempt import AttemptModel
+    with Session(engine) as session:
+        row = session.get(AttemptModel, UUID(attempt["id"]))
+        assert row is not None
+        row.clock_started_at = None
+        session.add(row)
+        session.commit()
+    assert client.get(f"{V1}/attempts/{attempt['id']}", headers=student_headers).json()["remaining_seconds"] == 600
+    content = client.get(f"{V1}/attempts/{attempt['id']}/exam", headers=student_headers).json()
+    assert 598 <= content["remaining_seconds"] <= 600 and content["expires_at"]
+    read = client.get(f"{V1}/attempts/{attempt['id']}", headers=student_headers).json()
+    assert read["clock_started"] is True and 598 <= read["remaining_seconds"] <= 600
+    # Fetching the questions again (a refresh) doesn't restart the clock.
+    _age(attempt["id"], 3, 0)
+    again = client.get(f"{V1}/attempts/{attempt['id']}/exam", headers=student_headers).json()
+    assert 418 <= again["remaining_seconds"] <= 420
+
+
+def test_extra_time_is_added_to_every_timer(client: TestClient, student_headers: H, admin_headers: H) -> None:
+    exam = _exam(duration_minutes=10)            # default extra time: 30 s
+    attempt = _start(client, student_headers, exam)
+    content = client.get(f"{V1}/attempts/{attempt['id']}/exam", headers=student_headers).json()
+    assert content["extra_time_seconds"] == 30 and 628 <= content["remaining_seconds"] <= 630
+    q1 = _content(client, student_headers, attempt["id"])[0]
+    _age(attempt["id"], 10, 10)                  # past 10 minutes, inside the extra 30 s
+    assert _save(client, student_headers, attempt["id"], q1, ["A"]).status_code == 200
+    # Admins can change it once live; it applies to candidates already sitting.
+    r = client.patch(f"{V1}/exams/{exam['exam_id']}/max-attempts", json={"extra_time_seconds": 300}, headers=admin_headers)
+    assert r.status_code == 200 and r.json()["extra_time_seconds"] == 300
+    remaining = client.get(f"{V1}/attempts/{attempt['id']}", headers=student_headers).json()["remaining_seconds"]
+    assert 285 <= remaining <= 290
+    assert client.patch(f"{V1}/exams/{exam['exam_id']}/max-attempts", json={"extra_time_seconds": 99999}, headers=admin_headers).status_code == 422
+
+
+# ------------------------------------------------------------- paging the exam tabs
+
+def test_exam_tabs_page_on_request(client: TestClient, student_headers: H, admin_headers: H) -> None:
+    exam = _exam(n_mcq=8)                       # 10 questions
+    eid = exam["exam_id"]
+    full = client.get(f"{V1}/exams/{eid}/questions", headers=admin_headers).json()
+    assert isinstance(full, list) and len(full) == 10                 # unchanged without page
+    page = client.get(f"{V1}/exams/{eid}/questions?page=2&page_size=4", headers=admin_headers).json()
+    assert (page["total"], page["total_pages"], page["page"]) == (10, 3, 2)
+    assert [q["item"]["question_text"] for q in page["items"]] == ["Q5", "Q6", "Q7", "Q8"]
+
+    a = client.get(f"{V1}/exams/{eid}/assignments?page=1&page_size=10", headers=admin_headers).json()
+    assert a["total"] == 1 and a["items"][0]["student_name"] == "Test User"
+
+    attempt = _start(client, student_headers, exam)
+    _answer_all(client, student_headers, attempt["id"])
+    client.post(f"{V1}/attempts/{attempt['id']}/submit", headers=student_headers)
+    client.post(f"{V1}/attempts/{attempt['id']}/violations", json={"violation_type": "tab_switch", "severity": "high"}, headers=student_headers)
+
+    res = client.get(f"{V1}/attempts/exams/{eid}/individual/attempts?page=1&page_size=5", headers=admin_headers).json()
+    assert res["total"] == 1 and res["items"][0]["student_name"] == "Test User"
+    assert res["scored"] == 0 and res["mean_percentage"] is None      # the essay still needs marking
+
+    log = client.get(f"{V1}/exams/{eid}/audit?page=1&page_size=5", headers=admin_headers).json()
+    assert "total" in log and isinstance(log["items"], list)
+    v = client.get(f"{V1}/exams/{eid}/violations?page=1&page_size=5", headers=admin_headers)
+    assert v.status_code == 200 and "items" in v.json()
+    assert client.get(f"{V1}/exams/{eid}/questions?page=0", headers=admin_headers).status_code == 422
+
+
+def test_results_page_stats_cover_every_scored_attempt(client: TestClient, student_headers: H, admin_headers: H) -> None:
+    exam = _exam(n_mcq=2)
+    attempt = _start(client, student_headers, exam)
+    _answer_all(client, student_headers, attempt["id"])
+    client.post(f"{V1}/attempts/{attempt['id']}/submit", headers=student_headers)
+    detail = client.get(f"{V1}/attempts/{attempt['id']}/detail", headers=admin_headers).json()
+    essay = next(r for r in detail["responses"] if r["item_type"] == "essay")
+    client.post(f"{V1}/attempts/responses/{essay['response_id']}/review", json={"marks_awarded": 5}, headers=admin_headers)
+    res = client.get(f"{V1}/attempts/exams/{exam['exam_id']}/individual/attempts?page=1", headers=admin_headers).json()
+    assert res["scored"] == 1 and res["mean_percentage"] == 100.0 and res["pass_rate"] == 100.0
+
+
+def test_exam_reports_written_question_counts(client: TestClient, admin_headers: H) -> None:
+    exam = _exam(n_mcq=2)                       # 2 MCQ + True/False + essay
+    read = client.get(f"{V1}/exams/{exam['exam_id']}", headers=admin_headers).json()
+    assert (read["item_count"], read["written_count"], read["short_answer_count"]) == (4, 1, 0)

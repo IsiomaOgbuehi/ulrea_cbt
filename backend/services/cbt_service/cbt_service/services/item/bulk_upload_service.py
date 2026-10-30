@@ -471,6 +471,7 @@ class BulkUploadService:
         # caller's org, and teachers must be assigned to it.
         ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, bank_id, current_user, P.QUESTIONS_MANAGE)
         PeriodScope.validate(session, period_id, current_user.org_id)
         topic_lookup: dict[str, UUID] | None = None  # loaded only if a row has topics
 

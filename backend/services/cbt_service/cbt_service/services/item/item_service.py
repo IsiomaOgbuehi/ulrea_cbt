@@ -70,6 +70,7 @@ class ItemService:
     ) -> ItemModel:
         ItemService._assert_subject_access(session, subject_id, current_user, P.QUESTIONS_MANAGE)
         ScopeService.validate_bank(session, subject_id, payload.bank_id, current_user.org_id)
+        ScopeService.assert_bank_access(session, payload.bank_id, current_user, P.QUESTIONS_MANAGE)
         topic_ids: list[UUID] = ScopeService.validate_topics(
             session, subject_id, payload.topic_ids, current_user.org_id
         )
@@ -126,6 +127,11 @@ class ItemService:
             ItemModel.subject_id == subject_id,
             ItemModel.org_id == current_user.org_id,
         )
+
+        # Staff limited to their subjects see unbanked questions plus their banks.
+        visible = ScopeService.visible_items_condition(ScopeService.allowed_bank_ids(session, current_user))
+        if visible is not None:
+            query = query.where(visible)
 
         # Teachers only see their own items; admins and above see everything
         # if current_user.role == UserRole.TEACHER:
@@ -189,8 +195,9 @@ class ItemService:
         if not item:
             raise HTTPException(status_code=404, detail="Item not found.")
 
-        # Check subject access
+        # Check subject access, then bank access.
         ItemService._assert_subject_access(session, item.subject_id, current_user, perm)
+        ScopeService.assert_bank_access(session, item.bank_id, current_user, perm)
         return item
 
     @staticmethod
@@ -211,6 +218,7 @@ class ItemService:
             )
         if "bank_id" in update_data and update_data["bank_id"] != item.bank_id:
             ScopeService.validate_bank(session, item.subject_id, update_data["bank_id"], current_user.org_id)
+            ScopeService.assert_bank_access(session, update_data["bank_id"], current_user, P.QUESTIONS_MANAGE)
         if "period_id" in update_data and update_data["period_id"] != item.period_id:
             PeriodScope.validate(session, update_data["period_id"], current_user.org_id)
         if "difficulty" in update_data:

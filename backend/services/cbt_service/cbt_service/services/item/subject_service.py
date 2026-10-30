@@ -5,6 +5,8 @@ from sqlmodel import Session, select, col, func, not_
 
 from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectModel, SubjectAssignment
+from cbt_service.database.models.bank_topic import BankAssignment, QuestionBank
+from sqlalchemy import delete as sa_delete
 from cbt_service.schemas.item_subject_schemas import SubjectCreate, SubjectUpdate, CurrentUser
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus, SubjectStatus
 from cbt_service.database.models.enums.enums import UserRole
@@ -260,6 +262,12 @@ class SubjectService:
             raise HTTPException(status_code=404, detail="Assignment not found.")
 
         session.delete(assignment)
+        # They lose the subject's banks too (re-assigning starts afresh).
+        bank_ids = select(QuestionBank.id).where(QuestionBank.subject_id == subject_id)
+        session.exec(sa_delete(BankAssignment).where(  # type: ignore[call-overload]
+            col(BankAssignment.user_id) == user_id,
+            col(BankAssignment.bank_id).in_(bank_ids),
+        ))
         session.commit()
 
     @staticmethod

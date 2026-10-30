@@ -55,6 +55,9 @@ class AttemptRead(BaseModel):
     # aren't shown, scores and pass/fail come back empty to the student.
     show_result: bool = True
     allow_review: bool = False
+    # False until the questions have been sent: the clock hasn't started, and
+    # expires_at / remaining_seconds show the full time.
+    clock_started: bool = True
     # Written answers still to be marked by a person. While > 0 the score is
     # provisional and passed is None.
     awaiting_marking: int = 0
@@ -96,6 +99,11 @@ class AttemptExamRead(BaseModel):
     attempt_id: UUID
     exam_id: UUID
     duration_minutes: int
+    extra_time_seconds: int = 0
+    # The clock starts when these questions are first sent; the timer follows these.
+    expires_at: datetime | None = None
+    remaining_seconds: int | None = None
+    server_time: datetime | None = None
     shuffle_questions: bool
     shuffle_options: bool
     sections: list[AttemptSectionRead]
@@ -164,6 +172,7 @@ class CohortAttemptSummary(BaseModel):
     id: UUID
     student_id: UUID
     student_name: str | None = None
+    attempt_number: int = 1      # 2, 3… when the exam allows retakes
     status: str
     submitted_at: datetime | None
     final_score: float | None
@@ -181,6 +190,7 @@ class ResetAttemptRequest(BaseModel):
 class AttemptStatusRead(BaseModel):
     status: AttemptStatus
     remaining_seconds: int
+    clock_started: bool = True      # False until the questions have been sent
     violation_count: int
     max_violations: int | None
     server_time: datetime
@@ -212,3 +222,15 @@ class AttemptReviewRead(BaseModel):
     passed: bool | None = None
     awaiting_marking: int = 0
     items: list[ReviewItem]
+
+
+class AttemptPage(BaseModel):
+    """A page of attempts, with stats over all of them (fully marked attempts only)."""
+    items: list[CohortAttemptSummary]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    scored: int = 0
+    mean_percentage: float | None = None
+    pass_rate: float | None = None

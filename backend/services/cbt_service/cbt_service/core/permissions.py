@@ -36,6 +36,7 @@ class P(str, Enum):
     QUESTIONS_VIEW = "questions.view"
     QUESTIONS_MANAGE = "questions.manage"
     BANKS_TOPICS_MANAGE = "banks_topics.manage"
+    BANKS_ASSIGN_STAFF = "banks.assign_staff"
     # Exams
     EXAMS_VIEW = "exams.view"
     EXAMS_CREATE = "exams.create"
@@ -91,6 +92,7 @@ CATALOG: dict[P, PermissionInfo] = {
     P.QUESTIONS_VIEW: PermissionInfo("Subjects & questions", "View questions", "Browse questions, banks and topics.", scoped=True, implies=(P.SUBJECTS_VIEW,)),
     P.QUESTIONS_MANAGE: PermissionInfo("Subjects & questions", "Write questions", "Add, edit, archive and bulk-upload questions.", scoped=True, implies=(P.QUESTIONS_VIEW,)),
     P.BANKS_TOPICS_MANAGE: PermissionInfo("Subjects & questions", "Manage banks & topics", "Create and organise a subject's banks and topics.", scoped=True, implies=(P.QUESTIONS_VIEW,)),
+    P.BANKS_ASSIGN_STAFF: PermissionInfo("Subjects & questions", "Give staff banks", "Choose which banks each teacher can use. Teachers see only the banks they're given, plus questions in no bank.", implies=(P.SUBJECTS_VIEW, P.STAFF_VIEW)),
 
     P.EXAMS_VIEW: PermissionInfo("Exams", "View exams", "See exams and their questions. Drafts are only visible to people who can edit exams.", scoped=True),
     P.EXAMS_CREATE: PermissionInfo("Exams", "Create exams", "Start new exams.", implies=((P.EXAMS_VIEW, "own"), (P.EXAMS_EDIT, "own"))),
@@ -102,7 +104,7 @@ CATALOG: dict[P, PermissionInfo] = {
     P.EXAMS_OVERRIDE_STATUS: PermissionInfo("Exams", "Override exam status", "Force an exam into any status, skipping the approval flow.", implies=(P.EXAMS_VIEW,)),
     P.EXAMS_AUDIT_LOG: PermissionInfo("Exams", "View exam activity", "See the activity log of an exam.", implies=(P.EXAMS_VIEW,)),
     P.EXAMS_RELEASE_RESULTS: PermissionInfo("Exams", "Show or hide results", "Choose whether candidates see their results, after an exam is approved, live or closed.", scoped=True, implies=(P.EXAMS_VIEW,)),
-    P.EXAMS_CHANGE_ATTEMPTS: PermissionInfo("Exams", "Change attempts allowed", "Change how many attempts candidates get after an exam is approved or live.", scoped=True, implies=(P.EXAMS_VIEW,)),
+    P.EXAMS_CHANGE_ATTEMPTS: PermissionInfo("Exams", "Change attempts & extra time", "After an exam is approved or live: change how many attempts candidates get, whether they see attempts used, and the extra time added to the timer.", scoped=True, implies=(P.EXAMS_VIEW,)),
 
     P.RESULTS_VIEW: PermissionInfo("Results", "View results", "See attempts, scores and answers.", scoped=True),
     P.RESULTS_EXPORT: PermissionInfo("Results", "Export results", "Download results to Excel.", scoped=True, implies=(P.RESULTS_VIEW,)),
