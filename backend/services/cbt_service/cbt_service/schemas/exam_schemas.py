@@ -194,6 +194,7 @@ class ExamAssignmentRead(BaseModel):
     status: AssignmentStatus
     scheduled_at: datetime | None
     created_at: datetime
+    cohort_id: UUID | None = None   # the cohort they were assigned through (None = individually)
 
 
 # Names stored before the column became plain text (e.g. "CREATED", "ARCHIVED").
@@ -276,8 +277,9 @@ class StudentUnfinishedExams(BaseModel):
 
 class AssignedCohortRead(BaseModel):
     """A cohort assigned to the exam and how many students it brought."""
-    cohort_id: UUID
+    cohort_id: UUID | None          # None = students assigned individually
     students: int
+    submitted: int = 0
 
 
 class UserSummary(BaseModel):

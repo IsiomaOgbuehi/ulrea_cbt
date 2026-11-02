@@ -1,7 +1,7 @@
 from sqlmodel import Field
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole
 from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
-from auth.database.schema.cohort.cohort_api_models import StudentGraduation
+from auth.database.schema.cohort.cohort_api_models import StudentCohort, StudentGraduation
 
 from .token import TokenBase
 
@@ -232,6 +232,8 @@ class StudentListItem(BaseModel):
     status: MembershipStatus
     access_code: str | None = None
     created_at: datetime
+    # Cohorts they're in now.
+    cohorts: list[StudentCohort] = []
     # Cohorts they've graduated from, newest first (their account stays active).
     graduations: list[StudentGraduation] = []
 

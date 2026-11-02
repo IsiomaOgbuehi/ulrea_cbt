@@ -19,7 +19,7 @@ from cbt_service.schemas.exam_schemas import (
 )
 from cbt_service.services.exam_service import ExamService
 from cbt_service.services.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, page_of, total_pages
-from typing import Any
+from typing import Any, Literal
 from cbt_service.schemas.bank_topic_schemas import ExamItemsFromBank, ExamItemsFromBankResult
 from cbt_service.schemas.exam_schemas import ExamPhase, ExamPhaseCounts
 from cbt_service.clients.auth_client import AuthClient
@@ -347,12 +347,17 @@ async def list_assignments(
     session: SessionDep,
     page: int | None = Query(default=None, ge=1, description="Page number; leave out for the full list"),
     page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    cohort_id: UUID | Literal["individual"] | None = Query(
+        default=None, description="Only students assigned through this cohort, or 'individual'",
+    ),
     current_user: CurrentUser = Depends(require_permission(P.EXAMS_ASSIGN)),
 ) -> PaginatedResponse[ExamAssignmentRead] | list[ExamAssignmentRead]:
     total: int | None = None
     if page is not None:
         rows, total = await run_in_threadpool(
-            lambda: page_of(session, ExamService.assignments_stmt(session, exam_id, current_user), page, page_size)
+            lambda: page_of(
+                session, ExamService.assignments_stmt(session, exam_id, current_user, cohort_id), page, page_size,
+            )
         )
         assignments: list[ExamAssignmentRead] = [ExamAssignmentRead.model_validate(a, from_attributes=True) for a in rows]
     else:

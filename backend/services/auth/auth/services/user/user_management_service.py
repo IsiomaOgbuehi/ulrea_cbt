@@ -916,8 +916,12 @@ class UserManagementService:
                 )
             )
 
-        total = len(session.exec(base).all())
-        rows = session.exec(base.offset((page - 1) * per_page).limit(per_page)).all()
+        # Count in the database (not by loading every row), then one ordered page.
+        total: int = session.exec(select(func.count()).select_from(base.subquery())).one()
+        rows = session.exec(
+            base.order_by(col(OrgMembership.created_at), col(UserModel.id))
+            .offset((page - 1) * per_page).limit(per_page)
+        ).all()
         return rows, total
 
 
@@ -1039,9 +1043,11 @@ class UserManagementService:
                 return [], 0
             base = base.where(UserModel.id.in_(subject_user_ids))
 
-        total = len(session.exec(base).all())
+        # Count in the database (not by loading every row), then one ordered page.
+        total = session.exec(select(func.count()).select_from(base.subquery())).one()
         rows = session.exec(
-            base.offset((page - 1) * per_page).limit(per_page)
+            base.order_by(col(OrgMembership.created_at), col(UserModel.id))
+            .offset((page - 1) * per_page).limit(per_page)
         ).all()
 
         return rows, total

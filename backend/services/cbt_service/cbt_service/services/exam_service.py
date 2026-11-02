@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete, col, func
 from sqlalchemy import or_, and_, desc, false
-from typing import Any
+from typing import Literal, Any
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from cbt_service.services.item.utils.search import escape_like
@@ -1044,14 +1044,19 @@ class ExamService:
         return list(session.exec(ExamService.assignments_stmt(session, exam_id, current_user)).all())
 
     @staticmethod
-    def assignments_stmt(session: Session, exam_id: UUID, current_user: CurrentUser) -> "SelectOfScalar[ExamAssignment]":
-        """The exam's assignments, oldest first (checks access)."""
+    def assignments_stmt(
+        session: Session, exam_id: UUID, current_user: CurrentUser,
+        cohort: "UUID | Literal['individual'] | None" = None,
+    ) -> "SelectOfScalar[ExamAssignment]":
+        """The exam's assignments, oldest first (checks access); optionally one cohort's, or individual ones."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
-        return (
-            select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
-            .order_by(col(ExamAssignment.created_at), col(ExamAssignment.id))
-        )
+        stmt = select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
+        if cohort == "individual":
+            stmt = stmt.where(col(ExamAssignment.cohort_id).is_(None))
+        elif cohort is not None:
+            stmt = stmt.where(ExamAssignment.cohort_id == cohort)
+        return stmt.order_by(col(ExamAssignment.created_at), col(ExamAssignment.id))
 
     @staticmethod
     def get_audit_log(
@@ -1163,12 +1168,17 @@ class ExamService:
         """Cohorts assigned to the exam, with how many students each brought."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
+        # One grouped query: students and submissions per cohort (None = assigned individually).
         rows = session.exec(
-            select(ExamAssignment.cohort_id, func.count())
-            .where(ExamAssignment.exam_id == exam_id, col(ExamAssignment.cohort_id).is_not(None))
+            select(
+                ExamAssignment.cohort_id,
+                func.count(),
+                func.count().filter(ExamAssignment.status == AssignmentStatus.SUBMITTED),
+            )
+            .where(ExamAssignment.exam_id == exam_id)
             .group_by(col(ExamAssignment.cohort_id))
         ).all()
-        return [AssignedCohortRead(cohort_id=cid, students=int(n)) for cid, n in rows if cid is not None]
+        return [AssignedCohortRead(cohort_id=cid, students=int(n), submitted=int(done or 0)) for cid, n, done in rows]
 
 
 
