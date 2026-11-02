@@ -145,6 +145,13 @@ class MemberActionResult(BaseModel):
     added_to_target: int = 0        # for "move": new members of the target (others were already in it)
 
 
+class StudentCohort(BaseModel):
+    """A cohort a student is currently in."""
+    id: UUID
+    name: str
+    status: str             # the cohort's status (active / archived …)
+
+
 class StudentGraduation(BaseModel):
     cohort_id: UUID
     cohort_name: str

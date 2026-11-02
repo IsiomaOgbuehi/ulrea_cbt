@@ -39,7 +39,7 @@ def test_reassigning_cohort_adds_only_new_members(
     assert r.json() == {"cohort_id": cohort, "members": 3, "added": 1, "already_assigned": 2}
 
     assert client.get(f"/api/v1/exams/{exam['id']}/assigned-cohorts", headers=admin_headers).json() == [
-        {"cohort_id": cohort, "students": 3}
+        {"cohort_id": cohort, "students": 3, "submitted": 0}
     ]
     # Without summary the old response shape is unchanged.
     r = client.post(url, json={"cohort_id": cohort}, headers=admin_headers)
@@ -103,3 +103,28 @@ def test_internal_cohort_exam_assignment_count(
     assert client.get(f"/internal/cohorts/{unused}/exam-assignment-count?org_id={ORG_ID}", headers=h).json() == 0
     assert client.get(f"/internal/cohorts/{cohort}/exam-assignment-count?org_id={ORG_ID}",
                       headers={"X-Internal-Secret": "wrong"}).status_code == 403
+
+
+def test_assignments_by_cohort_and_counts(
+    client: TestClient, teacher_headers: H, admin_headers: H, monkeypatch: pytest.MonkeyPatch, all_students_valid: None,
+) -> None:
+    exam = create_approved_exam(client, teacher_headers, admin_headers)
+    a, b = str(uuid4()), str(uuid4())
+    set_members(monkeypatch, [uuid4(), uuid4()])
+    client.post(f"/api/v1/exams/{exam['id']}/assign_cohort", json={"cohort_id": a}, headers=admin_headers)
+    set_members(monkeypatch, [uuid4()])
+    client.post(f"/api/v1/exams/{exam['id']}/assign_cohort", json={"cohort_id": b}, headers=admin_headers)
+    r = client.post(f"/api/v1/exams/{exam['id']}/assign", json={"student_ids": [str(uuid4())]}, headers=admin_headers)
+    assert r.status_code == 200, r.json()
+
+    counts = {c["cohort_id"]: (c["students"], c["submitted"])
+              for c in client.get(f"/api/v1/exams/{exam['id']}/assigned-cohorts", headers=admin_headers).json()}
+    assert counts == {a: (2, 0), b: (1, 0), None: (1, 0)}
+
+    url = f"/api/v1/exams/{exam['id']}/assignments?page=1&page_size=50"
+    assert client.get(url, headers=admin_headers).json()["total"] == 4
+    only_a = client.get(f"{url}&cohort_id={a}", headers=admin_headers).json()
+    assert only_a["total"] == 2 and {x["cohort_id"] for x in only_a["items"]} == {a}
+    indiv = client.get(f"{url}&cohort_id=individual", headers=admin_headers).json()
+    assert indiv["total"] == 1 and indiv["items"][0]["cohort_id"] is None
+    assert client.get(f"{url}&cohort_id=nonsense", headers=admin_headers).status_code == 422

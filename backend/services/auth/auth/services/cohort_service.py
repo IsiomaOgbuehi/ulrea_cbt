@@ -13,7 +13,7 @@ from auth.core.permissions import P
 from auth.database.schema.cohort.cohort_api_models import (
     AddMembersResponse, CohortCreate, CohortUpdate, CohortRead,
     CohortMemberRead, AddMembersRequest, GraduateCohortRequest, PaginatedResponse, SkippedMember,
-    MemberActionRequest, MemberActionResult, StudentGraduation, GraduateCohortResult,
+    MemberActionRequest, MemberActionResult, StudentCohort, StudentGraduation, GraduateCohortResult,
 )
 from auth.services.user.user_context import UserContext
 
@@ -404,6 +404,42 @@ class CohortService:
         session.commit()
         session.refresh(cohort)
         return CohortService._to_read(cohort, session)
+
+    @staticmethod
+    def cohort_info_for(
+        session: Session, student_ids: list[UUID], org_id: UUID,
+    ) -> tuple[dict[UUID, list[StudentCohort]], dict[UUID, list[StudentGraduation]]]:
+        """
+        For a page of students, in one query: the cohorts each is in now, and
+        the cohorts each has graduated from (newest first).
+        """
+        current: dict[UUID, list[StudentCohort]] = {}
+        graduated: dict[UUID, list[StudentGraduation]] = {}
+        if not student_ids:
+            return current, graduated
+        rows = session.exec(
+            select(
+                CohortMember.student_id, CohortMember.status, CohortMember.ended_at,
+                CohortModel.id, CohortModel.name, CohortModel.status,
+            )
+            .join(CohortModel, CohortModel.id == CohortMember.cohort_id)
+            .where(
+                col(CohortMember.student_id).in_(student_ids),
+                CohortMember.org_id == org_id,
+                col(CohortMember.status).in_([MemberStatus.ACTIVE.value, MemberStatus.GRADUATED.value]),
+            )
+            .order_by(col(CohortModel.name), col(CohortMember.ended_at).desc())
+        ).all()
+        for sid, member_status, ended_at, cid, name, cohort_status in rows:
+            if member_status == MemberStatus.ACTIVE.value:
+                current.setdefault(sid, []).append(
+                    StudentCohort(id=cid, name=name, status=getattr(cohort_status, "value", str(cohort_status)))
+                )
+            else:
+                graduated.setdefault(sid, []).append(StudentGraduation(cohort_id=cid, cohort_name=name, graduated_at=ended_at))
+        for items in graduated.values():
+            items.sort(key=lambda g: g.graduated_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return current, graduated
 
     @staticmethod
     def graduations_for(session: Session, student_ids: list[UUID], org_id: UUID) -> dict[UUID, list[StudentGraduation]]:

@@ -1086,7 +1086,8 @@ def list_students(
         status=status, cohort_id=cohort_id, name=name, graduated=graduated,
         page=page, per_page=per_page,
     )
-    graduations = CohortService.graduations_for(session, [user.id for user, _ in rows], ctx.membership.org_id)
+    # One query for the whole page: current cohorts and graduations.
+    cohorts, graduations = CohortService.cohort_info_for(session, [user.id for user, _ in rows], ctx.membership.org_id)
     return PaginatedStudentResponse(
         total=total, page=page, per_page=per_page,
         students=[
@@ -1094,6 +1095,7 @@ def list_students(
                 id=user.id, firstname=user.firstname, lastname=user.lastname,
                 email=user.email, access_code=user.access_code,
                 status=membership.status, created_at=membership.created_at,
+                cohorts=cohorts.get(user.id, []),
                 graduations=graduations.get(user.id, []),
             )
             for user, membership in rows

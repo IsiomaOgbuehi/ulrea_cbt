@@ -183,3 +183,18 @@ def test_cohort_given_exams_cannot_be_deleted(client: TestClient, monkeypatch) -
     r = client.get(f"/api/v1/cohorts/{cohort['id']}/deletable", headers=_auth(token)).json()
     assert r["deletable"] is False and "exams" in r["reason"]
     assert client.delete(f"/api/v1/cohorts/{cohort['id']}/permanently", headers=_auth(token)).status_code == 409
+
+
+def test_student_list_shows_current_cohorts(client: TestClient) -> None:
+    token, cohort, (a, b, c) = _setup(client)
+    other = _create_cohort(client, token, COHORT_2_PAYLOAD)
+    _add_students_to_cohort(client, token, other["id"], [b])
+    _act(client, token, cohort["id"], action="graduate", student_ids=[a])
+
+    r = client.get("/api/v1/users/students?per_page=50", headers=_auth(token))
+    assert r.status_code == 200, r.json()
+    by_id = {s["id"]: s for s in r.json()["students"]}
+    assert by_id[a]["cohorts"] == [] and by_id[a]["graduations"][0]["cohort_name"] == cohort["name"]
+    assert sorted(x["name"] for x in by_id[b]["cohorts"]) == sorted([cohort["name"], other["name"]])
+    assert [x["id"] for x in by_id[c]["cohorts"]] == [cohort["id"]] and by_id[c]["graduations"] == []
+    assert r.json()["total"] == 3
