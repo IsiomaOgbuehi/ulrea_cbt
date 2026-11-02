@@ -62,5 +62,9 @@ class OrgSettings(SQLModel, table=True):
         default=DEFAULT_PERIOD_CHILD_LABEL, sa_column=Column(String(40), nullable=False)
     )
     current_period_id: UUID | None = Field(default=None, foreign_key="periods.id")
+    # What the organisation calls a group of candidates ("Class", "Cohort", "Set"...).
+    # None = not chosen; the app then uses "Class" for schools and "Cohort" otherwise.
+    group_label: str | None = Field(default=None, sa_column=Column(String(40), nullable=True))
+    group_label_plural: str | None = Field(default=None, sa_column=Column(String(40), nullable=True))
     updated_by: UUID | None = None
     updated_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
