@@ -286,6 +286,8 @@ class OrgSettingsService:
             period_parent_label=settings.period_parent_label,
             period_child_label=settings.period_child_label,
             current_period_id=settings.current_period_id,
+            group_label=settings.group_label,
+            group_label_plural=settings.group_label_plural,
             is_default=False,
             updated_at=settings.updated_at,
         )

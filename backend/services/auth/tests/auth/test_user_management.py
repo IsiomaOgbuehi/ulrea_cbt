@@ -1500,15 +1500,13 @@ def test_change_qa_trims_the_question(client: TestClient) -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
-        {"current_answer": "", "new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
         {"current_answer": STUDENT_ANSWER, "new_favorite_answer": "Lagos"},
         {"current_answer": STUDENT_ANSWER, "new_favorite_question": "ab", "new_favorite_answer": "Lagos"},
         {"current_answer": STUDENT_ANSWER, "new_favorite_question": "What city?", "new_favorite_answer": "a"},
         {"current_answer": STUDENT_ANSWER, "new_favorite_question": "What city?", "new_favorite_answer": "x" * 101},
     ],
     ids=[
-        "missing-current", "empty-current", "missing-question",
+        "missing-question",
         "question-too-short", "answer-too-short", "answer-too-long",
     ],
 )
@@ -1520,6 +1518,23 @@ def test_change_qa_rejects_invalid_payloads(
 
     response = client.post(CHANGE_QA_URL, json=payload, headers=_auth(student["token"]))
     assert response.status_code == 422, response.text
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
+        {"current_answer": "", "new_favorite_question": "What city?", "new_favorite_answer": "Lagos"},
+    ],
+    ids=["missing-current", "empty-current"],
+)
+def test_change_qa_without_current_answer_is_refused(client: TestClient, payload: dict[str, str]) -> None:
+    """The current answer is optional only right after an admin reset."""
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    response = client.post(CHANGE_QA_URL, json=payload, headers=_auth(student["token"]))
+    assert response.status_code == 400, response.text
     assert _student_login(client, student["access_code"], STUDENT_ANSWER).status_code == 200
 
 
@@ -1577,3 +1592,42 @@ def test_teacher_cannot_change_student_qa(client: TestClient) -> None:
 def test_change_qa_requires_authentication(client: TestClient) -> None:
     response = client.post(CHANGE_QA_URL, json=VALID_QA_CHANGE)
     assert response.status_code == 401, response.text
+
+# ------------------------------------------------------------
+# After an admin reset: choose a new question at next sign-in
+# ------------------------------------------------------------
+
+def test_login_after_admin_reset_asks_for_a_new_question(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    assert _student_login(client, student["access_code"], STUDENT_ANSWER).json()["user"][
+        "security_reset_required"] is False
+
+    temp: str = _reset(client, token, student["id"], {"temp_answer": "blue-door-7"}).json()["temporary_answer"]
+    login = _student_login(client, student["access_code"], temp)
+    assert login.status_code == 200
+    assert login.json()["user"]["security_reset_required"] is True
+    student_token: str = login.json()["access_token"]
+
+    # The temporary answer can't be kept as their own.
+    r = client.post(CHANGE_QA_URL, json={"new_favorite_question": "Favourite colour?",
+                                         "new_favorite_answer": temp}, headers=_auth(student_token))
+    assert r.status_code == 400 and "temporary" in r.json()["detail"]
+
+    # No need to repeat the temporary answer: they just signed in with it.
+    r = client.post(CHANGE_QA_URL, json={"new_favorite_question": "Favourite colour?",
+                                         "new_favorite_answer": "green"}, headers=_auth(student_token))
+    assert r.status_code == 200, r.json()
+
+    assert _get_question(client, student["access_code"]).json()["favorite_question"] == "Favourite colour?"
+    again = _student_login(client, student["access_code"], "green")
+    assert again.status_code == 200 and again.json()["user"]["security_reset_required"] is False
+    assert _student_login(client, student["access_code"], temp).status_code == 401
+
+
+def test_current_answer_still_required_without_a_reset(client: TestClient) -> None:
+    token = get_super_admin_token(client)
+    student = _create_active_student(client, token)
+    r = client.post(CHANGE_QA_URL, json={"new_favorite_question": "Favourite colour?",
+                                         "new_favorite_answer": "green"}, headers=_auth(student["token"]))
+    assert r.status_code == 400 and "Current answer" in r.json()["detail"]

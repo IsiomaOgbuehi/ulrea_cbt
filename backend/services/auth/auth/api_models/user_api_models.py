@@ -170,6 +170,8 @@ class StudentLoginUserResponse(BaseModel):
     org_id: UUID | None = None
     verified: bool
     role: UserRole | None = None
+    # True after an admin reset: choose a new security question before continuing.
+    security_reset_required: bool = False
 
 class StudentLoginResponse(TokenBase):
     user: StudentLoginUserResponse
@@ -260,7 +262,8 @@ class DeleteUserResponse(BaseModel):
 
 
 class StudentChangeSecurityQARequest(BaseModel):
-    current_answer: str = Field(min_length=1, max_length=200)
+    # Not needed right after an admin reset (they just signed in with the temporary answer).
+    current_answer: str | None = Field(default=None, max_length=200)
     new_favorite_question: str = Field(min_length=3, max_length=200)
     new_favorite_answer: str = Field(min_length=2, max_length=100)
 

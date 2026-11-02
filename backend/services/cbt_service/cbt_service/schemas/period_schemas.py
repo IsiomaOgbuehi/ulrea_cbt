@@ -69,6 +69,10 @@ class OrgSettingsRead(BaseModel):
     period_parent_label: str
     period_child_label: str
     current_period_id: UUID | None
+    # What the organisation calls a group of candidates, e.g. "Class" / "Classes".
+    # None until chosen: the app then uses "Class" for schools, "Cohort" otherwise.
+    group_label: str | None = None
+    group_label_plural: str | None = None
     # True until an admin saves settings once; the app may then suggest
     # labels that suit the organisation type.
     is_default: bool
@@ -79,8 +83,27 @@ class OrgSettingsUpdate(BaseModel):
     period_parent_label: str | None = Field(default=None, max_length=40)
     period_child_label: str | None = Field(default=None, max_length=40)
     current_period_id: UUID | None = None   # send null to clear
+    # Send "" (or null) to go back to the default for the organisation type.
+    group_label: str | None = Field(default=None, max_length=40)
+    group_label_plural: str | None = Field(default=None, max_length=40)
 
     @field_validator("period_parent_label", "period_child_label")
     @classmethod
     def _label(cls, v: str | None) -> str | None:
         return None if v is None else _clean(v)
+
+    @field_validator("group_label", "group_label_plural")
+    @classmethod
+    def _group_label(cls, v: str | None) -> str | None:
+        text: str = " ".join((v or "").split())
+        return text or None
+
+    @model_validator(mode="after")
+    def _group_pair(self) -> "OrgSettingsUpdate":
+        # Both words, or neither (clearing).
+        fields = self.model_fields_set
+        if ("group_label" in fields) != ("group_label_plural" in fields) or (
+            (self.group_label is None) != (self.group_label_plural is None)
+        ):
+            raise ValueError("Give both the singular and plural group names (or clear both).")
+        return self

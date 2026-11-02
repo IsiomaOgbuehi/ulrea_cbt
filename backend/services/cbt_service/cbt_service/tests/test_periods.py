@@ -292,3 +292,35 @@ def test_exam_rejects_archived_period(client: TestClient, admin_headers: H) -> N
         headers=admin_headers,
     )
     assert r.status_code == 400
+
+
+# ------------------------------------------------------------ group label
+
+def test_group_label_set_and_cleared(client, admin_headers, teacher_headers) -> None:
+    r = client.get(f"{V1}/org-settings", headers=admin_headers).json()
+    assert (r["group_label"], r["group_label_plural"]) == (None, None)
+
+    r = client.patch(f"{V1}/org-settings", json={"group_label": "  Arm ", "group_label_plural": "Arms"},
+                     headers=admin_headers)
+    assert r.status_code == 200, r.json()
+    assert (r.json()["group_label"], r.json()["group_label_plural"]) == ("Arm", "Arms")
+    # Staff can read it (the whole app uses the word).
+    t = client.get(f"{V1}/org-settings", headers=teacher_headers).json()
+    assert t["group_label"] == "Arm"
+
+    # Saving other settings leaves it alone.
+    r = client.patch(f"{V1}/org-settings", json={"period_child_label": "Term"}, headers=admin_headers).json()
+    assert r["group_label"] == "Arm"
+
+    # Clearing goes back to the default for the organisation type.
+    r = client.patch(f"{V1}/org-settings", json={"group_label": "", "group_label_plural": ""},
+                     headers=admin_headers).json()
+    assert (r["group_label"], r["group_label_plural"]) == (None, None)
+
+
+def test_group_label_needs_both_words(client, admin_headers) -> None:
+    r = client.patch(f"{V1}/org-settings", json={"group_label": "Arm"}, headers=admin_headers)
+    assert r.status_code == 422
+    r = client.patch(f"{V1}/org-settings", json={"group_label": "Arm", "group_label_plural": ""},
+                     headers=admin_headers)
+    assert r.status_code == 422

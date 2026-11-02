@@ -19,6 +19,9 @@ class UserBase(SQLModel):
     access_code: str | None = Field(default=None, index=True, unique=True) # 6-char alphanumeric
     favorite_question: str | None = None
     favorite_answer_hash: str | None = None                   # hashed like password
+    # Set when an admin gives the student a temporary answer: they must pick a
+    # new security question and answer when they next sign in.
+    security_reset_required: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
 
 
 

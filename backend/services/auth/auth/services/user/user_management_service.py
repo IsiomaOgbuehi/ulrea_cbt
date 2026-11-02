@@ -1286,6 +1286,7 @@ class UserManagementService:
 
         user.favorite_question = "Enter the temporary answer given to you by your administrator"
         user.favorite_answer_hash = PasswordHasher.create(answer)
+        user.security_reset_required = True     # choose a new question at next sign-in
         session.add(user)
         session.commit()
         session.refresh(user)
@@ -1296,13 +1297,24 @@ class UserManagementService:
     def change_student_security_qa(
         session: Session, user: UserModel, payload: StudentChangeSecurityQARequest
     ) -> None:
-        if not user.favorite_answer_hash or not PasswordHasher.verify(
+        if user.security_reset_required:
+            # Just signed in with the temporary answer from an admin: no need to
+            # repeat it, but the new answer must be their own.
+            if user.favorite_answer_hash and PasswordHasher.verify(
+                payload.new_favorite_answer.strip(), user.favorite_answer_hash
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Choose a new answer, not the temporary one from your administrator.",
+                )
+        elif not payload.current_answer or not user.favorite_answer_hash or not PasswordHasher.verify(
             payload.current_answer, user.favorite_answer_hash
         ):
             # 400, not 401: a 401 may make the frontend log the student out.
             raise HTTPException(status_code=400, detail="Current answer is incorrect.")
 
         user.favorite_question = payload.new_favorite_question.strip()
-        user.favorite_answer_hash = PasswordHasher.create(payload.new_favorite_answer)
+        user.favorite_answer_hash = PasswordHasher.create(payload.new_favorite_answer.strip())
+        user.security_reset_required = False
         session.add(user)
         session.commit()
