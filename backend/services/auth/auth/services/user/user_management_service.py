@@ -28,6 +28,7 @@ from auth.services.user.user_context import UserContext
 from auth.database.schema.cohort.cohort_db import CohortMember, CohortModel, TeacherCohortAssignment
 from auth.database.schema.cohort.enum import MemberStatus
 from sqlalchemy import exists
+from sqlalchemy.orm import aliased
 from auth.services.teacher_cohort_service import TeacherCohortService
 from auth.services.role_service import SYSTEM_ROLES
 
@@ -900,10 +901,18 @@ class UserManagementService:
             ).where(CohortMember.cohort_id == cohort_id, CohortMember.status == MemberStatus.ACTIVE.value)
         if graduated is not None:
             # Graduated from at least one cohort in this organisation (or not).
-            has_graduated = exists().where(
-                CohortMember.student_id == UserModel.id,
-                CohortMember.org_id == org_id,
-                CohortMember.status == MemberStatus.GRADUATED.value,
+            # Its own alias of cohort_members, correlated to the student only, so it
+            # doesn't get tangled with the cohort_id join above.
+            grad = aliased(CohortMember)
+            has_graduated = (
+                select(grad.id)
+                .where(
+                    grad.student_id == UserModel.id,
+                    grad.org_id == org_id,
+                    grad.status == MemberStatus.GRADUATED.value,
+                )
+                .correlate(UserModel)
+                .exists()
             )
             base = base.where(has_graduated if graduated else ~has_graduated)
         

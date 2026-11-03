@@ -198,3 +198,19 @@ def test_student_list_shows_current_cohorts(client: TestClient) -> None:
     assert sorted(x["name"] for x in by_id[b]["cohorts"]) == sorted([cohort["name"], other["name"]])
     assert [x["id"] for x in by_id[c]["cohorts"]] == [cohort["id"]] and by_id[c]["graduations"] == []
     assert r.json()["total"] == 3
+
+
+def test_student_list_class_and_graduated_filters_together(client: TestClient) -> None:
+    """Regression: cohort_id + graduated used to fail (EXISTS auto-correlated to the joined table)."""
+    token, cohort, (a, b, c) = _setup(client)
+    other = _create_cohort(client, token, COHORT_2_PAYLOAD)
+    _add_students_to_cohort(client, token, other["id"], [a, b])
+    _act(client, token, cohort["id"], action="graduate", student_ids=[a])   # a: graduated from cohort, still in other
+
+    base = f"/api/v1/users/students?per_page=50&cohort_id={other['id']}"
+    r = client.get(f"{base}&graduated=true&status=active", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert [s["id"] for s in r.json()["students"]] == [a] and r.json()["total"] == 1
+    r = client.get(f"{base}&graduated=false", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert [s["id"] for s in r.json()["students"]] == [b]
