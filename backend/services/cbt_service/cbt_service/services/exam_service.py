@@ -1,9 +1,10 @@
 import logging
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import HTTPException, logger
 from sqlmodel import Session, select, delete as sql_delete, col, func
-from sqlalchemy import or_, and_, desc, false
+from sqlalchemy import or_, and_, desc, false, not_, ColumnElement
 from typing import Literal, Any
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -31,6 +32,7 @@ from cbt_service.services.item.scope_service import ScopeService
 from cbt_service.services.period_service import PeriodScope
 from cbt_service.services.difficulty_service import DifficultyScope
 from cbt_service.core.permissions import P
+from cbt_service.services.paging import page_of
 from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
 from sqlalchemy import exists
@@ -1232,26 +1234,135 @@ class ExamService:
 
 
     @staticmethod
-    def get_my_assignments(
-        session: Session,
-        current_user: CurrentUser,
-    ) -> list[MyAssignmentRead]:
+    def day_bounds(day: date, tz_name: str | None) -> tuple[datetime, datetime]:
+        """[start, end) of a calendar day in the given IANA zone, as UTC."""
+        try:
+            tz: tzinfo = ZoneInfo(tz_name) if tz_name else timezone.utc
+        except (ZoneInfoNotFoundError, ValueError):
+            raise HTTPException(status_code=400, detail="Unknown time zone")
+        start: datetime = datetime.combine(day, time.min, tzinfo=tz)
+        end: datetime = datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz)
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
-        assignments = session.exec(
+    @staticmethod
+    def _my_assignments_stmt(current_user: CurrentUser) -> "Select[tuple[ExamAssignment, ExamModel]]":
+        return (
             select(ExamAssignment, ExamModel)
-            .join(
-                ExamModel,
-                ExamAssignment.exam_id == ExamModel.id,
-            )
+            .join(ExamModel, ExamAssignment.exam_id == ExamModel.id)
             .where(
                 ExamAssignment.student_id == current_user.id,
                 ExamAssignment.org_id == current_user.org_id,
             )
-            .order_by(
-                ExamModel.start_time.desc().nulls_last()
-            )
-        ).all()
+        )
 
+    @staticmethod
+    def _my_day_conditions(
+        current_user: CurrentUser, ds: datetime, de: datetime,
+    ) -> tuple[ColumnElement[bool], ColumnElement[bool], ColumnElement[Any]]:
+        """SQL conditions splitting a student's exams around the day [ds, de):
+        (set for the day, past, the exam's date for filtering and ordering).
+
+        Today: the exam's window touches the day, or the student has an attempt
+        open or active that day — unless the window opened before the day and
+        the student already used every attempt.
+        Past: the window closed before the day, or the student used every
+        attempt before the day; never anything they're still working on.
+        Exams that open after the day are in neither."""
+        start_at = func.coalesce(col(ExamAssignment.scheduled_at), col(ExamModel.start_time))
+        end_at = func.coalesce(col(ExamAssignment.deadline_override), col(ExamModel.end_time))
+        mine = and_(
+            col(AttemptModel.student_id) == current_user.id,
+            col(AttemptModel.exam_id) == col(ExamModel.id),
+        )
+        active_that_day: ColumnElement[bool] = (
+            select(AttemptModel.id)
+            .where(
+                mine,
+                or_(
+                    col(AttemptModel.status).in_((AttemptStatus.STARTED, AttemptStatus.RESET)),
+                    and_(col(AttemptModel.started_at) >= ds, col(AttemptModel.started_at) < de),
+                    and_(col(AttemptModel.submitted_at) >= ds, col(AttemptModel.submitted_at) < de),
+                ),
+            )
+            .correlate(ExamModel)
+            .exists()
+        )
+        attempts_used = (
+            select(func.count(col(AttemptModel.id)))
+            .where(mine, col(AttemptModel.status) != AttemptStatus.RESET)
+            .correlate(ExamModel)
+            .scalar_subquery()
+        )
+        last_activity = (
+            select(func.max(func.coalesce(col(AttemptModel.submitted_at), col(AttemptModel.started_at))))
+            .where(mine)
+            .correlate(ExamModel)
+            .scalar_subquery()
+        )
+        window_touches_day = and_(
+            or_(start_at.is_(None), start_at < de),
+            or_(end_at.is_(None), end_at >= ds),
+        )
+        done_before_day = and_(
+            not_(active_that_day),
+            attempts_used >= func.coalesce(col(ExamModel.max_attempts), 1),
+            or_(start_at.is_(None), start_at < ds),
+        )
+        today = and_(or_(window_touches_day, active_that_day), not_(done_before_day))
+        past = and_(not_(active_that_day), or_(end_at < ds, done_before_day))
+        exam_date = func.coalesce(start_at, end_at, last_activity)
+        return today, past, exam_date
+
+    @staticmethod
+    def get_my_assignments(
+        session: Session,
+        current_user: CurrentUser,
+        day: date | None = None,
+        tz_name: str | None = None,
+    ) -> list[MyAssignmentRead]:
+        """The student's exams. With `day`, only those set for that day in
+        the student's time zone (see _my_day_conditions)."""
+        stmt = ExamService._my_assignments_stmt(current_user).order_by(
+            col(ExamModel.start_time).desc().nulls_last()
+        )
+        if day is not None:
+            ds, de = ExamService.day_bounds(day, tz_name)
+            today, _, _ = ExamService._my_day_conditions(current_user, ds, de)
+            stmt = stmt.where(today)
+        pairs: list[tuple[ExamAssignment, ExamModel]] = [(a, e) for a, e in session.exec(stmt).all()]
+        return ExamService._my_assignment_rows(session, current_user, pairs)
+
+    @staticmethod
+    def get_my_past_assignments(
+        session: Session,
+        current_user: CurrentUser,
+        day: date,
+        tz_name: str | None,
+        page: int,
+        page_size: int,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> tuple[list[MyAssignmentRead], int]:
+        """A page of the student's exams from before `day`, newest first,
+        optionally only those dated from `date_from` to `date_to` (inclusive)."""
+        ds, de = ExamService.day_bounds(day, tz_name)
+        _, past, exam_date = ExamService._my_day_conditions(current_user, ds, de)
+        stmt = ExamService._my_assignments_stmt(current_user).where(past)
+        if date_from is not None:
+            stmt = stmt.where(exam_date >= ExamService.day_bounds(date_from, tz_name)[0])
+        if date_to is not None:
+            stmt = stmt.where(exam_date < ExamService.day_bounds(date_to, tz_name)[1])
+        stmt = stmt.order_by(exam_date.desc().nulls_last(), col(ExamAssignment.id))
+        rows, total = page_of(session, stmt, page, page_size)
+        pairs: list[tuple[ExamAssignment, ExamModel]] = [(a, e) for a, e in rows]
+        return ExamService._my_assignment_rows(session, current_user, pairs), total
+
+    @staticmethod
+    def _my_assignment_rows(
+        session: Session,
+        current_user: CurrentUser,
+        assignments: list[tuple[ExamAssignment, ExamModel]],
+    ) -> list[MyAssignmentRead]:
         now = datetime.now(timezone.utc)
 
         # The student's attempts on these exams, in one query.
@@ -1271,7 +1382,7 @@ class ExamService:
             when = a.submitted_at or a.started_at
             return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
-        results = []
+        results: list[MyAssignmentRead] = []
 
         for assignment, exam in assignments:
             # Resolve the actual window for this specific assignment.
@@ -1413,8 +1524,12 @@ class ExamService:
         A reset with a new scheduled time overrides the exam's global window for
         that assignment only — everyone else still uses the exam-level window.
         """
-        effective_start = assignment.scheduled_at or exam.start_time
-        effective_end = assignment.deadline_override or exam.end_time
+        def _utc(d: datetime | None) -> datetime | None:
+            # Stored times are UTC; some drivers hand them back without a zone.
+            return d.replace(tzinfo=timezone.utc) if d is not None and d.tzinfo is None else d
+
+        effective_start = _utc(assignment.scheduled_at or exam.start_time)
+        effective_end = _utc(assignment.deadline_override or exam.end_time)
         return effective_start, effective_end
 
 
