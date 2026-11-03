@@ -1,5 +1,6 @@
 import logging
 from uuid import UUID
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
@@ -116,8 +117,32 @@ def exam_phase_counts(
 def get_my_assignments(
     session: SessionDep,
     current_user: CurrentUser = Depends(require_candidate_or(P.EXAMS_VIEW)),
-):
-    return ExamService.get_my_assignments(session, current_user)
+    day: date | None = Query(None, description="Only exams set for this day (YYYY-MM-DD)"),
+    tz: str | None = Query(None, max_length=64, description="IANA time zone the day is in; UTC when omitted"),
+) -> list[MyAssignmentRead]:
+    return ExamService.get_my_assignments(session, current_user, day, tz)
+
+
+@router.get("/my-assignments/past", response_model=PaginatedResponse[MyAssignmentRead])
+def get_my_past_assignments(
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_candidate_or(P.EXAMS_VIEW)),
+    day: date = Query(..., description="The student's today (YYYY-MM-DD); past is before this"),
+    tz: str | None = Query(None, max_length=64, description="IANA time zone; UTC when omitted"),
+    date_from: date | None = Query(None, description="Only exams dated on or after this day"),
+    date_to: date | None = Query(None, description="Only exams dated on or before this day"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+) -> PaginatedResponse[MyAssignmentRead]:
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=400, detail="The start date is after the end date")
+    items, total = ExamService.get_my_past_assignments(
+        session, current_user, day, tz, page, page_size, date_from, date_to,
+    )
+    return PaginatedResponse[MyAssignmentRead](
+        items=items, total=total, page=page, page_size=page_size,
+        total_pages=total_pages(total, page_size),
+    )
 
 
 ''' GET EXAM 🔍 '''
