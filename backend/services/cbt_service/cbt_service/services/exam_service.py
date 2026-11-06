@@ -1395,17 +1395,33 @@ class ExamService:
                 )
             )
 
+            mine: list[AttemptModel] = attempts_by_exam.get(exam.id, [])
+
+            def _out_of_time(a: AttemptModel) -> bool:
+                """Still marked started, but its time ran out (it's closed the
+                next time it's opened): show it as finished, not "Resume"."""
+                if a.status != AttemptStatus.STARTED or a.clock_started_at is None or a.resume_seconds is not None:
+                    return False
+                started = a.clock_started_at if a.clock_started_at.tzinfo else a.clock_started_at.replace(tzinfo=timezone.utc)
+                allowed = timedelta(
+                    minutes=exam.duration_minutes,
+                    seconds=(exam.extra_time_seconds or 0) + (a.extra_seconds or 0),
+                )
+                return now >= started + allowed
+
+            timed_out: list[AttemptModel] = [a for a in mine if _out_of_time(a)]
+            # An attempt under way carries on past the window (its own
+            # deadline, with any extra time given, decides when it ends).
             can_attempt = (
                 (effective_start is None or now >= effective_start)
                 and
                 (effective_end is None or now <= effective_end)
-            )
-
-            mine: list[AttemptModel] = attempts_by_exam.get(exam.id, [])
+            ) or any(a.status == AttemptStatus.STARTED and a not in timed_out for a in mine)
             resumable: list[AttemptModel] = [
-                a for a in mine if a.status in (AttemptStatus.STARTED, AttemptStatus.RESET)
+                a for a in mine
+                if a.status in (AttemptStatus.STARTED, AttemptStatus.RESET) and a not in timed_out
             ]
-            finished: list[AttemptModel] = [a for a in mine if a.status in closed]
+            finished: list[AttemptModel] = [a for a in mine if a.status in closed] + timed_out
             attempts_used: int = sum(1 for a in mine if a.status != AttemptStatus.RESET)
             max_attempts: int = exam.max_attempts or 1
             in_progress: AttemptModel | None = (
@@ -1433,7 +1449,11 @@ class ExamService:
                     assignment_id=assignment.id,
                     exam_id=exam.id,
                     exam_title=exam.title,
-                    status=assignment.status,
+                    status=(
+                        AssignmentStatus.SUBMITTED
+                        if timed_out and in_progress is None and assignment.status == AssignmentStatus.STARTED
+                        else assignment.status
+                    ),
                     scheduled_at=assignment.scheduled_at,
                     duration_minutes=exam.duration_minutes,
                     extra_time_seconds=exam.extra_time_seconds or 0,

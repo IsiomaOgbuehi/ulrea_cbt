@@ -1,6 +1,6 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from uuid import UUID
 from datetime import datetime
 
@@ -180,6 +180,50 @@ class CohortAttemptSummary(BaseModel):
     passed: bool | None
     awaiting_marking: int = 0
     late_answers: int = 0          # late answers waiting for a decision
+    extra_seconds: int = 0         # extra time staff gave this attempt
+    waiting_to_resume: bool = False   # reopened with extra time; the candidate hasn't come back yet
+    last_active_at: datetime | None = None   # last save from the candidate's device
+
+
+class ExtraTimeScope(BaseModel):
+    """
+    Who gets extra time: either the attempts listed, or everyone sitting an
+    exam (optionally one group, or "individual" for students assigned on their
+    own): those still writing plus those whose time ran out in the last
+    `ran_out_within_minutes`.
+    """
+    attempt_ids: list[UUID] | None = Field(default=None, max_length=5000)
+    exam_id: UUID | None = None
+    cohort_id: UUID | Literal["individual"] | None = None
+    ran_out_within_minutes: int = Field(default=60, ge=1, le=24 * 60)
+
+    @model_validator(mode="after")
+    def _one_way(self) -> "ExtraTimeScope":
+        if bool(self.attempt_ids) == (self.exam_id is not None):
+            raise ValueError("Give either attempt_ids or exam_id.")
+        if self.cohort_id is not None and self.exam_id is None:
+            raise ValueError("cohort_id needs exam_id.")
+        return self
+
+
+class ExtraTimeRequest(ExtraTimeScope):
+    minutes: int = Field(ge=1, le=600)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ExtraTimeSkipped(BaseModel):
+    attempt_id: UUID
+    detail: str
+
+
+class ExtraTimePreview(BaseModel):
+    running: int = 0          # still writing: the time is added to their deadline
+    reopening: int = 0        # ran out of time: reopened, time counted from when they're back
+    skipped: list[ExtraTimeSkipped] = []   # listed attempts that are left alone, and why
+
+
+class ExtraTimeSummary(ExtraTimePreview):
+    minutes: int
 
 
 class ResetAttemptRequest(BaseModel):

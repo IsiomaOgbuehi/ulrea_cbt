@@ -42,18 +42,47 @@ def create_access_token(
         expires_at=expires_at
     )
 
-def create_refresh_token(subject: UUID, org_id: UUID | None = None) -> str:
-    """org_id: keep refreshing into this organisation (people can belong to several)."""
-    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+def session_limits(role: str | None) -> tuple[timedelta, timedelta]:
+    """(idle limit, hard limit) for a sign-in session."""
+    if role == "student":
+        return (
+            timedelta(hours=settings.STUDENT_SESSION_IDLE_HOURS),
+            timedelta(days=settings.STUDENT_SESSION_MAX_DAYS),
+        )
+    return timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS), timedelta(days=settings.SESSION_MAX_DAYS)
+
+
+def create_refresh_token(
+    subject: UUID,
+    org_id: UUID | None = None,
+    role: str | None = None,
+    *,
+    sid: str | None = None,
+    auth_time: datetime | None = None,
+) -> str:
+    """
+    org_id: keep refreshing into this organisation (people can belong to several).
+    role: decides the session limits (students get shorter ones).
+    sid / auth_time: the sign-in session this token continues (a new one when omitted).
+    The token lasts the idle limit from now, but never past auth_time + the hard limit.
+    """
+    now = datetime.now(timezone.utc)
+    started: datetime = auth_time or now
+    idle, absolute = session_limits(role)
+    expires_at = min(now + idle, started + absolute)
 
     payload: dict[str, object] = {
         'sub': str(subject),
         'jti': str(uuid4()),  # unique id so it can be blacklisted individually
+        'sid': sid or str(uuid4()),   # the sign-in session, shared by every rotated token
+        'auth_time': int(started.timestamp()),
         'exp': expires_at,
         'type': 'refresh',   # distinguish from access token
     }
     if org_id is not None:
         payload['org_id'] = str(org_id)
+    if role is not None:
+        payload['role'] = str(getattr(role, "value", role))
 
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 

@@ -1,14 +1,16 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
 from sqlmodel import Session, delete, select, col, delete, func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, or_
 
 from pydantic import BaseModel
 from typing import Any
+import math
 import random
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -36,6 +38,11 @@ from cbt_service.schemas.attempt_schemas import (
     AttemptResponseDetail,
     AttemptSectionRead,
     CohortAttemptSummary,
+    ExtraTimePreview,
+    ExtraTimeRequest,
+    ExtraTimeScope,
+    ExtraTimeSkipped,
+    ExtraTimeSummary,
     ResetAttemptRequest,
     StartAttemptRequest,
     SaveResponseRequest,
@@ -78,6 +85,23 @@ CLOCK_SLACK: timedelta = timedelta(seconds=10)
 CLOSED_ATTEMPT_STATUSES: tuple[AttemptStatus, ...] = (
     AttemptStatus.SUBMITTED, AttemptStatus.SCORED, AttemptStatus.TERMINATED,
 )
+
+
+_CHUNK: int = 1000   # ids per IN (...) list, far below the driver's parameter cap
+
+
+def _chunks(ids: list[UUID]) -> list[list[UUID]]:
+    return [ids[i:i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
+
+
+@dataclass
+class _ExtraTimePlan:
+    running: list[UUID] = field(default_factory=list)     # extra_seconds += minutes
+    waiting: list[UUID] = field(default_factory=list)     # reopened earlier: resume_seconds += minutes
+    reopen: list[UUID] = field(default_factory=list)      # ran out of time: reopen
+    reopen_assignments: list[UUID] = field(default_factory=list)
+    skipped: list[ExtraTimeSkipped] = field(default_factory=list)
+    exam_ids: set[UUID] = field(default_factory=set)
 
 
 class AttemptService:
@@ -132,6 +156,12 @@ class AttemptService:
             )
         ).all()
 
+        # An attempt already under way carries on whatever the window says: its
+        # own deadline (including any extra time given) decides when it ends.
+        in_progress = next((a for a in existing if a.status == AttemptStatus.STARTED), None)
+        if in_progress:
+            return in_progress
+
         effective_start, effective_end = ExamService.get_effective_window(exam, assignment)
         now = datetime.now(timezone.utc)
 
@@ -139,10 +169,6 @@ class AttemptService:
             raise HTTPException(status_code=400, detail="This exam is not yet available.")
         if effective_end and now > effective_end:
             raise HTTPException(status_code=400, detail="The window for this exam has closed.")
-
-        in_progress = next((a for a in existing if a.status == AttemptStatus.STARTED), None)
-        if in_progress:
-            return in_progress
 
         # Reactivate a reset attempt in place, instead of creating a new row.
         # A reset is meant to give the SAME attempt a clean restart, not free
@@ -155,6 +181,9 @@ class AttemptService:
             attempt_to_resume.status = AttemptStatus.STARTED
             attempt_to_resume.started_at = datetime.now(timezone.utc)
             attempt_to_resume.clock_started_at = None      # starts when the questions are sent
+            attempt_to_resume.extra_seconds = 0
+            attempt_to_resume.extra_given_seconds = 0
+            attempt_to_resume.resume_seconds = None
             attempt_to_resume.submitted_at = None
             attempt_to_resume.raw_score = None
             attempt_to_resume.final_score = None
@@ -252,10 +281,30 @@ class AttemptService:
 
     @staticmethod
     def _deadline(attempt: AttemptModel, exam: ExamModel) -> datetime | None:
-        """When time runs out; None while the clock hasn't started (questions not yet sent)."""
-        if attempt.clock_started_at is None:
+        """When time runs out; None while the clock is stopped: the questions
+        haven't been sent yet, or a reopened attempt is waiting for the
+        candidate to come back."""
+        if attempt.clock_started_at is None or attempt.resume_seconds is not None:
             return None
-        return AttemptService._aware(attempt.clock_started_at) + AttemptService._allowed(exam)
+        return (
+            AttemptService._aware(attempt.clock_started_at) + AttemptService._allowed(exam)
+            + timedelta(seconds=attempt.extra_seconds or 0)
+        )
+
+    @staticmethod
+    def _clock_running(attempt: AttemptModel) -> bool:
+        return attempt.clock_started_at is not None and attempt.resume_seconds is None
+
+    @staticmethod
+    def _resume_clock(attempt: AttemptModel, exam: ExamModel, now: datetime) -> None:
+        """A reopened attempt: the candidate is back, so their time starts now."""
+        if attempt.resume_seconds is None or attempt.clock_started_at is None:
+            return
+        used: timedelta = now - AttemptService._aware(attempt.clock_started_at)
+        attempt.extra_seconds = max(
+            0, math.ceil((used - AttemptService._allowed(exam)).total_seconds()) + attempt.resume_seconds,
+        )
+        attempt.resume_seconds = None
 
     @staticmethod
     def _timing(attempt: AttemptModel, exam: ExamModel | None, now: datetime) -> tuple[datetime, int]:
@@ -263,7 +312,11 @@ class AttemptService:
         if exam is None:
             return now, 0
         deadline = AttemptService._deadline(attempt, exam)
-        expires_at = deadline if deadline is not None else now + AttemptService._allowed(exam)
+        stopped_for: timedelta = (
+            timedelta(seconds=attempt.resume_seconds) if attempt.resume_seconds is not None
+            else AttemptService._allowed(exam) + timedelta(seconds=attempt.extra_seconds or 0)
+        )
+        expires_at = deadline if deadline is not None else now + stopped_for
         remaining = (
             max(0, int((expires_at - now).total_seconds())) if attempt.status == AttemptStatus.STARTED else 0
         )
@@ -774,8 +827,10 @@ class AttemptService:
         # The clock starts now, when the questions are first sent: time spent
         # loading the page on a slow connection doesn't count.
         now = datetime.now(timezone.utc)
-        if attempt.status == AttemptStatus.STARTED and attempt.clock_started_at is None:
-            attempt.clock_started_at = now
+        if attempt.status == AttemptStatus.STARTED and not AttemptService._clock_running(attempt):
+            if attempt.clock_started_at is None:
+                attempt.clock_started_at = now
+            AttemptService._resume_clock(attempt, exam, now)
             session.add(attempt)
             session.commit()
             session.refresh(attempt)
@@ -939,8 +994,12 @@ class AttemptService:
 
     @staticmethod
     def summaries(session: Session, attempts: list[AttemptModel]) -> list[CohortAttemptSummary]:
-        waiting: dict[UUID, int] = AttemptService.awaiting_marking(session, [a.id for a in attempts])
+        # Nothing is marked while the candidate is still writing.
+        waiting: dict[UUID, int] = AttemptService.awaiting_marking(
+            session, [a.id for a in attempts if a.status != AttemptStatus.STARTED],
+        )
         late: dict[UUID, int] = AttemptService.late_pending_counts(session, [a.id for a in attempts])
+        active: dict[UUID, datetime] = AttemptService.last_active(session, [a.id for a in attempts])
         return [
             CohortAttemptSummary(
                 id=a.id, student_id=a.student_id, status=a.status, attempt_number=a.attempt_number,
@@ -948,9 +1007,234 @@ class AttemptService:
                 percentage=a.percentage, passed=a.passed,
                 awaiting_marking=waiting.get(a.id, 0),
                 late_answers=late.get(a.id, 0),
+                extra_seconds=a.extra_given_seconds or 0,
+                waiting_to_resume=a.resume_seconds is not None,
+                last_active_at=active.get(a.id),
             )
             for a in attempts
         ]
+
+    @staticmethod
+    def last_active(session: Session, attempt_ids: list[UUID]) -> dict[UUID, datetime]:
+        """Per attempt: the last time the candidate's device saved anything
+        (answers are saved as they're given, and every 30 seconds while open)."""
+        if not attempt_ids:
+            return {}
+        rows = session.exec(
+            select(ResponseModel.attempt_id, func.max(ResponseModel.updated_at))
+            .where(col(ResponseModel.attempt_id).in_(attempt_ids))
+            .group_by(col(ResponseModel.attempt_id))
+        ).all()
+        return {attempt_id: AttemptService._aware(when) for attempt_id, when in rows if when is not None}
+
+    # ------------------------------------------------------------ extra time
+    #
+    # Set-based so a whole hall costs the same as one student: one query to
+    # find the attempts, then a handful of UPDATEs over id lists (chunked to
+    # stay under the driver's parameter limit), never a loop of queries.
+
+    @staticmethod
+    def _plan_extra_time(
+        session: Session, scope: ExtraTimeScope, current_user: CurrentUser, now: datetime,
+    ) -> _ExtraTimePlan:
+        cols = (
+            select(
+                AttemptModel.id, AttemptModel.assignment_id, AttemptModel.exam_id, AttemptModel.status,
+                AttemptModel.clock_started_at, AttemptModel.resume_seconds, AttemptModel.extra_seconds,
+                AttemptModel.submitted_at, ExamModel.duration_minutes, ExamModel.extra_time_seconds,
+            )
+            .join(ExamModel, col(ExamModel.id) == col(AttemptModel.exam_id))
+            .where(AttemptModel.org_id == current_user.org_id)
+        )
+        rows: list[Any] = []
+        listed: list[UUID] = list(dict.fromkeys(scope.attempt_ids or []))
+        if listed:
+            for chunk in _chunks(listed):
+                rows.extend(session.exec(cols.where(col(AttemptModel.id).in_(chunk))).all())
+        else:
+            exam = session.get(ExamModel, scope.exam_id)
+            if exam is None or exam.org_id != current_user.org_id:
+                raise HTTPException(status_code=404, detail="Exam not found.")
+            since: datetime = now - timedelta(minutes=scope.ran_out_within_minutes)
+            stmt = cols.where(
+                AttemptModel.exam_id == exam.id,
+                or_(
+                    AttemptModel.status == AttemptStatus.STARTED,
+                    and_(
+                        col(AttemptModel.status).in_((AttemptStatus.SUBMITTED, AttemptStatus.SCORED)),
+                        col(AttemptModel.submitted_at) >= since,
+                    ),
+                ),
+            )
+            if scope.cohort_id is not None:
+                stmt = stmt.join(ExamAssignment, col(ExamAssignment.id) == col(AttemptModel.assignment_id))
+                stmt = stmt.where(
+                    col(ExamAssignment.cohort_id).is_(None) if scope.cohort_id == "individual"
+                    else ExamAssignment.cohort_id == scope.cohort_id
+                )
+            rows = list(session.exec(stmt).all())
+
+        plan = _ExtraTimePlan()
+        found: set[UUID] = set()
+        for r in rows:
+            found.add(r.id)
+            plan.exam_ids.add(r.exam_id)
+            deadline: datetime | None = (
+                None if r.clock_started_at is None or r.resume_seconds is not None
+                else AttemptService._aware(r.clock_started_at) + timedelta(
+                    minutes=r.duration_minutes, seconds=(r.extra_time_seconds or 0) + (r.extra_seconds or 0),
+                )
+            )
+            if r.status == AttemptStatus.STARTED:
+                if r.resume_seconds is not None:
+                    plan.waiting.append(r.id)            # reopened earlier, not back yet
+                elif deadline is None or now < deadline:
+                    plan.running.append(r.id)
+                else:
+                    # Time ran out but nothing has closed it yet: reopen straight
+                    # away, no point scoring a script only to reopen it.
+                    plan.reopen.append(r.id)
+                    plan.reopen_assignments.append(r.assignment_id)
+            elif (
+                r.status in (AttemptStatus.SUBMITTED, AttemptStatus.SCORED)
+                and deadline is not None and r.submitted_at is not None
+                and AttemptService._aware(r.submitted_at) >= deadline - CLOCK_SLACK
+            ):
+                plan.reopen.append(r.id)
+                plan.reopen_assignments.append(r.assignment_id)
+            else:
+                plan.skipped.append(ExtraTimeSkipped(
+                    attempt_id=r.id,
+                    detail={
+                        AttemptStatus.TERMINATED: "Ended for violations.",
+                        AttemptStatus.RESET: "Reset; not started again yet.",
+                    }.get(r.status, "Submitted by the candidate before time ran out."),
+                ))
+        if listed:
+            plan.skipped.extend(
+                ExtraTimeSkipped(attempt_id=i, detail="Attempt not found.") for i in listed if i not in found
+            )
+        else:
+            plan.skipped = []      # everyone else simply isn't affected
+        return plan
+
+    @staticmethod
+    def preview_extra_time(
+        session: Session, scope: ExtraTimeScope, current_user: CurrentUser,
+    ) -> ExtraTimePreview:
+        plan = AttemptService._plan_extra_time(session, scope, current_user, datetime.now(timezone.utc))
+        return ExtraTimePreview(
+            running=len(plan.running) + len(plan.waiting), reopening=len(plan.reopen), skipped=plan.skipped,
+        )
+
+    @staticmethod
+    def give_extra_time(
+        session: Session, payload: ExtraTimeRequest, current_user: CurrentUser,
+    ) -> ExtraTimeSummary:
+        """
+        Add time after a disruption, keeping every answer.
+        - Still writing: the time is added to their deadline.
+        - Ran out of time: reopened; the clock is stopped until they come back,
+          then they get the time from that moment. Answers held as late are
+          put back. The score is cleared until it's submitted again.
+        - Submitted by the candidate, ended for violations, or reset: left alone.
+        """
+        now = datetime.now(timezone.utc)
+        seconds: int = payload.minutes * 60
+        plan = AttemptService._plan_extra_time(session, payload, current_user, now)
+
+        for chunk in _chunks(plan.running):
+            session.exec(
+                update(AttemptModel)
+                .where(
+                    col(AttemptModel.id).in_(chunk), AttemptModel.status == AttemptStatus.STARTED,
+                    col(AttemptModel.resume_seconds).is_(None),
+                )
+                .values(
+                    extra_seconds=col(AttemptModel.extra_seconds) + seconds,
+                    extra_given_seconds=col(AttemptModel.extra_given_seconds) + seconds,
+                )
+            )
+        for chunk in _chunks(plan.waiting):
+            session.exec(
+                update(AttemptModel)
+                .where(col(AttemptModel.id).in_(chunk), col(AttemptModel.resume_seconds).is_not(None))
+                .values(
+                    resume_seconds=col(AttemptModel.resume_seconds) + seconds,
+                    extra_given_seconds=col(AttemptModel.extra_given_seconds) + seconds,
+                )
+            )
+        for chunk in _chunks(plan.reopen):
+            session.exec(
+                update(AttemptModel)
+                .where(
+                    col(AttemptModel.id).in_(chunk),
+                    col(AttemptModel.status).in_((AttemptStatus.STARTED, AttemptStatus.SUBMITTED, AttemptStatus.SCORED)),
+                )
+                .values(
+                    status=AttemptStatus.STARTED, resume_seconds=seconds, submitted_at=None,
+                    extra_given_seconds=col(AttemptModel.extra_given_seconds) + seconds,
+                    raw_score=None, final_score=None, percentage=None, passed=None,
+                    scored_at=None, scored_by=None,
+                )
+            )
+        for chunk in _chunks(plan.reopen_assignments):
+            session.exec(
+                update(ExamAssignment)
+                .where(col(ExamAssignment.id).in_(chunk))
+                .values(status=AssignmentStatus.STARTED)
+            )
+        AttemptService._restore_late_answers(session, plan.reopen, current_user.id, now)
+
+        for exam_id in plan.exam_ids:
+            _log(session, exam_id, current_user.org_id, current_user.id, "attempt_extra_time", {
+                "minutes": payload.minutes, "reason": payload.reason,
+                "running": len(plan.running) + len(plan.waiting), "reopened": len(plan.reopen),
+                "scope": "selected" if payload.attempt_ids else (
+                    "exam" if payload.cohort_id is None else f"group:{payload.cohort_id}"
+                ),
+                "attempt_ids": [str(i) for i in plan.running + plan.waiting + plan.reopen],
+            })
+        session.commit()
+        return ExtraTimeSummary(
+            minutes=payload.minutes, running=len(plan.running) + len(plan.waiting),
+            reopening=len(plan.reopen), skipped=plan.skipped,
+        )
+
+    @staticmethod
+    def _restore_late_answers(
+        session: Session, attempt_ids: list[UUID], actor_id: UUID, now: datetime,
+    ) -> None:
+        """Late answers on reopened attempts were work in progress: make them
+        the saved answers again (two reads and a batched write)."""
+        if not attempt_ids:
+            return
+        lates: list[LateResponseModel] = []
+        for chunk in _chunks(attempt_ids):
+            lates.extend(session.exec(
+                select(LateResponseModel).where(
+                    col(LateResponseModel.attempt_id).in_(chunk), LateResponseModel.status == "pending",
+                )
+            ).all())
+        if not lates:
+            return
+        late_attempts: list[UUID] = list({l.attempt_id for l in lates})
+        existing: dict[tuple[UUID, UUID], ResponseModel] = {}
+        for chunk in _chunks(late_attempts):
+            for r in session.exec(select(ResponseModel).where(col(ResponseModel.attempt_id).in_(chunk))).all():
+                existing[(r.attempt_id, r.item_id)] = r
+        for late in lates:
+            response = existing.get((late.attempt_id, late.item_id)) or ResponseModel(
+                attempt_id=late.attempt_id, item_id=late.item_id,
+                exam_item_id=late.exam_item_id, org_id=late.org_id,
+            )
+            response.answer = late.answer
+            response.updated_at = late.received_at
+            session.add(response)
+            late.status = "accepted"
+            late.decided_by = actor_id
+            late.decided_at = now
+            session.add(late)
 
     @staticmethod
     def attempts_page(
@@ -1104,6 +1388,9 @@ class AttemptService:
 
         # 3. Reset the attempt itself. start() reactivates this same row.
         attempt.status = AttemptStatus.RESET
+        attempt.extra_seconds = 0
+        attempt.extra_given_seconds = 0
+        attempt.resume_seconds = None
         attempt.submitted_at = None
         attempt.raw_score = None
         attempt.final_score = None
@@ -1381,7 +1668,7 @@ class AttemptService:
             passed=None if hide else attempt.passed,
             expires_at=expires_at, remaining_seconds=remaining, server_time=now,
             show_result=show_result, allow_review=bool(exam.allow_review) if exam else False,
-            clock_started=attempt.clock_started_at is not None,
+            clock_started=AttemptService._clock_running(attempt),
             awaiting_marking=(
                 0 if attempt.status == AttemptStatus.STARTED
                 else AttemptService.awaiting_marking(session, [attempt.id]).get(attempt.id, 0)
@@ -1400,7 +1687,7 @@ class AttemptService:
             final_score=attempt.final_score, percentage=attempt.percentage,
             passed=attempt.passed, expires_at=expires_at,
             remaining_seconds=remaining, server_time=now,
-            clock_started=attempt.clock_started_at is not None,
+            clock_started=AttemptService._clock_running(attempt),
         )
 
 

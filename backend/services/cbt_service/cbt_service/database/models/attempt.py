@@ -44,6 +44,16 @@ class AttemptModel(SQLModel, table=True):
     clock_started_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Extra time staff gave this attempt (after a power cut, say), on top of
+    # the exam's duration.
+    extra_seconds: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+    # Set when an attempt that ran out of time is reopened: the candidate gets
+    # this many seconds, counted from when they come back. The clock is
+    # stopped until then.
+    resume_seconds: int | None = None
+    # Everything staff gave, for display (extra_seconds also covers time a
+    # reopened attempt spent waiting for the candidate).
+    extra_given_seconds: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
 
     raw_score: float | None = None
     final_score: float | None = None

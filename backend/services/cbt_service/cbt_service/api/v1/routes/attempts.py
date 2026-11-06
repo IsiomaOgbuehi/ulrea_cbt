@@ -19,6 +19,10 @@ from cbt_service.schemas.attempt_schemas import (
     AttemptStatusRead,
     CohortAttemptSummary,
     ResetAttemptRequest,
+    ExtraTimePreview,
+    ExtraTimeRequest,
+    ExtraTimeScope,
+    ExtraTimeSummary,
     StartAttemptRequest,
     SaveResponseRequest,
     ManualReviewRequest,
@@ -292,6 +296,30 @@ def reset_attempt(
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
     exam = session.get(ExamModel, attempt.exam_id)
     return AttemptService._to_attempt_read_new(attempt, exam)
+
+
+
+''' GIVE EXTRA TIME ⏱️ '''
+@router.post("/extra-time/preview", response_model=ExtraTimePreview)
+def preview_extra_time(
+    payload: ExtraTimeScope,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.ATTEMPTS_EXTRA_TIME)),
+) -> ExtraTimePreview:
+    """How many attempts extra time would reach, before giving it."""
+    return AttemptService.preview_extra_time(session, payload, current_user)
+
+
+@router.post("/extra-time", response_model=ExtraTimeSummary)
+def give_extra_time(
+    payload: ExtraTimeRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.ATTEMPTS_EXTRA_TIME)),
+) -> ExtraTimeSummary:
+    """Add time to the attempts listed, or to everyone sitting an exam (or one
+    group of it), keeping their answers. Attempts that ran out of time reopen,
+    with the time counted from when the candidate is back."""
+    return AttemptService.give_extra_time(session, payload, current_user)
 
 
 

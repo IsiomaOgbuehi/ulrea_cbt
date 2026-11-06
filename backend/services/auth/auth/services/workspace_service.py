@@ -112,7 +112,7 @@ class WorkspaceService:
         )
         return LoginResponse(
             access_token=access.access_token,
-            refresh_token=create_refresh_token(user.id, org_id=membership.org_id),
+            refresh_token=create_refresh_token(user.id, org_id=membership.org_id, role=membership.role),
             user=StaffUserResponse.model_validate(user, from_attributes=True),
             organization=OrganizationRead.model_validate(org, from_attributes=True),
             requires_setup=requires_setup,

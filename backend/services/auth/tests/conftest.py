@@ -82,7 +82,11 @@ def mock_email():
 def mock_redis():
     store = {}
 
-    async def fake_set(key, value, ex=None): store[key] = value
+    async def fake_set(key, value, ex=None, nx=False):
+        if nx and key in store:
+            return None
+        store[key] = value
+        return True
     async def fake_get(key): return store.get(key)
     async def fake_delete(key): store.pop(key, None)
     async def fake_incr(key):
@@ -108,8 +112,6 @@ def mock_redis():
     mock.aclose = fake_aclose
 
     with patch("auth.utility.redis.redis_client.redis_client", mock), \
-     patch("auth.api.v1.routes.auth.redis_client", mock), \
-     patch("auth.dependencies.auth_dependencies.redis_client", mock), \
      patch("auth.utility.email.email_service.EmailService.send_otp_email", new_callable=AsyncMock), \
      patch("auth.utility.email.email_service.EmailService.send_staff_welcome_email",new_callable=AsyncMock), \
      patch("auth.utility.otp.otp_service.redis_client", mock):

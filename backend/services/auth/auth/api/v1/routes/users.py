@@ -402,7 +402,7 @@ def staff_first_login_setup(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StaffFirstLoginResponse(
         detail="Password updated. Account is now fully active.",
@@ -483,7 +483,9 @@ def activate_staff_account(
         access_token = create_access_token(
             user.id, org_id, role, perms=RoleService.token_perms(session, active_membership),
         )
-        refresh_token = create_refresh_token(user.id)
+        refresh_token = create_refresh_token(
+            user.id, active_membership.org_id if active_membership else None, role,
+        )
 
         return StaffActivateResponse(
             detail="Account activated successfully.",
@@ -559,7 +561,7 @@ def student_first_login_setup(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StudentFirstLoginResponse(
         access_token=token.access_token,
@@ -699,7 +701,7 @@ def student_login(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
         
     user_data = StudentLoginUserResponse.model_validate(user, from_attributes=True)
@@ -1027,7 +1029,7 @@ def student_reset_password(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StudentFirstLoginResponse(
         access_token=token.access_token,

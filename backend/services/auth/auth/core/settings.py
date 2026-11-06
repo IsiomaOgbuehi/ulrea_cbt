@@ -14,9 +14,15 @@ class Settings(BaseSettings):
     # Auth Secret Key
     SECRET_KEY: str
     JWT_SECRET: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_ALGORITHM: str
+    # Sessions slide: each refresh pushes the end out again, up to a hard limit.
+    # Staff: signed out after REFRESH_TOKEN_EXPIRE_DAYS unused, SESSION_MAX_DAYS at most.
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    SESSION_MAX_DAYS: int = 30
+    # Students often share computers: a much shorter idle limit.
+    STUDENT_SESSION_IDLE_HOURS: int = 4
+    STUDENT_SESSION_MAX_DAYS: int = 7
 
 
     OTP_SECRET: str

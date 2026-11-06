@@ -9,14 +9,16 @@ from auth.api_models.login_response import LoginResponse, TokenData
 from auth.api.v1.auth_routes import AuthRoutes
 from auth.database.database import SessionDep
 from auth.dependencies.user_dependencies import authenticate_user
-from auth.utility.jwt.jwt import create_access_token, create_refresh_token, create_student_provisional_token, decode_refresh_token
+from auth.utility.jwt.jwt import create_access_token, create_refresh_token, create_student_provisional_token, decode_refresh_token, session_limits
 from datetime import datetime, timezone
 from auth.api_models import SignUp, SignUpResponse
 from auth.database.schema import OrganizationModel, UserModel, OrganizationRead
 from auth.api_models.user_api_models import StaffUserResponse, UserRead, UserReadResponse
 from auth.utility.password.password_harsher import PasswordHasher
 import jwt
-from auth.utility.redis.redis_client import redis_client
+from auth.utility.redis.token_blacklist import (
+    claim_refresh, remember_rotation, revoke, revoke_session, rotation_for, session_revoked,
+)
 from auth.api_models.schemas.otp import OTPResponse, OTPRequestSchema, OTPVerifyResponse, OTPVerifySchema
 from auth.utility.otp.otp_service import OtpService
 import logging
@@ -45,6 +47,8 @@ from auth.services.user.user_context import UserContext
 IS_DEV = settings.ENVIRONMENT == "dev"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f'{AuthRoutes.API_VERSION.value}{AuthRoutes.BASE_ROUTE.value}{AuthRoutes.LOGIN.value}')
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix=AuthRoutes.BASE_ROUTE.value,
@@ -314,8 +318,7 @@ async def _revoke(token: str | None) -> None:
     except jwt.InvalidTokenError:
         return
     ttl = int(claims['exp'] - datetime.now(timezone.utc).timestamp())
-    if ttl > 0:
-        await redis_client.set(f"blacklist:jti:{claims['jti']}", 1, ex=ttl)
+    await revoke(str(claims['jti']), ttl)
 
 
 ''' REFRESH TOKEN 🔄 '''
@@ -333,8 +336,29 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
         raise HTTPException(status_code=401, detail="Invalid refresh token.")
 
     jti = token_payload.get('jti')
-    is_blacklisted = await redis_client.get(f"blacklist:jti:{jti}")
-    if is_blacklisted:
+    if not jti:
+        raise HTTPException(status_code=401, detail="Invalid refresh token.")
+    jti = str(jti)
+    # Tokens from before sessions were tracked: start a session from this one.
+    sid: str = str(token_payload.get('sid') or jti)
+    raw_auth_time = token_payload.get('auth_time')
+    auth_time: datetime = (
+        datetime.fromtimestamp(int(raw_auth_time), tz=timezone.utc) if raw_auth_time is not None
+        else datetime.now(timezone.utc)
+    )
+    ttl: int = int(token_payload['exp'] - datetime.now(timezone.utc).timestamp())
+
+    if await session_revoked(sid):
+        raise HTTPException(status_code=401, detail="Refresh token has been revoked. Please log in again.")
+    if not await claim_refresh(jti, ttl):
+        # Already used. Two tabs refreshing together share the new pair;
+        # anything else means a copy of the token is being reused.
+        shared = await rotation_for(jti)
+        if shared is not None:
+            return RefreshResponse(access_token=shared["access_token"], refresh_token=shared["refresh_token"])
+        _, absolute = session_limits(token_payload.get('role'))
+        await revoke_session(sid, int(absolute.total_seconds()))
+        logger.warning("Refresh token reused; ended session %s for user %s", sid, token_payload.get('sub'))
         raise HTTPException(status_code=401, detail="Refresh token has been revoked. Please log in again.")
 
     # ✅ Convert string back to UUID before querying
@@ -349,8 +373,12 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
 
     new_perms = await run_in_threadpool(RoleService.token_perms, session, membership)
     new_token = create_access_token(user.id, membership.org_id, membership.role, perms=new_perms)
+    new_refresh: str = create_refresh_token(
+        user.id, membership.org_id, membership.role, sid=sid, auth_time=auth_time,
+    )
+    await remember_rotation(jti, {"access_token": new_token.access_token, "refresh_token": new_refresh})
 
-    return RefreshResponse(access_token=new_token.access_token)
+    return RefreshResponse(access_token=new_token.access_token, refresh_token=new_refresh)
 
 
 
@@ -363,8 +391,7 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
     access_exp = access_payload['exp']
     now = datetime.now(timezone.utc).timestamp()
     access_ttl = int(access_exp - now)
-    if access_ttl > 0:
-        await redis_client.set(f"blacklist:jti:{access_jti}", 1, ex=access_ttl)
+    await revoke(str(access_jti), access_ttl)
 
     # Blacklist the refresh token too
     try:
@@ -372,8 +399,10 @@ async def logout(payload: RefreshRequest, token: str = Depends(oauth2_scheme)):
         refresh_jti = refresh_payload['jti']
         refresh_exp = refresh_payload['exp']
         refresh_ttl = int(refresh_exp - now)
-        if refresh_ttl > 0:
-            await redis_client.set(f"blacklist:jti:{refresh_jti}", 1, ex=refresh_ttl)
+        await revoke(str(refresh_jti), refresh_ttl)
+        # End the whole session, so no token rotated from it keeps working.
+        _, absolute = session_limits(refresh_payload.get('role'))
+        await revoke_session(str(refresh_payload.get('sid') or refresh_jti), int(absolute.total_seconds()))
     except Exception:
         pass  # if refresh token is invalid/expired, no need to blacklist
 
@@ -608,7 +637,7 @@ def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OT
             user.id, membership.org_id, membership.role,
             perms=RoleService.token_perms(session, membership),
         ).access_token,
-            refresh_token=create_refresh_token(user.id),
+            refresh_token=create_refresh_token(user.id, membership.org_id, membership.role),
         ),
     )
 
