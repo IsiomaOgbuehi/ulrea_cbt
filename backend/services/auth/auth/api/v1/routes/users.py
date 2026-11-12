@@ -12,7 +12,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole, Verifica
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentChangeSecurityQARequest, StudentCreatedResponse, StudentCredentialResetRequest, StudentCredentialResetResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentCheck, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentChangeSecurityQARequest, StudentCreatedResponse, StudentCredentialResetRequest, StudentCredentialResetResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -292,6 +292,8 @@ async def create_student(
         org_id=ctx.membership.org_id,
         role=memebership.role if memebership else None,
         access_code=access_code,  # caller shares this with student
+        institution_id=memebership.institution_id if memebership else None,
+        institution_id_generated=bool(memebership and memebership.institution_id_generated),
     )
 
 
@@ -307,6 +309,21 @@ def download_student_template(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=students_template.xlsx"},
     )
+
+
+''' CHECK A STUDENT UPLOAD 🔎 '''
+@router.post(AuthRoutes.CHECK_STUDENTS_BULK.value, response_model=BulkStudentCheck)
+async def check_students_bulk(
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
+    file: UploadFile = File(...),
+) -> BulkStudentCheck:
+    """Look at an upload before creating anything: which rows have no
+    institution ID (Juwazi will generate one for each, if the user agrees)."""
+    if not (file.filename or "").endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
+    rows = parse_student_excel(await file.read(), file.filename or "")
+    missing = [n for n, row in enumerate(rows, start=2) if not str(row.get("institution_id") or "").strip()]
+    return BulkStudentCheck(total_rows=len(rows), missing_institution_id_rows=missing)
 
 
 ''' BULK CREATE STUDENTS 📤 '''
@@ -1098,6 +1115,8 @@ def list_students(
             StudentListItem(
                 id=user.id, firstname=user.firstname, lastname=user.lastname,
                 email=user.email, access_code=user.access_code,
+                institution_id=membership.institution_id,
+                institution_id_generated=membership.institution_id_generated,
                 status=membership.status, created_at=membership.created_at,
                 cohorts=cohorts.get(user.id, []),
                 graduations=graduations.get(user.id, []),

@@ -23,6 +23,7 @@ from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentR
 from auth.utility.password.password_harsher import PasswordHasher
 from auth.services.subscription_service import SubscriptionService
 from auth.services.membership_service import MembershipService
+from auth.services.user import institution_ids
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
 from auth.database.schema.cohort.cohort_db import CohortMember, CohortModel, TeacherCohortAssignment
@@ -280,6 +281,30 @@ class UserManagementService:
     # STUDENT
     # --------------------------------------------------------
 
+    @staticmethod
+    def _institution_id_for(
+        session: Session, org_id: UUID, wanted: str | None, exclude_user: UUID | None = None,
+    ) -> tuple[str, bool]:
+        """(institution ID, generated): the school's own (unique in the
+        organisation), or, when none is given, one Juwazi generates that no
+        student in any organisation has."""
+        own = institution_ids.clean(wanted)
+        if own is None:
+            return institution_ids.generate(session), True
+        clash = select(OrgMembership).where(
+            OrgMembership.org_id == org_id,
+            func.lower(OrgMembership.institution_id) == own.lower(),
+            OrgMembership.role == UserRole.STUDENT,
+        )
+        if exclude_user is not None:
+            clash = clash.where(OrgMembership.user_id != exclude_user)
+        if session.exec(clash).first():
+            raise HTTPException(
+                status_code=409,
+                detail=f"A student with institution ID '{own}' already exists in this organization.",
+            )
+        return own, False
+
     @classmethod
     def create_student(
         cls,
@@ -301,26 +326,8 @@ class UserManagementService:
                 detail=f"Your role ({creator_role}) cannot create students.",
             )
         
-        if not payload.institution_id:
-            raise HTTPException(status_code=400, detail="Please provide institutionId/Reg No/StudentId")
-
-        # Duplicate institution_id within same org
-        if payload.institution_id:
-            
-            existing_inst = session.exec(
-                select(OrgMembership).where(
-                    OrgMembership.org_id == org_id,
-                    OrgMembership.institution_id == payload.institution_id,
-                    OrgMembership.role == UserRole.STUDENT,
-                )
-            ).first()
-            if existing_inst:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"A student with institution ID "
-                           f"'{payload.institution_id}' already exists "
-                           f"in this organization.",
-                )
+        # The school's own ID (unique in the organisation), or one Juwazi generates.
+        institution_id, generated = cls._institution_id_for(session, org_id, payload.institution_id)
 
         # Duplicate email globally
         if payload.email:
@@ -374,7 +381,8 @@ class UserManagementService:
             org_id=org_id,
             role=UserRole.STUDENT,
             created_by=ctx.user.id,
-            institution_id=payload.institution_id,
+            institution_id=institution_id,
+            institution_id_generated=generated,
         )
 
         session.commit()
@@ -480,33 +488,8 @@ class UserManagementService:
                 detail=f"Your role ({creator_role}) cannot create students.",
             )
 
-        # institution_id is mandatory for students
-        if not payload.institution_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Please provide institutionId/Reg No/StudentId",
-            )
-
-        # ------------------------------------------------------------
-        # Check duplicate institution ID within the organization
-        # ------------------------------------------------------------
-        existing_inst = session.exec(
-            select(OrgMembership).where(
-                OrgMembership.org_id == org_id,
-                OrgMembership.institution_id == payload.institution_id,
-                OrgMembership.role == UserRole.STUDENT,
-            )
-        ).first()
-
-        if existing_inst:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"A student with institution ID "
-                    f"'{payload.institution_id}' already exists "
-                    f"in this organization."
-                ),
-            )
+        # The school's own ID (unique in the organisation), or one Juwazi generates.
+        institution_id, generated = cls._institution_id_for(session, org_id, payload.institution_id)
 
         # ------------------------------------------------------------
         # Check duplicate email globally
@@ -584,7 +567,8 @@ class UserManagementService:
             org_id=org_id,
             role=UserRole.STUDENT,
             created_by=ctx.user.id,
-            institution_id=payload.institution_id,
+            institution_id=institution_id,
+            institution_id_generated=generated,
         )
 
         # IMPORTANT:
@@ -647,17 +631,11 @@ class UserManagementService:
                     })
                     continue
 
-                if not institution_id:
-                    errors.append({
-                        "row": row_num,
-                        "error": "institution_id is required.",
-                    })
-                    continue
-
                 # ----------------------------------------------------
-                # Duplicate institution ID in current Excel file
+                # Duplicate institution ID in current Excel file (a blank
+                # one gets an ID Juwazi generates)
                 # ----------------------------------------------------
-                if institution_id in uploaded_institution_ids:
+                if institution_id and institution_id in uploaded_institution_ids:
                     errors.append({
                         "row": row_num,
                         "error": (
@@ -667,7 +645,8 @@ class UserManagementService:
                     })
                     continue
 
-                uploaded_institution_ids.add(institution_id)
+                if institution_id:
+                    uploaded_institution_ids.add(institution_id)
 
                 # ----------------------------------------------------
                 # Build payload
@@ -687,7 +666,7 @@ class UserManagementService:
                         (row.get("phone") or "").strip()
                         or None
                     ),
-                    institution_id=institution_id,
+                    institution_id=institution_id or None,
                     access_code=(
                         (row.get("access_code") or "").strip()
                         or None
@@ -743,6 +722,8 @@ class UserManagementService:
                         org_id=org_id,
                         is_first_login=user.is_first_login,
                         access_code=access_code,
+                        institution_id=membership.institution_id if membership else None,
+                        institution_id_generated=bool(membership and membership.institution_id_generated),
                     )
                 )
 
@@ -865,7 +846,24 @@ class UserManagementService:
         if not user:
             raise HTTPException(status_code=404, detail="Student not found.")
 
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        changes = payload.model_dump(exclude_unset=True)
+        # The institution ID belongs to the membership (it's the school's number
+        # for the student), not to the user.
+        if "institution_id" in changes:
+            wanted: str | None = changes.pop("institution_id")
+            if not (wanted or "").strip():
+                if not membership.institution_id:
+                    membership.institution_id = institution_ids.generate(session)
+                    membership.institution_id_generated = True
+            elif wanted.strip() != membership.institution_id:
+                new_id, _ = UserManagementService._institution_id_for(
+                    session, org_id, wanted, exclude_user=student_id,
+                )
+                membership.institution_id = new_id
+                membership.institution_id_generated = False
+            membership.updated_at = datetime.now(timezone.utc)
+            session.add(membership)
+        for key, value in changes.items():
             setattr(user, key, value)
 
         session.add(user)

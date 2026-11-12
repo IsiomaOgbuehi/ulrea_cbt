@@ -93,7 +93,9 @@ class CreateStudent(BaseModel):
     othername: str | None = None
     email: EmailStr | None = None
     phone: str | None = None
-    institution_id: str  # e.g. student reg number
+    # e.g. student reg number. Optional: when left out, Juwazi generates one
+    # (JW-XXXXXXXX) that no other student anywhere has.
+    institution_id: str | None = None
     cohort_id: UUID | None = None
     access_code: str | None = None     # if provided, use it; else auto-generate
 
@@ -125,6 +127,14 @@ class StudentCreatedResponse(BaseModel):
     org_id: UUID
     is_first_login: bool
     access_code: str              # shown once only, share with student
+    institution_id: str | None = None
+    institution_id_generated: bool = False   # made by Juwazi because none was given
+
+
+class BulkStudentCheck(BaseModel):
+    """An upload looked at before anything is created."""
+    total_rows: int
+    missing_institution_id_rows: list[int]   # spreadsheet row numbers (header is row 1)
 
 
 class BulkStudentResult(BaseModel):
@@ -231,6 +241,8 @@ class StudentListItem(BaseModel):
     email: str | None
     status: MembershipStatus
     access_code: str | None = None
+    institution_id: str | None = None
+    institution_id_generated: bool = False
     created_at: datetime
     # Cohorts they're in now.
     cohorts: list[StudentCohort] = []
