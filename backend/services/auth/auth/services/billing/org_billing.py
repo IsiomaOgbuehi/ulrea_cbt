@@ -20,7 +20,7 @@ from auth.database.schema.billing.billing_db import (
 from auth.database.schema.cohort.cohort_db import CohortMember
 from auth.database.schema.cohort.enum import MemberStatus
 from auth.database.schema.membership.membership_db import OrgMembership
-from auth.database.schema.organization.enums import OrganizationType
+from auth.database.schema.organization.enums import OrganizationType, OrganizationVisibility
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.services.billing.payments import register_fulfiller
@@ -39,11 +39,12 @@ class BillingStatus:
     ends_at: datetime | None       # when the current trial or paid period ends
     product: Product               # what this organisation buys
     period_days: int               # how long one purchase lasts
-    enforced: bool                 # whether limits are applied
+    enforced: bool                 # whether limits are applied (never for exam bodies)
+    exempt: bool = False           # public organisations (exam bodies) don't pay
 
     @property
     def can_add_students(self) -> bool:
-        if not self.enforced:
+        if self.exempt or not self.enforced:
             return True
         return self.state in ("trial", "active") and self.students < self.seats
 
@@ -123,10 +124,19 @@ def status(session: Session, org: OrganizationModel) -> BillingStatus:
     else:
         had_any = session.exec(select(OrgBillingPeriod.id).where(OrgBillingPeriod.org_id == org.id)).first()
         state, seats, ends_at = ("expired" if had_any else "none"), 0, None
+    # Billing only applies to private organisations: exam bodies (public) never
+    # pay and are never limited.
+    exempt = is_exempt(org)
     return BillingStatus(
         state=state, seats=seats, students=students_using_places(session, org.id), ends_at=ends_at,
-        product=product, period_days=period_days(settings, product), enforced=settings.enforce_limits,
+        product=product, period_days=period_days(settings, product),
+        enforced=settings.enforce_limits and not exempt, exempt=exempt,
     )
+
+
+def is_exempt(org: OrganizationModel) -> bool:
+    """Public organisations (exam bodies) are free: billing is for private ones."""
+    return org.visibility == OrganizationVisibility.PUBLIC
 
 
 def start_trial(session: Session, org_id: UUID, *, seats: int | None = None, created_by: UUID | None = None) -> OrgBillingPeriod | None:

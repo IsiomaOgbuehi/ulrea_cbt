@@ -25,6 +25,7 @@ class BillingStatusRead(BaseModel):
     period_days: int
     enforced: bool
     can_add_students: bool
+    exempt: bool = False           # an exam body (public): billing doesn't apply
 
 
 class SeatQuoteRead(BaseModel):

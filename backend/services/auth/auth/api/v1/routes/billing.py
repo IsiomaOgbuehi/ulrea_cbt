@@ -37,6 +37,7 @@ def status_read(st: org_billing.BillingStatus) -> BillingStatusRead:
     return BillingStatusRead(
         state=st.state, seats=st.seats, students=st.students, ends_at=st.ends_at, product=st.product,
         period_days=st.period_days, enforced=st.enforced, can_add_students=st.can_add_students,
+        exempt=st.exempt,
     )
 
 
@@ -59,6 +60,8 @@ def checkout_currencies(
 
 
 def _seat_quote(session: Session, org: OrganizationModel, seats: int, currency: str) -> SeatQuoteRead:
+    if org_billing.is_exempt(org):
+        raise HTTPException(status_code=400, detail="Exam bodies don't pay for student places.")
     product, starts, ends, adding = org_billing.purchase_plan(session, org, seats)
     if not adding:
         # A new period replaces the trial or the one that ended: it must cover
@@ -142,6 +145,8 @@ def exam_access_bodies(
 def _bulk_quote(
     session: Session, org: OrganizationModel, payload: ExamAccessQuoteRequest,
 ) -> tuple[ExamAccessQuoteRead, list[UUID]]:
+    if org_billing.is_exempt(org):
+        raise HTTPException(status_code=400, detail="Exam bodies don't pay for External Exams.")
     body = session.get(OrganizationModel, payload.exam_body_org_id)
     if body is None or body.id == org.id or not exam_access.is_on_sale(body):
         raise HTTPException(status_code=404, detail="Exam body not found.")

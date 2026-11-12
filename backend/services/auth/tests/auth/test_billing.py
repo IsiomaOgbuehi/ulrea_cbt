@@ -325,3 +325,33 @@ def test_admin_makes_an_organisation_an_exam_body(client: TestClient) -> None:
     r = client.patch(f"/api/v1/admin/organizations/{oid}/visibility", json={"visibility": "public"}, headers=_auth(token))
     assert r.status_code == 200 and r.json()["visibility"] == "public"
     assert client.get("/api/v1/admin/exam-bodies", headers=_auth(token)).json()[0]["id"] == oid
+
+
+def test_billing_does_not_apply_to_exam_bodies(client: TestClient) -> None:
+    from auth.core.settings import settings as auth_settings
+    token = _owner(client)
+    _enforce(client, token)
+    with Session(engine) as s:
+        org_id = s.exec(select(OrgBillingPeriod.org_id)).first()
+        for p in s.exec(select(OrgBillingPeriod)).all():          # its trial has ended
+            p.ends_at = datetime.now(timezone.utc) - timedelta(days=1)
+            s.add(p)
+        s.commit()
+    assert _status(client, token)["exempt"] is False
+    assert client.post("/api/v1/users/students/create", json=STUDENT_PAYLOAD, headers=_auth(token)).status_code == 403
+
+    # Made an exam body: free, never limited, and nothing to buy.
+    client.patch(f"/api/v1/admin/organizations/{org_id}/visibility", json={"visibility": "public"}, headers=_auth(token))
+    st = _status(client, token)
+    assert st["exempt"] is True and st["enforced"] is False and st["can_add_students"] is True
+    assert client.post("/api/v1/users/students/create", json=STUDENT_PAYLOAD, headers=_auth(token)).status_code == 200
+    h = {"X-Internal-Secret": auth_settings.INTERNAL_SECRET}
+    assert client.get(f"/api/v1/internal/orgs/{org_id}/exam-starts", headers=h).json()["allowed"] is True
+    r = client.get("/api/v1/billing/quote", params={"seats": 5, "currency": "NGN"}, headers=_auth(token))
+    assert r.status_code == 400 and "Exam bodies" in r.json()["detail"]
+    admin_row = client.get("/api/v1/admin/organizations", headers=_auth(token)).json()["items"][0]
+    assert admin_row["billing"]["exempt"] is True
+
+    # Private again: billing applies again.
+    client.patch(f"/api/v1/admin/organizations/{org_id}/visibility", json={"visibility": "private"}, headers=_auth(token))
+    assert _status(client, token)["exempt"] is False

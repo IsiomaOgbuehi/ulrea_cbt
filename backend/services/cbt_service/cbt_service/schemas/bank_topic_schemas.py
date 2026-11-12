@@ -133,3 +133,14 @@ class ExamItemsFromBankResult(BaseModel):
     matched: int            # questions that fit the filters and weren't already in the exam
     added: int
     item_ids: list[UUID]
+
+
+class BankSharingUpdate(BaseModel):
+    """Exam bodies: share (or stop sharing) several of a subject's banks at once."""
+    bank_ids: list[UUID] = Field(min_length=1, max_length=500)
+    shared: bool
+
+
+class BankSharingResult(BaseModel):
+    updated: int                 # banks whose sharing changed
+    skipped: int                 # archived, not in this subject, or not yours to manage
