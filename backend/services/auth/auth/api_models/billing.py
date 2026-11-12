@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from auth.database.schema.billing.billing_db import PaymentPurpose, PaymentStatus, PeriodKind, Product
+from auth.database.schema.billing.billing_db import CouponKind, PaymentPurpose, PaymentStatus, PeriodKind, Product
 
 
 class CurrencyRead(BaseModel):
@@ -28,7 +28,15 @@ class BillingStatusRead(BaseModel):
     exempt: bool = False           # an exam body (public): billing doesn't apply
 
 
-class SeatQuoteRead(BaseModel):
+class CouponPrice(BaseModel):
+    """The price after a coupon. Without one, discount is 0 and amount_due is the total."""
+    coupon_code: str | None = None
+    coupon_description: str | None = None
+    discount: Decimal = Decimal(0)
+    amount_due: Decimal
+
+
+class SeatQuoteRead(CouponPrice):
     product: Product
     currency: str
     unit_amount: Decimal
@@ -42,6 +50,7 @@ class SeatQuoteRead(BaseModel):
 class SeatCheckoutRequest(BaseModel):
     seats: int = Field(ge=1, le=100_000)
     currency: str = Field(min_length=3, max_length=3)
+    coupon_code: str | None = Field(default=None, max_length=40)
 
 
 class CheckoutRead(BaseModel):
@@ -160,9 +169,10 @@ class ExamAccessQuoteRequest(BaseModel):
     cohort_id: UUID | None = None                  # one class; leave out for every student
     student_ids: list[UUID] | None = Field(default=None, max_length=5000)
     currency: str = Field(default="NGN", min_length=3, max_length=3)
+    coupon_code: str | None = Field(default=None, max_length=40)
 
 
-class ExamAccessQuoteRead(BaseModel):
+class ExamAccessQuoteRead(CouponPrice):
     exam_body_name: str
     students: int
     already_have_access: int         # their days are added to the end of what they have
@@ -170,3 +180,53 @@ class ExamAccessQuoteRead(BaseModel):
     total: Decimal
     currency: str
     days: int
+
+
+# ---- Coupons (Juwazi admin) ---------------------------------------------------------
+
+class CouponCreate(BaseModel):
+    code: str = Field(min_length=3, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str = Field(default="", max_length=300)
+    kind: CouponKind
+    percent_off: Decimal | None = Field(default=None, gt=0, le=100)
+    amount_off: Decimal | None = Field(default=None, gt=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    purposes: list[PaymentPurpose] = Field(min_length=1)
+    org_ids: list[UUID] = Field(default_factory=list, max_length=500)    # empty: every school
+    once_per_payer: bool = False
+    max_redemptions: int | None = Field(default=None, ge=1)
+    expires_at: datetime | None = None
+
+
+class CouponUpdate(BaseModel):
+    """What can change after a coupon is made (not its discount)."""
+    description: str | None = Field(default=None, max_length=300)
+    org_ids: list[UUID] | None = Field(default=None, max_length=500)
+    once_per_payer: bool | None = None
+    max_redemptions: int | None = Field(default=None, ge=1)
+    expires_at: datetime | None = None
+    active: bool | None = None
+
+
+class CouponSchool(BaseModel):
+    id: UUID
+    name: str
+
+
+class CouponRead(BaseModel):
+    id: UUID
+    code: str
+    description: str
+    kind: CouponKind
+    percent_off: Decimal | None
+    amount_off: Decimal | None
+    currency: str | None
+    purposes: list[PaymentPurpose]
+    org_ids: list[UUID]
+    once_per_payer: bool
+    max_redemptions: int | None
+    expires_at: datetime | None
+    active: bool
+    created_at: datetime
+    uses: int = 0                   # paid uses
+    schools: list[CouponSchool] = []   # the org_ids, with names

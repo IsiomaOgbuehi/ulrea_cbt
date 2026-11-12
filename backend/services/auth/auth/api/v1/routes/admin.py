@@ -6,19 +6,21 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
-from sqlmodel import col, func, or_, select
+from sqlmodel import Session, col, func, or_, select
 
 from auth.api.v1.routes.billing import payment_read, status_read
 from auth.api_models.billing import (
-    AdminOrgPage, AdminOrgRead, CurrencyRead, CurrencyUpdate, ExamBodyRead, GrantPeriodRequest, PaymentPage,
-    PeriodRead, PriceRead, PriceUpsert,
+    AdminOrgPage, AdminOrgRead, CouponCreate, CouponRead, CouponSchool, CouponUpdate, CurrencyRead, CurrencyUpdate, ExamBodyRead,
+    GrantPeriodRequest, PaymentPage, PeriodRead, PriceRead, PriceUpsert,
 )
 from auth.database.database import SessionDep
-from auth.database.schema.billing.billing_db import Currency, OrgBillingPeriod, Payment, PaymentStatus, Price
+from auth.database.schema.billing.billing_db import (
+    Coupon, CouponKind, CouponRedemption, Currency, OrgBillingPeriod, Payment, PaymentPurpose, PaymentStatus, Price,
+)
 from auth.database.schema.organization.enums import OrganizationVisibility
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.dependencies.auth_dependencies import get_user_context, require_platform_admin
-from auth.services.billing import org_billing
+from auth.services.billing import coupons, org_billing
 from auth.services.billing.platform_settings import PlatformSettings, get_settings, update_settings
 from auth.services.user.user_context import UserContext
 
@@ -234,3 +236,113 @@ def all_payments(
         items=[payment_read(p) for p in rows], total=total, page=page, page_size=page_size,
         total_pages=_pages(total, page_size),
     )
+
+
+# ------------------------------------------------------------ coupons
+
+def _school_names(session: Session, rows: list[Coupon]) -> dict[str, str]:
+    """Names of every school the coupons name, in one query."""
+    ids = {UUID(o) for c in rows for o in c.org_ids}
+    if not ids:
+        return {}
+    found = session.exec(select(OrganizationModel.id, OrganizationModel.name).where(col(OrganizationModel.id).in_(ids))).all()
+    return {str(i): n for i, n in found}
+
+
+def _coupon_read(c: Coupon, used: int, names: dict[str, str]) -> CouponRead:
+    return CouponRead(
+        id=c.id, code=c.code, description=c.description, kind=c.kind, percent_off=c.percent_off,
+        amount_off=c.amount_off, currency=c.currency, purposes=[PaymentPurpose(p) for p in c.purposes],
+        org_ids=[UUID(o) for o in c.org_ids], once_per_payer=c.once_per_payer, max_redemptions=c.max_redemptions,
+        expires_at=c.expires_at, active=c.active, created_at=c.created_at, uses=used,
+        schools=[CouponSchool(id=UUID(o), name=names.get(o, "Deleted organisation")) for o in c.org_ids],
+    )
+
+
+def _check_schools(session: Session, org_ids: list[UUID]) -> list[str]:
+    """The ids, if they're all real schools (organisations that pay; not exam bodies)."""
+    if not org_ids:
+        return []
+    found = session.exec(select(OrganizationModel).where(col(OrganizationModel.id).in_(org_ids))).all()
+    schools = {o.id for o in found if not org_billing.is_exempt(o)}
+    missing = [str(i) for i in org_ids if i not in schools]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Not schools that pay: {', '.join(missing)}")
+    return [str(i) for i in dict.fromkeys(org_ids)]
+
+
+@router.get("/coupons", response_model=list[CouponRead])
+def list_coupons(session: SessionDep, ctx: Admin) -> list[CouponRead]:
+    rows = list(session.exec(select(Coupon).order_by(col(Coupon.created_at).desc())).all())
+    used = coupons.uses_by_coupon(session, [c.id for c in rows])
+    names = _school_names(session, rows)
+    return [_coupon_read(c, used.get(c.id, 0), names) for c in rows]
+
+
+@router.post("/coupons", response_model=CouponRead, status_code=201)
+def create_coupon(payload: CouponCreate, session: SessionDep, ctx: Admin) -> CouponRead:
+    code = coupons.normalise(payload.code)
+    if payload.kind == CouponKind.PERCENT:
+        if payload.percent_off is None:
+            raise HTTPException(status_code=400, detail="Give the percent off.")
+        amount_off, currency, percent_off = None, None, payload.percent_off
+    else:
+        if payload.amount_off is None or payload.currency is None:
+            raise HTTPException(status_code=400, detail="Give the amount off and its currency.")
+        if session.get(Currency, payload.currency.upper()) is None:
+            raise HTTPException(status_code=400, detail=f"Unknown currency {payload.currency.upper()}.")
+        amount_off, currency, percent_off = payload.amount_off, payload.currency.upper(), None
+    if payload.expires_at is not None and payload.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="The expiry date has already passed.")
+    if session.exec(select(Coupon).where(Coupon.code == code)).first() is not None:
+        raise HTTPException(status_code=409, detail=f"There's already a coupon {code}.")
+    coupon = Coupon(
+        code=code, description=payload.description.strip(), kind=payload.kind, percent_off=percent_off,
+        amount_off=amount_off, currency=currency, purposes=[p.value for p in dict.fromkeys(payload.purposes)],
+        org_ids=_check_schools(session, payload.org_ids), once_per_payer=payload.once_per_payer,
+        max_redemptions=payload.max_redemptions, expires_at=payload.expires_at, created_by=ctx.user.id,
+    )
+    session.add(coupon)
+    session.commit()
+    session.refresh(coupon)
+    return _coupon_read(coupon, 0, _school_names(session, [coupon]))
+
+
+@router.patch("/coupons/{coupon_id}", response_model=CouponRead)
+def update_coupon(coupon_id: UUID, payload: CouponUpdate, session: SessionDep, ctx: Admin) -> CouponRead:
+    """Change a coupon's limits or switch it off. Its discount stays as it was
+    made, so payments already made with it still add up."""
+    coupon = session.get(Coupon, coupon_id)
+    if coupon is None:
+        raise HTTPException(status_code=404, detail="Coupon not found.")
+    changes = payload.model_dump(exclude_unset=True)
+    if "description" in changes and payload.description is not None:
+        coupon.description = payload.description.strip()
+    if "org_ids" in changes:
+        coupon.org_ids = _check_schools(session, payload.org_ids or [])
+    if "once_per_payer" in changes and payload.once_per_payer is not None:
+        coupon.once_per_payer = payload.once_per_payer
+    if "max_redemptions" in changes:
+        coupon.max_redemptions = payload.max_redemptions          # None: no limit
+    if "expires_at" in changes:
+        coupon.expires_at = payload.expires_at                    # None: never
+    if "active" in changes and payload.active is not None:
+        coupon.active = payload.active
+    session.add(coupon)
+    session.commit()
+    session.refresh(coupon)
+    return _coupon_read(
+        coupon, coupons.uses_by_coupon(session, [coupon.id]).get(coupon.id, 0), _school_names(session, [coupon]),
+    )
+
+
+@router.delete("/coupons/{coupon_id}", status_code=204)
+def delete_coupon(coupon_id: UUID, session: SessionDep, ctx: Admin) -> None:
+    """Only a coupon nobody has used; switch a used one off instead."""
+    coupon = session.get(Coupon, coupon_id)
+    if coupon is None:
+        raise HTTPException(status_code=404, detail="Coupon not found.")
+    if session.exec(select(CouponRedemption.id).where(CouponRedemption.coupon_id == coupon_id)).first() is not None:
+        raise HTTPException(status_code=409, detail="This coupon has been used, so switch it off instead.")
+    session.delete(coupon)
+    session.commit()

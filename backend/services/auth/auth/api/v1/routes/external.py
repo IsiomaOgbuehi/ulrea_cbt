@@ -9,13 +9,15 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 from starlette.concurrency import run_in_threadpool
 
-from auth.api_models.billing import CheckoutRead
+from auth.api.v1.routes.billing import coupon_price
+from auth.api_models.billing import CheckoutRead, CouponPrice
 from auth.core.settings import settings
 from auth.database.database import SessionDep
 from auth.database.schema.billing.billing_db import PaymentPurpose, Product
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.dependencies.auth_dependencies import get_user_context
-from auth.services.billing import exam_access, payments, pricing
+from auth.services.billing import coupons, exam_access, payments, pricing
+from auth.services.billing.coupons import Discounted
 from auth.services.billing.platform_settings import get_settings
 from auth.services.user.user_context import UserContext
 from auth.utility.payment.providers.registry import active_provider
@@ -54,6 +56,13 @@ class ExamBodyCard(BaseModel):
 
 class SubscribeRequest(BaseModel):
     currency: str = Field(default="NGN", min_length=3, max_length=3)
+    coupon_code: str | None = Field(default=None, max_length=40)
+
+
+class SubscribeQuote(CouponPrice):
+    amount: Decimal              # before any coupon
+    currency: str
+    days: int
 
 
 class SeenRead(BaseModel):
@@ -103,26 +112,40 @@ def start_trial(body_id: UUID, session: SessionDep, ctx: Candidate) -> ExamBodyC
     )
 
 
+def _subscribe_price(
+    session: Session, body_id: UUID, payload: SubscribeRequest, ctx: UserContext,
+) -> tuple[OrganizationModel, BodyPrice, Discounted]:
+    body = session.get(OrganizationModel, body_id)
+    exam_access.assert_on_sale(session, ctx.user.id, body_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="Exam body not found.")
+    price = _price(session, body_id, payload.currency)
+    if price is None:
+        raise HTTPException(status_code=400, detail=f"This isn't available in {payload.currency.upper()} yet.")
+    after = coupons.price_after(
+        session, payload.coupon_code, purpose=PaymentPurpose.EXAM_BODY_ACCESS, org_id=ctx.membership.org_id,
+        user_id=ctx.user.id, unit_amount=price.amount, quantity=1, currency=price.currency,
+    )
+    return body, price, after
+
+
+@router.post("/bodies/{body_id}/quote", response_model=SubscribeQuote)
+def subscribe_quote(body_id: UUID, payload: SubscribeRequest, session: SessionDep, ctx: Candidate) -> SubscribeQuote:
+    """The price to pay, with a coupon if one is given (a 400 says why a coupon can't be used)."""
+    _, price, after = _subscribe_price(session, body_id, payload, ctx)
+    return SubscribeQuote(amount=price.amount, currency=price.currency, days=price.days, **coupon_price(after).model_dump())
+
+
 @router.post("/bodies/{body_id}/subscribe", response_model=CheckoutRead)
 async def subscribe(body_id: UUID, payload: SubscribeRequest, session: SessionDep, ctx: Candidate) -> CheckoutRead:
     """Pay for access to one exam body's practice exams."""
-    def _prepare() -> tuple[OrganizationModel, BodyPrice]:
-        body = session.get(OrganizationModel, body_id)
-        exam_access.assert_on_sale(session, ctx.user.id, body_id)
-        if body is None:
-            raise HTTPException(status_code=404, detail="Exam body not found.")
-        price = _price(session, body_id, payload.currency)
-        if price is None:
-            raise HTTPException(status_code=400, detail=f"This isn't available in {payload.currency.upper()} yet.")
-        return body, price
-
-    body, price = await run_in_threadpool(_prepare)
+    body, price, after = await run_in_threadpool(_subscribe_price, session, body_id, payload, ctx)
     email = ctx.user.email or f"{ctx.user.id}@students.juwazi.com"     # some students have no email
     payment, url = await payments.start_checkout(
         session, active_provider(),
         purpose=PaymentPurpose.EXAM_BODY_ACCESS, user_id=ctx.user.id, org_id=ctx.membership.org_id,
         email=email, name=f"{ctx.user.firstname} {ctx.user.lastname}".strip(),
-        amount=price.amount, currency=price.currency,
+        amount=after.due, currency=price.currency, price=after,
         description=f"{body.name} practice exams for {price.days} days",
         details={"student_id": str(ctx.user.id), "exam_body_org_id": str(body_id), "days": price.days},
         redirect_url=f"{settings.FRONTEND_URL}/app/external",

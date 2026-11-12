@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from sqlmodel import Session, col, func, select
 
 from auth.api_models.billing import (
-    BillingStatusRead, CheckoutRead, CurrencyRead, ExamAccessBodyRead, ExamAccessQuoteRead, ExamAccessQuoteRequest,
+    BillingStatusRead, CheckoutRead, CouponPrice, CurrencyRead, ExamAccessBodyRead, ExamAccessQuoteRead, ExamAccessQuoteRequest,
     PaymentPage, PaymentRead, SeatCheckoutRequest, SeatQuoteRead,
 )
 from auth.services.billing.platform_settings import get_settings
@@ -18,7 +18,8 @@ from auth.database.database import SessionDep
 from auth.database.schema.billing.billing_db import Payment, PaymentPurpose, Product
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.dependencies.auth_dependencies import get_user_context, require_permission
-from auth.services.billing import exam_access, org_billing, payments, pricing  # noqa: F401  (registers fulfilment)
+from auth.services.billing import coupons, exam_access, org_billing, payments, pricing  # noqa: F401  (registers fulfilment)
+from auth.services.billing.coupons import Discounted
 from auth.services.user.user_context import UserContext
 from auth.utility.payment.providers.base import InvalidWebhook, PaymentProviderError
 from auth.utility.payment.providers.registry import active_provider, provider_named
@@ -59,7 +60,18 @@ def checkout_currencies(
     return [CurrencyRead.model_validate(c, from_attributes=True) for c in pricing.checkout_currencies(session)]
 
 
-def _seat_quote(session: Session, org: OrganizationModel, seats: int, currency: str) -> SeatQuoteRead:
+def coupon_price(price: Discounted) -> CouponPrice:
+    c = price.coupon
+    return CouponPrice(
+        coupon_code=c.code if c else None, coupon_description=(c.description or None) if c else None,
+        discount=price.discount, amount_due=price.due,
+    )
+
+
+def _seat_quote(
+    session: Session, org: OrganizationModel, seats: int, currency: str,
+    coupon_code: str | None = None, user_id: UUID | None = None,
+) -> tuple[SeatQuoteRead, Discounted]:
     if org_billing.is_exempt(org):
         raise HTTPException(status_code=400, detail="Exam bodies don't pay for student places.")
     product, starts, ends, adding = org_billing.purchase_plan(session, org, seats)
@@ -73,10 +85,14 @@ def _seat_quote(session: Session, org: OrganizationModel, seats: int, currency: 
                 detail=f"You have {students} students, so buy at least {students} places.",
             )
     q = pricing.quote(session, product, currency, seats)
+    price = coupons.price_after(
+        session, coupon_code, purpose=PaymentPurpose.ORG_SEATS, org_id=org.id, user_id=user_id or org.id,
+        unit_amount=q.unit_amount, quantity=seats, currency=q.currency,
+    )
     return SeatQuoteRead(
         product=product, currency=q.currency, unit_amount=q.unit_amount, seats=seats, total=q.total,
-        starts_at=starts, ends_at=ends, adding_to_current=adding,
-    )
+        starts_at=starts, ends_at=ends, adding_to_current=adding, **coupon_price(price).model_dump(),
+    ), price
 
 
 @router.get("/billing/quote", response_model=SeatQuoteRead)
@@ -84,9 +100,10 @@ def seat_quote(
     session: SessionDep,
     seats: Annotated[int, Query(ge=1, le=100_000)],
     currency: Annotated[str, Query(min_length=3, max_length=3)],
+    coupon: Annotated[str | None, Query(max_length=40)] = None,
     ctx: UserContext = Depends(require_permission(P.BILLING_VIEW)),
 ) -> SeatQuoteRead:
-    return _seat_quote(session, _org(session, ctx), seats, currency)
+    return _seat_quote(session, _org(session, ctx), seats, currency, coupon, ctx.user.id)[0]
 
 
 @router.post("/billing/checkout", response_model=CheckoutRead)
@@ -97,13 +114,15 @@ async def seat_checkout(
 ) -> CheckoutRead:
     """Pay for student places. Returns the provider's checkout page to send the payer to."""
     org = await run_in_threadpool(_org, session, ctx)
-    q = await run_in_threadpool(_seat_quote, session, org, payload.seats, payload.currency)
+    q, price = await run_in_threadpool(
+        _seat_quote, session, org, payload.seats, payload.currency, payload.coupon_code, ctx.user.id,
+    )
     email = ctx.user.email or org.email
     payment, url = await payments.start_checkout(
         session, active_provider(),
         purpose=PaymentPurpose.ORG_SEATS, user_id=ctx.user.id, org_id=org.id,
         email=str(email), name=f"{ctx.user.firstname} {ctx.user.lastname}".strip(),
-        amount=q.total, currency=q.currency,
+        amount=price.due, currency=q.currency, price=price,
         description=(
             f"{'Extra ' if q.adding_to_current else ''}{q.seats} student{'s' if q.seats != 1 else ''} "
             f"for {org.name}, until {q.ends_at:%d %b %Y}"
@@ -143,8 +162,8 @@ def exam_access_bodies(
 
 
 def _bulk_quote(
-    session: Session, org: OrganizationModel, payload: ExamAccessQuoteRequest,
-) -> tuple[ExamAccessQuoteRead, list[UUID]]:
+    session: Session, org: OrganizationModel, payload: ExamAccessQuoteRequest, user_id: UUID,
+) -> tuple[ExamAccessQuoteRead, list[UUID], Discounted]:
     if org_billing.is_exempt(org):
         raise HTTPException(status_code=400, detail="Exam bodies don't pay for External Exams.")
     body = session.get(OrganizationModel, payload.exam_body_org_id)
@@ -161,10 +180,15 @@ def _bulk_quote(
         raise HTTPException(status_code=400, detail=f"This isn't available in {payload.currency.upper()} yet.")
     days = days or get_settings(session).exam_access_days
     already = exam_access.with_access(session, students, [body.id]).get(body.id, 0)
+    price = coupons.price_after(
+        session, payload.coupon_code, purpose=PaymentPurpose.EXAM_BODY_BULK, org_id=org.id, user_id=user_id,
+        unit_amount=unit, quantity=len(students), currency=payload.currency,
+    )
     return ExamAccessQuoteRead(
         exam_body_name=body.name, students=len(students), already_have_access=already, unit_amount=unit,
         total=unit * len(students), currency=payload.currency.upper(), days=days,
-    ), students
+        **coupon_price(price).model_dump(),
+    ), students, price
 
 
 @router.post("/billing/exam-access/quote", response_model=ExamAccessQuoteRead)
@@ -173,7 +197,7 @@ def exam_access_quote(
     session: SessionDep,
     ctx: UserContext = Depends(require_permission(P.BILLING_PAY_EXAM_ACCESS)),
 ) -> ExamAccessQuoteRead:
-    return _bulk_quote(session, _org(session, ctx), payload)[0]
+    return _bulk_quote(session, _org(session, ctx), payload, ctx.user.id)[0]
 
 
 @router.post("/billing/exam-access/checkout", response_model=CheckoutRead)
@@ -184,13 +208,13 @@ async def exam_access_checkout(
 ) -> CheckoutRead:
     """Pay for students' access to an exam body's practice exams, in one payment."""
     org = await run_in_threadpool(_org, session, ctx)
-    q, students = await run_in_threadpool(_bulk_quote, session, org, payload)
+    q, students, price = await run_in_threadpool(_bulk_quote, session, org, payload, ctx.user.id)
     email = ctx.user.email or org.email
     payment, url = await payments.start_checkout(
         session, active_provider(),
         purpose=PaymentPurpose.EXAM_BODY_BULK, user_id=ctx.user.id, org_id=org.id,
         email=str(email), name=f"{ctx.user.firstname} {ctx.user.lastname}".strip(),
-        amount=q.total, currency=q.currency,
+        amount=price.due, currency=q.currency, price=price,
         description=f"{q.exam_body_name} practice exams for {q.students} student{'s' if q.students != 1 else ''}, {q.days} days each",
         details={
             "exam_body_org_id": str(payload.exam_body_org_id), "days": q.days,
