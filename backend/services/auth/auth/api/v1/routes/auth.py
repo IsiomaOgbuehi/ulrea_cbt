@@ -35,6 +35,7 @@ from auth.utility.otp.otp_enums import OtpPurpose
 from auth.services.membership_service import MembershipService
 from auth.database.schema.platform_subscription.platform_subscription_db import PlatformPlan
 from auth.services.platform_subscription_service import PlatformSubscriptionService
+from auth.services.billing import org_billing
 from auth.database.schema.platform_subscription.enum import PlatformPlanStatus
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.role_service import RoleService
@@ -596,19 +597,8 @@ def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OT
                 session=session, user=user, org_id=org.id, role=UserRole.SUPER_ADMIN,
                 created_by=user.id, verification_method=VerificationMethod.EMAIL_OTP,
             )
-            try:
-                default_plan: PlatformPlan | None = session.exec(
-                    select(PlatformPlan).where(
-                        PlatformPlan.trial_days > 0,
-                        PlatformPlan.status == PlatformPlanStatus.ACTIVE,
-                    ).order_by(PlatformPlan.price)
-                ).first()
-                if default_plan:
-                    PlatformSubscriptionService.start_trial(
-                        session=session, org_id=org.id, plan_id=default_plan.id,
-                    )
-            except Exception:
-                logging.warning("Could not auto-start trial for org %s", org.id)
+            # The free trial: student places for the trial period (platform settings).
+            org_billing.start_trial(session, org.id, created_by=user.id)
 
             session.commit()
             session.refresh(user)

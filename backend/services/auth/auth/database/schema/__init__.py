@@ -8,4 +8,5 @@ from .role.role_db import OrgRole
 from .membership.membership_db import OrgMembership
 from .exam_subscription.exam_subscription_db import ExamBodySubscription, BulkOrgSubscription
 from .platform_subscription.platform_subscription_db import PlatformPlan, OrgPlatformSubscription
+from .billing.billing_db import Payment, Price, Currency, PlatformSetting, OrgBillingPeriod
 # from ...api_models.user_api_models import *

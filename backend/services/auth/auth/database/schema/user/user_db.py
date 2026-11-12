@@ -22,6 +22,11 @@ class UserBase(SQLModel):
     # Set when an admin gives the student a temporary answer: they must pick a
     # new security question and answer when they next sign in.
     security_reset_required: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
+    # Juwazi's own staff: prices, settings, organisations' billing. Only set
+    # from the server (python -m auth.scripts.platform_admin), never by the API.
+    is_platform_admin: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
+    # When the student first opened External Exams (the menu shows "New" until then).
+    external_exams_seen_at: datetime | None = Field(default=None, nullable=True)
 
 
 

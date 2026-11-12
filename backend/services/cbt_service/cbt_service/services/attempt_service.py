@@ -23,7 +23,7 @@ from cbt_service.database.models.violation import ExamViolation
 from cbt_service.database.models.enums.exam_enum import AssignmentStatus, ExamAction, ExamStatus
 from cbt_service.schemas.item_subject_schemas import ItemForDisplayRead, ItemForScoringRead
 from cbt_service.services.item.item_service import ItemService
-from cbt_service.database.models.exam import ExamAssignment, ExamItem, ExamModel
+from cbt_service.database.models.exam import ExamAssignment, ExamItem, ExamModel, PracticeSummary
 from cbt_service.database.models.item import ItemModel
 from cbt_service.services.marking.scoring import pass_threshold, score_answer, verdict
 from cbt_service.services.exam_service import ExamService, _log
@@ -104,6 +104,21 @@ class _ExtraTimePlan:
     exam_ids: set[UUID] = field(default_factory=set)
 
 
+def _record_practice(session: Session, attempt: AttemptModel) -> None:
+    """A practice attempt was submitted: update the student's progress on it."""
+    summary = session.exec(
+        select(PracticeSummary).where(
+            PracticeSummary.exam_id == attempt.exam_id, PracticeSummary.student_id == attempt.student_id,
+        )
+    ).first() or PracticeSummary(exam_id=attempt.exam_id, student_id=attempt.student_id, org_id=attempt.org_id)
+    summary.times_taken += 1
+    summary.last_percentage = attempt.percentage
+    if attempt.percentage is not None:
+        summary.best_percentage = max(summary.best_percentage or 0.0, attempt.percentage)
+    summary.last_taken_at = attempt.submitted_at
+    session.add(summary)
+
+
 class AttemptService:
 
     @staticmethod
@@ -119,6 +134,18 @@ class AttemptService:
     @staticmethod
     def _aware(dt: datetime) -> datetime:
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    @staticmethod
+    def has_running_attempt(session: Session, exam_id: UUID, student_id: UUID) -> bool:
+        """The student has this exam under way (resuming, not starting anew)."""
+        return session.exec(
+            select(AttemptModel.id).where(
+                AttemptModel.exam_id == exam_id,
+                AttemptModel.student_id == student_id,
+                AttemptModel.status == AttemptStatus.STARTED,
+                col(AttemptModel.practice).is_(False),
+            )
+        ).first() is not None
 
     @staticmethod
     def start(session: Session, payload: StartAttemptRequest, student_id: UUID, org_id: UUID) -> AttemptModel:
@@ -144,6 +171,7 @@ class AttemptService:
                 ExamAssignment.exam_id == payload.exam_id,
                 ExamAssignment.student_id == student_id,
                 ExamAssignment.org_id == org_id,
+                col(ExamAssignment.practice).is_(False),
             ).with_for_update()
         ).first()
         if not assignment:
@@ -153,6 +181,7 @@ class AttemptService:
             select(AttemptModel).where(
                 AttemptModel.exam_id == payload.exam_id,
                 AttemptModel.student_id == student_id,
+                col(AttemptModel.practice).is_(False),
             )
         ).all()
 
@@ -694,7 +723,7 @@ class AttemptService:
         """The candidate's saved answers; marks left out unless the exam shows results."""
         attempt = AttemptService.get_attempt(session, attempt_id, user_id)
         exam = session.get(ExamModel, attempt.exam_id)
-        hide: bool = exam is not None and not exam.show_result_immediately
+        hide: bool = exam is not None and not exam.show_result_immediately and not attempt.practice
         out: list[ResponseRead] = []
         for r in session.exec(select(ResponseModel).where(ResponseModel.attempt_id == attempt_id)).all():
             read = ResponseRead.model_validate(r, from_attributes=True)
@@ -716,9 +745,10 @@ class AttemptService:
         exam = session.get(ExamModel, attempt.exam_id)
         if exam is None:
             raise HTTPException(status_code=404, detail="Exam not found.")
-        if not exam.allow_review:
+        # Practice is for learning: always reviewable, with results.
+        if not exam.allow_review and not attempt.practice:
             raise HTTPException(status_code=403, detail="Reviewing answers isn't allowed for this exam.")
-        show: bool = bool(exam.show_result_immediately)
+        show: bool = bool(exam.show_result_immediately) or attempt.practice
 
         sections = ExamService.get_sections_with_items_internal(session, exam.id)
         exam_items = [ei for section in sections for ei in section.items]
@@ -986,6 +1016,7 @@ class AttemptService:
             .where(
                 AttemptModel.exam_id == exam_id,
                 AttemptModel.org_id == current_user.org_id,
+                col(AttemptModel.practice).is_(False),
                 ExamAssignment.cohort_id == cohort_id if cohort_id is not None
                 else col(ExamAssignment.cohort_id).is_(None),
             )
@@ -1058,6 +1089,7 @@ class AttemptService:
             since: datetime = now - timedelta(minutes=scope.ran_out_within_minutes)
             stmt = cols.where(
                 AttemptModel.exam_id == exam.id,
+                col(AttemptModel.practice).is_(False),
                 or_(
                     AttemptModel.status == AttemptStatus.STARTED,
                     and_(
@@ -1611,6 +1643,8 @@ class AttemptService:
 
         session.add(attempt)
         AttemptService._set_assignment_status(session, attempt, AssignmentStatus.SUBMITTED)
+        if attempt.practice:
+            _record_practice(session, attempt)
         session.commit()
         session.refresh(attempt)
         return attempt
@@ -1652,7 +1686,7 @@ class AttemptService:
         scores and pass/fail are left out.
         """
         exam = session.exec(select(ExamModel).where(ExamModel.id == attempt.exam_id)).first()
-        show_result: bool = bool(exam.show_result_immediately) if exam else True
+        show_result: bool = (bool(exam.show_result_immediately) if exam else True) or attempt.practice
         hide: bool = for_student and not show_result
         now = datetime.now(timezone.utc)
 
@@ -1667,7 +1701,9 @@ class AttemptService:
             percentage=None if hide else attempt.percentage,
             passed=None if hide else attempt.passed,
             expires_at=expires_at, remaining_seconds=remaining, server_time=now,
-            show_result=show_result, allow_review=bool(exam.allow_review) if exam else False,
+            show_result=show_result,
+            allow_review=(bool(exam.allow_review) if exam else False) or attempt.practice,
+            practice=attempt.practice,
             clock_started=AttemptService._clock_running(attempt),
             awaiting_marking=(
                 0 if attempt.status == AttemptStatus.STARTED
@@ -1688,6 +1724,7 @@ class AttemptService:
             passed=attempt.passed, expires_at=expires_at,
             remaining_seconds=remaining, server_time=now,
             clock_started=AttemptService._clock_running(attempt),
+            practice=attempt.practice,
         )
 
 
@@ -1755,6 +1792,7 @@ class AttemptService:
                 select(AttemptModel).where(
                     AttemptModel.exam_id == exam_id,
                     AttemptModel.org_id == org_id,
+                    col(AttemptModel.practice).is_(False),
                 )
             ).all()
         )

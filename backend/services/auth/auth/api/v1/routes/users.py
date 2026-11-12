@@ -28,6 +28,7 @@ from auth.database.schema.cohort.cohort_api_models import AddMembersRequest
 from auth.services.cohort_service import CohortService
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.services.platform_subscription_service import PlatformSubscriptionService
+from auth.services.billing import org_billing
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
 from auth.api_models.user_api_models import ResendActivationRequest
@@ -244,8 +245,8 @@ async def create_student(
     session: SessionDep,
     ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
-    # ← ADD THIS: check plan limits before creating
-    PlatformSubscriptionService.assert_can_add_student(session, ctx.membership.org_id)
+    # A free student place (when limits are enforced).
+    org_billing.assert_can_add_students(session, ctx.membership.org_id)
     
     # if not payload.cohort_id:
     #     raise HTTPException(status_code=422, detail="Cohort Id is required to create student")    HANDLE FOR ADMIN/SUPER ADMIN CREATTION
@@ -326,6 +327,7 @@ async def create_students_bulk(
 
     file_bytes = await file.read()
     rows = parse_student_excel(file_bytes, file.filename)
+    org_billing.assert_can_add_students(session, ctx.membership.org_id, adding=len(rows))
 
     result = UserManagementService.create_students_bulk(
         session=session,

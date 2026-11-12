@@ -251,3 +251,11 @@ async def require_cohort_access(
     ):
         return ctx
     raise HTTPException(status_code=403, detail="You are not assigned to this cohort.")
+
+
+async def require_platform_admin(ctx: UserContext = Depends(get_user_context)) -> UserContext:
+    """Juwazi's own staff (prices, settings, organisations' billing). Read from
+    the database on every call, so removing the flag takes effect at once."""
+    if not ctx.user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="Juwazi admin access only.")
+    return ctx

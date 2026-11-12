@@ -16,7 +16,7 @@ from cbt_service.core.redis.redis_client import redis_client
 from cbt_service.database.database import database_engine as engine
 from cbt_service.core.migration_check import check_migrations
 from starlette.concurrency import run_in_threadpool
-from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods, difficulty_levels, marking, network
+from cbt_service.api.v1.routes import subjects, items, exams, attempts, internal,violations, exam_violations, uploads, banks_topics, periods, difficulty_levels, marking, network, external, question_library
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -106,6 +106,8 @@ app = FastAPI(
 
 
 # ITEM AND SUBJECT SERVICES
+app.include_router(external.router, prefix="/api/v1")
+app.include_router(question_library.router, prefix="/api/v1")
 app.include_router(subjects.router, prefix="/api/v1")
 app.include_router(items.router, prefix="/api/v1")
 app.include_router(banks_topics.router, prefix="/api/v1")

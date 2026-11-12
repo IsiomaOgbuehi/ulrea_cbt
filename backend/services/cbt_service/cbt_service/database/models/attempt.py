@@ -27,7 +27,9 @@ class AttemptModel(SQLModel, table=True):
     assignment_id: UUID = Field(index=True, nullable=False)
 
     status: AttemptStatus = Field(default=AttemptStatus.STARTED, index=True)
-    attempt_number: int = Field(default=1)
+    attempt_number: int = Field(default=1)          # 0 for practice (one row, reused on each retake)
+    # Practice from External Exams: never in results, marking or statistics.
+    practice: bool = Field(default=False, index=True, sa_column_kwargs={"server_default": "false"})
 
     started_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

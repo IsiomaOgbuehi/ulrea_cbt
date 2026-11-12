@@ -22,6 +22,7 @@ class ExamCreate(BaseModel):
     allow_review: bool = True
     auto_mark_short_answers: bool = False   # off: short answers are marked by a person
     show_attempts_used: bool = False        # candidates see "1 of 2 attempts used"
+    external_listed: bool = False           # exam bodies: offered in External Exams
     extra_time_seconds: int = Field(default=30, ge=0, le=1800)   # added to every candidate's time
     max_attempts: int = 1
     max_violations: int | None = None
@@ -74,6 +75,7 @@ class ExamUpdate(BaseModel):
     allow_review: bool | None = None
     auto_mark_short_answers: bool | None = None   # only while the exam is a draft / sent back
     show_attempts_used: bool | None = None
+    external_listed: bool | None = None
     extra_time_seconds: int | None = Field(default=None, ge=0, le=1800)
     max_attempts: int | None = None
     max_violations: int | None = None
@@ -105,6 +107,7 @@ class ExamRead(BaseModel):
     allow_review: bool
     auto_mark_short_answers: bool = False
     show_attempts_used: bool = False
+    external_listed: bool = False
     extra_time_seconds: int = 30
     max_attempts: int
     created_at: datetime

@@ -262,3 +262,23 @@ def test_my_exams_shows_an_attempt_whose_time_ran_out_as_finished(
     row = next(r for r in client.get(f"{V1}/exams/my-assignments", headers=student_headers).json() if r["exam_id"] == str(exam["exam_id"]))
     assert row["in_progress_attempt_id"] is None and row["latest_attempt_id"] == attempt["id"]
     assert row["status"] == "submitted"
+
+
+def test_new_exams_blocked_when_the_plan_ended_but_running_ones_carry_on(
+    client: TestClient, student_headers: H, monkeypatch: Any,
+) -> None:
+    exam = _exam(duration_minutes=10, extra_time_seconds=0, max_attempts=2)
+    attempt = _start(client, student_headers, exam)          # started while the plan ran
+    _content(client, student_headers, attempt["id"])
+
+    async def ended(self: Any, org_id: Any) -> tuple[bool, str]:
+        return False, "Your organisation's plan has ended, so new exams can't be started."
+
+    monkeypatch.setattr("cbt_service.clients.auth_client.AuthClient.exam_starts_allowed", ended)
+    # Resuming the exam under way still works...
+    again = client.post(f"{V1}/attempts", json={"exam_id": str(exam["exam_id"]), "assignment_id": str(exam["assignment_id"])}, headers=student_headers)
+    assert again.status_code == 200 and again.json()["id"] == attempt["id"]
+    # ...but a new one (a retake) is refused, with the reason.
+    client.post(f"{V1}/attempts/{attempt['id']}/submit", headers=student_headers)
+    retake = client.post(f"{V1}/attempts", json={"exam_id": str(exam["exam_id"]), "assignment_id": str(exam["assignment_id"])}, headers=student_headers)
+    assert retake.status_code == 403 and "plan has ended" in retake.json()["detail"]

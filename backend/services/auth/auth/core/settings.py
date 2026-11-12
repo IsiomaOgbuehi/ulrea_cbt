@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     FRONTEND_URL: str | None = "http://localhost:3000"
     PAYSTACK_SECRET_KEY: str = ""
     PAYSTACK_PUBLIC_KEY: str  = ""      # used by frontend
+
+    # Payments: which provider takes payments. Switching is this one setting
+    # (each provider's keys must be set). flutterwave | paystack
+    PAYMENT_PROVIDER: str = "flutterwave"
+    FLUTTERWAVE_SECRET_KEY: str = ""
+    # The "secret hash" set on the Flutterwave dashboard's webhook settings;
+    # Flutterwave sends it back in the verif-hash header.
+    FLUTTERWAVE_WEBHOOK_HASH: str = ""
     FRONTEND_URL: str
 
 settings = Settings()  # raises immediately if any required field is missing

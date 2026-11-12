@@ -58,6 +58,8 @@ class AttemptRead(BaseModel):
     # False until the questions have been sent: the clock hasn't started, and
     # expires_at / remaining_seconds show the full time.
     clock_started: bool = True
+    # External Exams practice: no full-screen rule, results and review always shown.
+    practice: bool = False
     # Written answers still to be marked by a person. While > 0 the score is
     # provisional and passed is None.
     awaiting_marking: int = 0

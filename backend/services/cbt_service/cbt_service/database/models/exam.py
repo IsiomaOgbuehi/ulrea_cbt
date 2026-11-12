@@ -56,6 +56,9 @@ class ExamModel(SQLModel, table=True):
     auto_mark_short_answers: bool = Field(default=False)
     # Candidates see "1 of 2 attempts used" on their exam list. Off by default.
     show_attempts_used: bool = Field(default=False)
+    # Exam bodies (public organisations): offered in students' External Exams
+    # catalogue for practice, to subscribers.
+    external_listed: bool = Field(default=False, index=True, sa_column_kwargs={"server_default": "false"})
     # Added to every candidate's time (e.g. 30 min + 30 s). Covers page loading
     # and small connection hiccups.
     extra_time_seconds: int = Field(default=30)
@@ -105,7 +108,8 @@ class ExamAssignment(SQLModel, table=True):
     """
     __tablename__ = "exam_assignments"
     __table_args__ = (
-        UniqueConstraint("exam_id", "student_id", name="uq_exam_assignments_exam_student"),
+        # One real assignment and one practice one per student per exam.
+        UniqueConstraint("exam_id", "student_id", "practice", name="uq_exam_assignments_exam_student"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -115,6 +119,9 @@ class ExamAssignment(SQLModel, table=True):
     assigned_by: UUID = Field(nullable=False)
     status: AssignmentStatus = Field(default=AssignmentStatus.ASSIGNED)                     # AssignmentStatus
     cohort_id: UUID | None = Field(default=None, index=True)  # ← add this
+    # A subscriber practising an exam body's exam from External Exams (not an
+    # exam anyone assigned): kept out of results, marking and statistics.
+    practice: bool = Field(default=False, index=True, sa_column_kwargs={"server_default": "false"})
     scheduled_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
@@ -157,3 +164,19 @@ class ExamReviewCheck(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+
+
+class PracticeSummary(SQLModel, table=True):
+    """A student's record on one practice exam. Each retake replaces the
+    previous practice attempt, so the progress lives here."""
+    __tablename__ = "practice_summaries"
+    __table_args__ = (UniqueConstraint("exam_id", "student_id", name="uq_practice_summaries_exam_student"),)
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    exam_id: UUID = Field(foreign_key="exams.id", index=True, nullable=False)
+    student_id: UUID = Field(index=True, nullable=False)
+    org_id: UUID = Field(index=True, nullable=False)          # the exam body
+    times_taken: int = Field(default=0)
+    best_percentage: float | None = None
+    last_percentage: float | None = None
+    last_taken_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
