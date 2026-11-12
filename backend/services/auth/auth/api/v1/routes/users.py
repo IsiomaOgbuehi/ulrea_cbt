@@ -28,6 +28,7 @@ from auth.database.schema.cohort.cohort_api_models import AddMembersRequest
 from auth.services.cohort_service import CohortService
 from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.services.platform_subscription_service import PlatformSubscriptionService
+from auth.services.billing import org_billing
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.services.user.user_context import UserContext
 from auth.api_models.user_api_models import ResendActivationRequest
@@ -244,8 +245,8 @@ async def create_student(
     session: SessionDep,
     ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
 ):
-    # ← ADD THIS: check plan limits before creating
-    PlatformSubscriptionService.assert_can_add_student(session, ctx.membership.org_id)
+    # A free student place (when limits are enforced).
+    org_billing.assert_can_add_students(session, ctx.membership.org_id)
     
     # if not payload.cohort_id:
     #     raise HTTPException(status_code=422, detail="Cohort Id is required to create student")    HANDLE FOR ADMIN/SUPER ADMIN CREATTION
@@ -326,6 +327,7 @@ async def create_students_bulk(
 
     file_bytes = await file.read()
     rows = parse_student_excel(file_bytes, file.filename)
+    org_billing.assert_can_add_students(session, ctx.membership.org_id, adding=len(rows))
 
     result = UserManagementService.create_students_bulk(
         session=session,
@@ -402,7 +404,7 @@ def staff_first_login_setup(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StaffFirstLoginResponse(
         detail="Password updated. Account is now fully active.",
@@ -483,7 +485,9 @@ def activate_staff_account(
         access_token = create_access_token(
             user.id, org_id, role, perms=RoleService.token_perms(session, active_membership),
         )
-        refresh_token = create_refresh_token(user.id)
+        refresh_token = create_refresh_token(
+            user.id, active_membership.org_id if active_membership else None, role,
+        )
 
         return StaffActivateResponse(
             detail="Account activated successfully.",
@@ -559,7 +563,7 @@ def student_first_login_setup(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StudentFirstLoginResponse(
         access_token=token.access_token,
@@ -699,7 +703,7 @@ def student_login(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
         
     user_data = StudentLoginUserResponse.model_validate(user, from_attributes=True)
@@ -1027,7 +1031,7 @@ def student_reset_password(
         user.id, membership.org_id, membership.role,
         perms=RoleService.token_perms(session, membership),
     )
-    refresh = create_refresh_token(user.id)
+    refresh = create_refresh_token(user.id, membership.org_id, membership.role)
 
     return StudentFirstLoginResponse(
         access_token=token.access_token,

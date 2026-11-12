@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 from auth.core.settings import settings
 from auth.database.database import SessionDep
 from auth.database.schema.user.user_db import UserModel
-from auth.utility.redis.redis_client import redis_client
+from auth.utility.redis.token_blacklist import is_revoked
 from auth.database.schema.membership.membership_db import OrgMembership
 from auth.database.schema.user.enums import MembershipStatus, UserRole
 from auth.services.user.user_context import UserContext
@@ -66,7 +66,7 @@ async def get_current_user(
 
     # Check blacklist — covers logged out tokens
     jti = payload.get('jti')
-    if not jti or await redis_client.get(f"blacklist:jti:{jti}"):
+    if not jti or await is_revoked(str(jti), fail_open=True):
         raise HTTPException(status_code=401, detail="Token has been revoked.")
 
     # Convert sub back to UUID for SQLAlchemy
@@ -104,8 +104,7 @@ async def get_user_context(
 
     # Check blacklist (same pattern as your refresh token check in /refresh endpoint)
     jti = payload.get('jti')
-    is_blacklisted = await redis_client.get(f"blacklist:jti:{jti}")
-    if is_blacklisted:
+    if not jti or await is_revoked(str(jti), fail_open=True):
         raise HTTPException(status_code=401, detail="Token has been revoked.")
 
     user_id = UUID(payload["sub"])
@@ -252,3 +251,11 @@ async def require_cohort_access(
     ):
         return ctx
     raise HTTPException(status_code=403, detail="You are not assigned to this cohort.")
+
+
+async def require_platform_admin(ctx: UserContext = Depends(get_user_context)) -> UserContext:
+    """Juwazi's own staff (prices, settings, organisations' billing). Read from
+    the database on every call, so removing the flag takes effect at once."""
+    if not ctx.user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="Juwazi admin access only.")
+    return ctx

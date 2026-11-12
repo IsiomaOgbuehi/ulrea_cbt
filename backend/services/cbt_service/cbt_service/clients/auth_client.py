@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 import httpx
 import json
+import logging
 from uuid import UUID
 import time
 from typing import ClassVar
@@ -10,6 +11,8 @@ from pydantic import BaseModel
 from cbt_service.core.http_client import get_http_client
 from cbt_service.core.settings import settings
 from cbt_service.schemas.item_subject_schemas import UserSummary
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 
@@ -372,6 +375,106 @@ class AuthClient:
     #             status_code=502,
     #             detail="Auth service timed out fetching cohort members."
             # )
+
+    EXAM_ACCESS_TTL_SECONDS: int = 60
+
+    async def exam_access(self, student_id: UUID, exam_body_org_id: UUID) -> tuple[bool, bool]:
+        """(is an exam body, the student is subscribed). Cached for a minute."""
+        key = f"exam_access:{exam_body_org_id}:{student_id}"
+        cached = await self._cache_get(key)
+        if cached is not None:
+            text = cached.decode() if isinstance(cached, bytes) else cached
+            return text[0] == "1", text[1] == "1"
+        try:
+            response: httpx.Response = await get_http_client().get(
+                f"{self.base_url}/api/v1/internal/exam-access",
+                params={"student_id": str(student_id), "exam_body_org_id": str(exam_body_org_id)},
+                headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Couldn't check your subscription. Please try again.")
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Couldn't check your subscription. Please try again.")
+        data = response.json()
+        public, allowed = bool(data.get("public")), bool(data.get("allowed"))
+        await self._cache_set(key, f"{int(public)}{int(allowed)}", self.EXAM_ACCESS_TTL_SECONDS)
+        return public, allowed
+
+    async def exam_bodies(self) -> dict[UUID, str]:
+        """Exam bodies sharing questions now: id -> name. Cached for a minute."""
+        key = "exam_bodies"
+        cached = await self._cache_get(key)
+        if cached is not None:
+            raw: dict[str, str] = json.loads(cached)
+            return {UUID(k): v for k, v in raw.items()}
+        try:
+            response: httpx.Response = await get_http_client().get(
+                f"{self.base_url}/api/v1/internal/exam-bodies",
+                headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Couldn't load exam bodies. Please try again.")
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Couldn't load exam bodies. Please try again.")
+        rows: list[dict[str, str]] = response.json()
+        bodies: dict[UUID, str] = {UUID(r["id"]): r["name"] for r in rows}
+        await self._cache_set(key, json.dumps({str(k): v for k, v in bodies.items()}), self.EXAM_ACCESS_TTL_SECONDS)
+        return bodies
+
+    async def question_library_allowed(self, org_id: UUID) -> tuple[bool, str | None]:
+        """(allowed, reason): may this organisation copy exam bodies' questions
+        (on a trial or a paid plan). Cached for a minute."""
+        key = f"org_question_library:{org_id}"
+        cached = await self._cache_get(key)
+        if cached is not None:
+            text = cached.decode() if isinstance(cached, bytes) else cached
+            return (True, None) if text == "1" else (False, text[2:] or None)
+        try:
+            response: httpx.Response = await get_http_client().get(
+                f"{self.base_url}/api/v1/internal/orgs/{org_id}/question-library",
+                headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Couldn't check your plan. Please try again.")
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail="Couldn't check your plan. Please try again.")
+        data = response.json()
+        allowed = bool(data.get("allowed"))
+        reason: str | None = data.get("reason")
+        await self._cache_set(key, "1" if allowed else f"0:{reason or ''}", self.EXAM_ACCESS_TTL_SECONDS)
+        return allowed, reason
+
+    EXAM_STARTS_TTL_SECONDS: int = 60
+
+    async def exam_starts_allowed(self, org_id: UUID) -> tuple[bool, str | None]:
+        """(allowed, reason): may this organisation's candidates start new exams
+        (its plan hasn't ended). Cached for a minute. If the auth service can't
+        be reached, exams are allowed: a hiccup must never stop an exam."""
+        key = f"org_exam_starts:{org_id}"
+        cached = await self._cache_get(key)
+        if cached is not None:
+            text = cached.decode() if isinstance(cached, bytes) else cached
+            return (True, None) if text == "1" else (False, text[2:] or None)
+        try:
+            response: httpx.Response = await get_http_client().get(
+                f"{self.base_url}/api/v1/internal/orgs/{org_id}/exam-starts",
+                headers={"X-Internal-Secret": settings.INTERNAL_SECRET},
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            logger.warning("Couldn't check exam starts for org %s; allowing", org_id)
+            return True, None
+        if response.status_code != 200:
+            logger.warning("Exam-starts check for org %s answered %s; allowing", org_id, response.status_code)
+            return True, None
+        data = response.json()
+        allowed = bool(data.get("allowed", True))
+        reason: str | None = data.get("reason")
+        await self._cache_set(key, "1" if allowed else f"0:{reason or ''}", self.EXAM_STARTS_TTL_SECONDS)
+        return allowed, reason
 
     async def get_cohort_student_ids(self, cohort_id: UUID, org_id: UUID) -> list[UUID]:
         """

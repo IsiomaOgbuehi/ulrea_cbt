@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -19,6 +19,10 @@ from cbt_service.schemas.attempt_schemas import (
     AttemptStatusRead,
     CohortAttemptSummary,
     ResetAttemptRequest,
+    ExtraTimePreview,
+    ExtraTimeRequest,
+    ExtraTimeScope,
+    ExtraTimeSummary,
     StartAttemptRequest,
     SaveResponseRequest,
     ManualReviewRequest,
@@ -39,20 +43,27 @@ router = APIRouter(prefix="/attempts", tags=["attempts"])
 
 ''' START ATTEMPT 🚀 '''
 @router.post("", response_model=AttemptRead)
-def start_attempt(
+async def start_attempt(
     payload: StartAttemptRequest,
     session: SessionDep,
     current_user: CurrentUser = Depends(get_current_user),
-):
-    """Student starts an exam attempt."""
-    attempt = AttemptService.start(
-        session=session,
-        payload=payload,
-        student_id=current_user.id,
-        org_id=current_user.org_id,
+) -> AttemptRead:
+    """Student starts an exam attempt (or resumes the one under way).
+    Starting anew needs the organisation's plan to be running; resuming never
+    does, so an exam already under way is never cut off."""
+    resuming: bool = await run_in_threadpool(
+        AttemptService.has_running_attempt, session, payload.exam_id, current_user.id,
     )
-    # return AttemptRead.model_validate(attempt, from_attributes=True)
-    return AttemptService._to_attempt_read(session, attempt, for_student=True)
+    if not resuming:
+        await release_connection(session)       # don't hold a DB connection while asking auth
+        allowed, reason = await AuthClient(redis_client).exam_starts_allowed(current_user.org_id)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=reason or "New exams can't be started right now.")
+    attempt = await run_in_threadpool(
+        AttemptService.start, session=session, payload=payload,
+        student_id=current_user.id, org_id=current_user.org_id,
+    )
+    return await run_in_threadpool(AttemptService._to_attempt_read, session, attempt, True)
 
 
 ''' GET ATTEMPT 🔍 '''
@@ -292,6 +303,30 @@ def reset_attempt(
     attempt = AttemptService.reset_attempt(session, attempt_id, payload, current_user)
     exam = session.get(ExamModel, attempt.exam_id)
     return AttemptService._to_attempt_read_new(attempt, exam)
+
+
+
+''' GIVE EXTRA TIME ⏱️ '''
+@router.post("/extra-time/preview", response_model=ExtraTimePreview)
+def preview_extra_time(
+    payload: ExtraTimeScope,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.ATTEMPTS_EXTRA_TIME)),
+) -> ExtraTimePreview:
+    """How many attempts extra time would reach, before giving it."""
+    return AttemptService.preview_extra_time(session, payload, current_user)
+
+
+@router.post("/extra-time", response_model=ExtraTimeSummary)
+def give_extra_time(
+    payload: ExtraTimeRequest,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.ATTEMPTS_EXTRA_TIME)),
+) -> ExtraTimeSummary:
+    """Add time to the attempts listed, or to everyone sitting an exam (or one
+    group of it), keeping their answers. Attempts that ran out of time reopen,
+    with the time counted from when the candidate is back."""
+    return AttemptService.give_extra_time(session, payload, current_user)
 
 
 

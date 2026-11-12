@@ -82,6 +82,8 @@ class ItemModel(SQLModel, table=True):
     # ----------------------------------------------------------------
     source: ItemSource = Field(default=ItemSource.MANUAL, index=True,)                                    # "manual" | "excel_upload"
     bulk_upload_id: UUID | None = Field(default=None, index=True,)                           # groups items from same upload
+    # Copied from an exam body's shared questions (question library): the original.
+    copied_from_item_id: UUID | None = Field(default=None, index=True)
 
     # ----------------------------------------------------------------
     # Timestamps

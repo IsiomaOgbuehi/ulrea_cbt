@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Header, HTTPException, Depends
 from pydantic import BaseModel, Field
 from uuid import UUID
@@ -136,3 +137,94 @@ def filter_active_students_internal(
         ).all()
     )
     return list(dict.fromkeys(valid_ids))
+
+class ExamStartsRead(BaseModel):
+    allowed: bool
+    reason: str | None = None
+
+
+@router.get("/orgs/{org_id}/exam-starts", response_model=ExamStartsRead)
+def org_exam_starts(
+    org_id: UUID,
+    session: SessionDep,
+    _: str = Depends(verify_internal_secret),
+) -> ExamStartsRead:
+    """Whether the organisation's candidates may start new exams: not once its
+    trial or paid period has ended (and only while limits are enforced).
+    Exams already under way are never affected. Public organisations (exam
+    bodies) are governed by their candidates' own subscriptions instead."""
+    from auth.database.schema.organization.enums import OrganizationVisibility
+    from auth.database.schema.organization.organization_db import OrganizationModel
+    from auth.services.billing import org_billing
+
+    org = session.get(OrganizationModel, org_id)
+    if org is None or org.visibility == OrganizationVisibility.PUBLIC:
+        return ExamStartsRead(allowed=True)
+    st = org_billing.status(session, org)
+    if not st.enforced or st.state in ("trial", "active"):
+        return ExamStartsRead(allowed=True)
+    return ExamStartsRead(
+        allowed=False,
+        reason="Your organisation's plan has ended, so new exams can't be started. Please let your school or organisation know.",
+    )
+
+
+class ExamAccessRead(BaseModel):
+    public: bool
+    allowed: bool
+    expires_at: datetime | None = None
+
+
+@router.get("/exam-access", response_model=ExamAccessRead)
+def exam_access_internal(
+    student_id: UUID,
+    exam_body_org_id: UUID,
+    session: SessionDep,
+    _: str = Depends(verify_internal_secret),
+) -> ExamAccessRead:
+    """For the exam service: is this an exam body, and may the student practise its exams."""
+    from auth.services.billing import exam_access
+    a = exam_access.check(session, student_id, exam_body_org_id)
+    return ExamAccessRead(public=a.public, allowed=a.active, expires_at=a.expires_at)
+
+
+class ExamBodyRef(BaseModel):
+    id: UUID
+    name: str
+
+
+@router.get("/exam-bodies", response_model=list[ExamBodyRef])
+def exam_bodies_internal(session: SessionDep, _: str = Depends(verify_internal_secret)) -> list[ExamBodyRef]:
+    """For the exam service: exam bodies sharing questions now (public organisations)."""
+    from auth.database.schema.organization.enums import OrganizationVisibility
+    from auth.database.schema.organization.organization_db import OrganizationModel
+
+    return [
+        ExamBodyRef(id=o.id, name=o.name) for o in session.exec(
+            select(OrganizationModel).where(OrganizationModel.visibility == OrganizationVisibility.PUBLIC)
+            .order_by(col(OrganizationModel.name))
+        ).all()
+    ]
+
+
+@router.get("/orgs/{org_id}/question-library", response_model=ExamStartsRead)
+def org_question_library(
+    org_id: UUID,
+    session: SessionDep,
+    _: str = Depends(verify_internal_secret),
+) -> ExamStartsRead:
+    """Whether the organisation may copy exam bodies' questions: free on a trial
+    or a paid plan (whether or not limits are enforced). Exam bodies may too."""
+    from auth.database.schema.organization.enums import OrganizationVisibility
+    from auth.database.schema.organization.organization_db import OrganizationModel
+    from auth.services.billing import org_billing
+
+    org = session.get(OrganizationModel, org_id)
+    if org is None:
+        return ExamStartsRead(allowed=False, reason="Organisation not found.")
+    if org.visibility == OrganizationVisibility.PUBLIC or org_billing.status(session, org).state in ("trial", "active"):
+        return ExamStartsRead(allowed=True)
+    return ExamStartsRead(
+        allowed=False,
+        reason="Questions from exam bodies come free with a plan. Your plan has ended: renew it under Billing to use them.",
+    )

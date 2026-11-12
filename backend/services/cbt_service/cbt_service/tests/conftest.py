@@ -160,6 +160,14 @@ def mock_auth_client(monkeypatch):
         fake_get_users_bulk,
     )
 
+    async def fake_exam_starts_allowed(self, org_id):
+        return True, None
+
+    monkeypatch.setattr(
+        "cbt_service.clients.auth_client.AuthClient.exam_starts_allowed",
+        fake_exam_starts_allowed,
+    )
+
 @pytest.fixture
 def all_students_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend every submitted ID is an active student in the caller's org."""

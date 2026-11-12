@@ -15,6 +15,8 @@ class RefreshRequest(BaseModel):
 
 class RefreshResponse(BaseModel):
     access_token: str
+    # A new refresh token replaces the one sent; the old one no longer works.
+    refresh_token: str | None = None
     token_type: str = "bearer"
 
 class TokenBase(BaseModel):

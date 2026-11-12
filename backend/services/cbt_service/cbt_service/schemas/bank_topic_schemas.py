@@ -37,6 +37,7 @@ class BankUpdate(BaseModel):
     description: str | None = None
     position: int | None = None
     status: BankStatus | None = None
+    shared: bool | None = None       # exam bodies: offer the bank to other organisations
 
     @field_validator("name")
     @classmethod
@@ -57,6 +58,7 @@ class BankRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     item_count: int = 0          # active questions in this bank
+    shared: bool = False         # offered to other organisations (exam bodies)
     # Staff given this bank (people limited to their subjects only see banks
     # they're given, plus questions in no bank).
     staff_ids: list[UUID] = Field(default_factory=list)

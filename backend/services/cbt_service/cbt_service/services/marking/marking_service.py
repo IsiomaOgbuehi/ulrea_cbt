@@ -108,7 +108,7 @@ class MarkingService:
 
         submitted: int = int(session.exec(
             select(func.count()).select_from(AttemptModel).where(
-                AttemptModel.exam_id == exam.id, col(AttemptModel.status).in_(CLOSED_STATUSES),
+                AttemptModel.exam_id == exam.id, col(AttemptModel.status).in_(CLOSED_STATUSES), col(AttemptModel.practice).is_(False),
             )
         ).one())
 
@@ -122,6 +122,7 @@ class MarkingService:
                 .where(
                     AttemptModel.exam_id == exam.id,
                     col(AttemptModel.status).in_(CLOSED_STATUSES),
+                    col(AttemptModel.practice).is_(False),
                     col(ResponseModel.item_id).in_(item_ids),
                 )
             ).subquery()
@@ -174,6 +175,7 @@ class MarkingService:
         conditions = [
             AttemptModel.exam_id == exam.id,
             col(AttemptModel.status).in_(CLOSED_STATUSES),
+            col(AttemptModel.practice).is_(False),
             ResponseModel.item_id == exam_item.item_id,
         ]
         if status == MarkingFilter.PENDING:
@@ -215,6 +217,7 @@ class MarkingService:
         conditions = [
             AttemptModel.exam_id == exam_id,
             col(AttemptModel.status).in_(CLOSED_STATUSES),
+            col(AttemptModel.practice).is_(False),
             col(ResponseModel.item_id).in_(item_ids),
         ]
         if attempt_ids is not None:
@@ -244,7 +247,7 @@ class MarkingService:
         item_ids: list[UUID] = [ei.item_id for ei, _ in MarkingService._written_items(session, exam.id)]
         attempts = session.exec(
             select(AttemptModel).where(
-                AttemptModel.exam_id == exam.id, col(AttemptModel.status).in_(CLOSED_STATUSES),
+                AttemptModel.exam_id == exam.id, col(AttemptModel.status).in_(CLOSED_STATUSES), col(AttemptModel.practice).is_(False),
             )
         ).all()
         counts = MarkingService._script_counts(session, exam.id, item_ids)
@@ -334,6 +337,7 @@ class MarkingService:
                 select(func.count()).select_from(AttemptModel).where(
                     AttemptModel.exam_id == exam.id,
                     col(AttemptModel.status).in_(CLOSED_STATUSES),
+                    col(AttemptModel.practice).is_(False),
                     col(AttemptModel.submitted_at) <= attempt.submitted_at,
                 )
             ).one())

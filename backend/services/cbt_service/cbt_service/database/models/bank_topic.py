@@ -46,6 +46,8 @@ class QuestionBank(SQLModel, table=True):
     year: int | None = None                  # mainly for past papers
     description: str | None = None
     position: int = Field(default=0)         # display order within the subject
+    # Exam bodies: other organisations may copy this bank's questions (question library).
+    shared: bool = Field(default=False, index=True)
     created_by: UUID = Field(nullable=False)
     created_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))

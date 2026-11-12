@@ -56,6 +56,7 @@ class P(str, Enum):
     VIOLATIONS_VIEW = "violations.view"
     VIOLATIONS_REVIEW = "violations.review"
     ATTEMPTS_RESET = "attempts.reset"
+    ATTEMPTS_EXTRA_TIME = "attempts.extra_time"
     # People
     CANDIDATES_VIEW = "candidates.view"
     CANDIDATES_MANAGE = "candidates.manage"
@@ -112,6 +113,7 @@ CATALOG: dict[P, PermissionInfo] = {
     P.VIOLATIONS_VIEW: PermissionInfo("Results", "View violations", "See proctoring violations (tab switches, etc.).", scoped=True),
     P.VIOLATIONS_REVIEW: PermissionInfo("Results", "Review violations", "Mark proctoring violations as reviewed.", scoped=True, implies=(P.VIOLATIONS_VIEW,)),
     P.ATTEMPTS_RESET: PermissionInfo("Results", "Reset attempts", "Let a candidate start an exam again.", implies=(P.RESULTS_VIEW,)),
+    P.ATTEMPTS_EXTRA_TIME: PermissionInfo("Results", "Give extra time", "Add time to a candidate's exam after a disruption such as a power cut. Their answers are kept, and an exam that ran out of time reopens.", implies=(P.RESULTS_VIEW,)),
 
     P.CANDIDATES_VIEW: PermissionInfo("People", "View candidates", "See the list of candidates."),
     P.CANDIDATES_MANAGE: PermissionInfo("People", "Manage candidates", "Add, edit, move, export candidates and reset their sign-in.", implies=(P.CANDIDATES_VIEW,)),

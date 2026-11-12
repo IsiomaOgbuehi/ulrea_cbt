@@ -426,7 +426,7 @@ def test_debug_redis_path(client):
 
     token = get_super_admin_token(client)
 
-    print("\nauth_dependencies redis_client:", auth_dependencies.redis_client)
+    print("\nauth_dependencies is_revoked:", auth_dependencies.is_revoked)
     print("users module redis_client:", getattr(users_module, 'redis_client', 'NOT FOUND'))
 
     response = client.post(

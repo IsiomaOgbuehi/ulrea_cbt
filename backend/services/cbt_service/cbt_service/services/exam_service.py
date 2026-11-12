@@ -854,7 +854,8 @@ class ExamService:
                     ExamAssignment.exam_id,
                     func.count(),
                     func.count().filter(ExamAssignment.status == AssignmentStatus.SUBMITTED),
-                ).where(col(ExamAssignment.exam_id).in_(ids)).group_by(col(ExamAssignment.exam_id))
+                ).where(col(ExamAssignment.exam_id).in_(ids), col(ExamAssignment.practice).is_(False))
+                .group_by(col(ExamAssignment.exam_id))
             ).all():
                 assigned[exam_id] = int(n_all)
                 submitted[exam_id] = int(n_done)
@@ -947,7 +948,7 @@ class ExamService:
             stmt = (
                 pg_insert(ExamAssignment)
                 .values(rows)
-                .on_conflict_do_nothing(index_elements=["exam_id", "student_id"])
+                .on_conflict_do_nothing(index_elements=["exam_id", "student_id", "practice"])
                 .returning(ExamAssignment.id)
             )
             created += len(session.execute(stmt).all())
@@ -969,6 +970,7 @@ class ExamService:
                 select(ExamAssignment).where(
                     ExamAssignment.exam_id == exam_id,
                     col(ExamAssignment.student_id).in_(chunk),
+                    col(ExamAssignment.practice).is_(False),
                 )
             ).all():
                 by_student[a.student_id] = a
@@ -1053,7 +1055,7 @@ class ExamService:
         """The exam's assignments, oldest first (checks access); optionally one cohort's, or individual ones."""
         exam = ExamService._get_exam(session, exam_id, current_user.org_id)
         ExamService._assert_can_view(session, exam, current_user, P.EXAMS_ASSIGN)
-        stmt = select(ExamAssignment).where(ExamAssignment.exam_id == exam_id)
+        stmt = select(ExamAssignment).where(ExamAssignment.exam_id == exam_id, col(ExamAssignment.practice).is_(False))
         if cohort == "individual":
             stmt = stmt.where(col(ExamAssignment.cohort_id).is_(None))
         elif cohort is not None:
@@ -1128,7 +1130,7 @@ class ExamService:
             chunk: list[UUID] = unique_ids[start:start + _ASSIGN_CHUNK_SIZE]
             have.update(session.exec(
                 select(ExamAssignment.student_id).where(
-                    ExamAssignment.exam_id == exam_id, col(ExamAssignment.student_id).in_(chunk),
+                    ExamAssignment.exam_id == exam_id, col(ExamAssignment.student_id).in_(chunk), col(ExamAssignment.practice).is_(False),
                 )
             ).all())
         return [s for s in unique_ids if s not in have]
@@ -1153,6 +1155,7 @@ class ExamService:
                 .where(
                     ExamAssignment.org_id == current_user.org_id,
                     col(ExamAssignment.student_id).in_(chunk),
+                    col(ExamAssignment.practice).is_(False),
                     col(ExamAssignment.status).in_([AssignmentStatus.ASSIGNED, AssignmentStatus.STARTED]),
                     col(ExamModel.status).in_([ExamStatus.APPROVED, ExamStatus.ACTIVE]),
                     or_(col(ExamModel.end_time).is_(None), col(ExamModel.end_time) > now),
@@ -1177,7 +1180,7 @@ class ExamService:
                 func.count(),
                 func.count().filter(ExamAssignment.status == AssignmentStatus.SUBMITTED),
             )
-            .where(ExamAssignment.exam_id == exam_id)
+            .where(ExamAssignment.exam_id == exam_id, col(ExamAssignment.practice).is_(False))
             .group_by(col(ExamAssignment.cohort_id))
         ).all()
         return [AssignedCohortRead(cohort_id=cid, students=int(n), submitted=int(done or 0)) for cid, n, done in rows]
@@ -1252,6 +1255,7 @@ class ExamService:
             .where(
                 ExamAssignment.student_id == current_user.id,
                 ExamAssignment.org_id == current_user.org_id,
+                col(ExamAssignment.practice).is_(False),
             )
         )
 
@@ -1273,6 +1277,7 @@ class ExamService:
         mine = and_(
             col(AttemptModel.student_id) == current_user.id,
             col(AttemptModel.exam_id) == col(ExamModel.id),
+            col(AttemptModel.practice).is_(False),
         )
         active_that_day: ColumnElement[bool] = (
             select(AttemptModel.id)
@@ -1373,6 +1378,7 @@ class ExamService:
                 select(AttemptModel).where(
                     AttemptModel.student_id == current_user.id,
                     col(AttemptModel.exam_id).in_(exam_ids),
+                    col(AttemptModel.practice).is_(False),
                 )
             ).all():
                 attempts_by_exam.setdefault(attempt.exam_id, []).append(attempt)
@@ -1395,17 +1401,33 @@ class ExamService:
                 )
             )
 
+            mine: list[AttemptModel] = attempts_by_exam.get(exam.id, [])
+
+            def _out_of_time(a: AttemptModel) -> bool:
+                """Still marked started, but its time ran out (it's closed the
+                next time it's opened): show it as finished, not "Resume"."""
+                if a.status != AttemptStatus.STARTED or a.clock_started_at is None or a.resume_seconds is not None:
+                    return False
+                started = a.clock_started_at if a.clock_started_at.tzinfo else a.clock_started_at.replace(tzinfo=timezone.utc)
+                allowed = timedelta(
+                    minutes=exam.duration_minutes,
+                    seconds=(exam.extra_time_seconds or 0) + (a.extra_seconds or 0),
+                )
+                return now >= started + allowed
+
+            timed_out: list[AttemptModel] = [a for a in mine if _out_of_time(a)]
+            # An attempt under way carries on past the window (its own
+            # deadline, with any extra time given, decides when it ends).
             can_attempt = (
                 (effective_start is None or now >= effective_start)
                 and
                 (effective_end is None or now <= effective_end)
-            )
-
-            mine: list[AttemptModel] = attempts_by_exam.get(exam.id, [])
+            ) or any(a.status == AttemptStatus.STARTED and a not in timed_out for a in mine)
             resumable: list[AttemptModel] = [
-                a for a in mine if a.status in (AttemptStatus.STARTED, AttemptStatus.RESET)
+                a for a in mine
+                if a.status in (AttemptStatus.STARTED, AttemptStatus.RESET) and a not in timed_out
             ]
-            finished: list[AttemptModel] = [a for a in mine if a.status in closed]
+            finished: list[AttemptModel] = [a for a in mine if a.status in closed] + timed_out
             attempts_used: int = sum(1 for a in mine if a.status != AttemptStatus.RESET)
             max_attempts: int = exam.max_attempts or 1
             in_progress: AttemptModel | None = (
@@ -1433,7 +1455,11 @@ class ExamService:
                     assignment_id=assignment.id,
                     exam_id=exam.id,
                     exam_title=exam.title,
-                    status=assignment.status,
+                    status=(
+                        AssignmentStatus.SUBMITTED
+                        if timed_out and in_progress is None and assignment.status == AssignmentStatus.STARTED
+                        else assignment.status
+                    ),
                     scheduled_at=assignment.scheduled_at,
                     duration_minutes=exam.duration_minutes,
                     extra_time_seconds=exam.extra_time_seconds or 0,
