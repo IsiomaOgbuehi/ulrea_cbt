@@ -7,8 +7,9 @@ Exam bodies' shared questions.
   optionally straight into an exam. A copy is the organisation's own question
   and points at its original, so later edits or unsharing never change it.
 - Topic tests: subscribed students practise a random set of questions from
-  the exams a body offers in External Exams (not from shared banks). Nothing
-  is stored: the student's device keeps the test, and the server marks it.
+  the body's shared banks and the exams it offers in External Exams, so a
+  body with no approved exam yet can still be practised. Nothing is stored:
+  the student's device keeps the test, and the server marks it.
 """
 import random
 from collections.abc import Iterable
@@ -17,7 +18,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import Select
 from sqlalchemy.sql.elements import ColumnElement
-from sqlmodel import Session, col, func, select
+from sqlmodel import Session, col, func, or_, select
 
 from cbt_service.core.permissions import P
 from cbt_service.database.models.bank_topic import ItemTopic, QuestionBank, Topic
@@ -57,11 +58,14 @@ def _shared_item_ids(body_ids: Iterable[UUID]) -> Select[tuple[UUID]]:
 
 
 def _pool_filter(body_id: UUID, objective_only: bool = False) -> list[ColumnElement[bool]]:
-    """Topic tests: questions in the body's External Exams exams."""
+    """Topic tests: questions in the body's shared banks or its External Exams exams."""
     conds: list[ColumnElement[bool]] = [
         ItemModel.org_id == body_id,
         ItemModel.status == ItemStatus.ACTIVE,
-        col(ItemModel.id).in_(_shared_item_ids([body_id])),
+        or_(
+            col(ItemModel.bank_id).in_(_shared_bank_ids([body_id])),
+            col(ItemModel.id).in_(_shared_item_ids([body_id])),
+        ),
     ]
     if objective_only:
         conds.append(col(ItemModel.item_type).in_(list(OBJECTIVE_TYPES)))

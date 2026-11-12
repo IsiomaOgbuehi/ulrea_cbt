@@ -246,3 +246,33 @@ def test_topic_test_ignores_questions_that_are_not_shared(client: TestClient, st
         json={"answers": [{"item_id": str(item), "answer": ["A"]}]}, headers=student_headers,
     ).json()
     assert r["items"] == [] and r["missing"] == 1
+
+
+def test_topic_tests_use_shared_banks_without_any_approved_exam(
+    client: TestClient, student_headers: H, access: dict[str, bool],
+) -> None:
+    exam = _plain_exam(n_mcq=3)                   # not offered in External Exams
+    subject = _subject_of(exam)
+    bank = _bank(exam, "Practice bank", shared=False)
+
+    # Not shared: nothing to practise from this subject.
+    topics = client.get(f"{V1}/external/bodies/{ORG_ID}/topics", headers=student_headers).json()
+    assert str(subject) not in [s["id"] for s in topics]
+
+    with Session(engine) as s:
+        b = s.get(QuestionBank, bank)
+        assert b is not None
+        b.shared = True
+        s.add(b)
+        s.commit()
+    topics = client.get(f"{V1}/external/bodies/{ORG_ID}/topics", headers=student_headers).json()
+    mine = next(s for s in topics if s["id"] == str(subject))
+    assert mine["question_count"] == 4            # objective only: 3 MCQs + true/false (no essay)
+    test = client.post(
+        f"{V1}/external/bodies/{ORG_ID}/topic-test",
+        json={"subject_id": str(subject), "topic_ids": [], "count": 10}, headers=student_headers,
+    ).json()
+    assert len(test["items"]) == 4 and all("correct_answers" not in i for i in test["items"])
+    answers = [{"item_id": i["id"], "answer": ["A"]} for i in test["items"]]
+    result = client.post(f"{V1}/external/bodies/{ORG_ID}/topic-test/score", json={"answers": answers}, headers=student_headers).json()
+    assert result["missing"] == 0 and result["score"] == 3 and result["max_score"] == 4
