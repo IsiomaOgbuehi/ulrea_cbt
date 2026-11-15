@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 from pydantic import EmailStr
 from sqlmodel import SQLModel, Field
 from .enums import MembershipStatus, UserRole, VerificationMethod
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 class UserBase(SQLModel):
     firstname: str = Field(index=True)
@@ -26,7 +27,7 @@ class UserBase(SQLModel):
     # from the server (python -m auth.scripts.platform_admin), never by the API.
     is_platform_admin: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
     # When the student first opened External Exams (the menu shows "New" until then).
-    external_exams_seen_at: datetime | None = Field(default=None, nullable=True)
+    external_exams_seen_at: datetime | None = Field(sa_type=UTCTimestamp, default=None, nullable=True)
 
 
 
@@ -35,9 +36,9 @@ class UserModel(UserBase, table=True):
     """Global identity — one record per person across all orgs."""
     __tablename__ = 'users'
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_at: datetime | None = Field(
+    created_at: datetime | None = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc),
         index=True,
         nullable=False,
     )
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False,)
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc), nullable=False,)

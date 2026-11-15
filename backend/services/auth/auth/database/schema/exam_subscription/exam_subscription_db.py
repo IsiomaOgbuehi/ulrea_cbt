@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field
 from .enum import SubscriptionPlan, SubscriptionStatus, SubscribedBy
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 class ExamBodySubscription(SQLModel, table=True):
     """
@@ -33,14 +34,14 @@ class ExamBodySubscription(SQLModel, table=True):
     currency: str = Field(default="NGN")
 
     # Validity
-    starts_at: datetime | None = None
-    expires_at: datetime | None = None     # None = lifetime access
+    starts_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)
+    expires_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)     # None = lifetime access
 
     is_trial: bool = Field(default=False)
-    trial_ends_at: datetime | None = None
+    trial_ends_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
 
 
 class BulkOrgSubscription(SQLModel, table=True):
@@ -66,5 +67,5 @@ class BulkOrgSubscription(SQLModel, table=True):
     paystack_transaction_id: str | None = Field(default=None)
     status: SubscriptionStatus = Field(default=SubscriptionStatus.PENDING, index=True)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))

@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from datetime import datetime, timezone
 from auth.database.schema.user.enums import UserRole, MembershipStatus, VerificationMethod
 from auth.database.schema.membership.enum import MembershipJoinType
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 
 class OrgMembership(SQLModel, table=True):
@@ -33,7 +34,7 @@ class OrgMembership(SQLModel, table=True):
     verification_method: VerificationMethod | None = Field(default=None)
     created_by: UUID | None = Field(default=None)       # None for self-joined
     archived_by: UUID | None = Field(default=None)
-    archived_at: datetime | None = Field(default=None)
+    archived_at: datetime | None = Field(sa_type=UTCTimestamp, default=None)
     archive_reason: str | None = Field(default=None)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))

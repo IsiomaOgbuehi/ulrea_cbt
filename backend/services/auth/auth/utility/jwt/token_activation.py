@@ -66,3 +66,30 @@ def verify_password_reset_token(token: str) -> str:
         return user_id
     except PyJWTError:
         raise ValueError("Invalid or expired token")
+
+STUDENT_INVITE_DAYS = 7
+
+
+def create_student_invite_token(membership_id: str, email: str) -> str:
+    """The link in a school's email invite to a student (a pending membership)."""
+    payload: dict[str, str | datetime] = {
+        "sub": str(membership_id),
+        "email": email.strip().lower(),
+        "type": "student_invite",
+        "exp": datetime.now(timezone.utc) + timedelta(days=STUDENT_INVITE_DAYS),
+    }
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=ALGORITHM)
+
+
+def verify_student_invite_token(token: str) -> tuple[str, str]:
+    """(membership_id, email)."""
+    try:
+        payload: dict[str, object] = jwt.decode(token, settings.JWT_SECRET, algorithms=[ALGORITHM])
+    except PyJWTError:
+        raise ValueError("Invalid or expired token")
+    if payload.get("type") != "student_invite":
+        raise ValueError("Invalid token type")
+    membership_id, email = payload.get("sub"), payload.get("email")
+    if not isinstance(membership_id, str) or not isinstance(email, str) or not membership_id or not email:
+        raise ValueError("Invalid token payload")
+    return membership_id, email

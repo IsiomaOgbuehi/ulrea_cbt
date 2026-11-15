@@ -5,7 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -52,6 +52,12 @@ class ExamBodyCard(BaseModel):
     on_trial: bool = False
     trial_days: int = 0              # free trial on offer (0: none, or already used)
     on_sale: bool = True             # False: hidden; shown only to students who've paid, until it ends
+
+    @field_validator("expires_at")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        # Stored without a time zone (in UTC): say so, so "until" reads right everywhere.
+        return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 
 
 class SubscribeRequest(BaseModel):

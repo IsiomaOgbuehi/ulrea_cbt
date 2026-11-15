@@ -14,6 +14,7 @@ from auth.database.schema.user.user_db import UserModel
 from auth.database.schema.user.enums import MembershipStatus, UserRole, VerificationMethod
 from auth.utility.password.password_harsher import PasswordHasher
 from auth.api_models.student_signup import StudentSelfSignup
+from auth.services import referrals
 
 
 class SubscriptionService:
@@ -59,6 +60,7 @@ class SubscriptionService:
         session.add(user)
         session.commit()
         session.refresh(user)
+        referrals.attach(session, user, payload.referral_code)
         return user
 
     # --------------------------------------------------------

@@ -4,6 +4,7 @@ from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, DateTime, Index, String, UniqueConstraint, text
 
 from .enum import CohortStatus, MemberStatus
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 
 class CohortModel(SQLModel, table=True):
@@ -19,13 +20,13 @@ class CohortModel(SQLModel, table=True):
 
     # Optional metadata — useful for schools and orgs alike
     academic_year: str | None = None            # "2024/2025" for schools
-    start_date: datetime | None = None
-    end_date: datetime | None = None            # expected graduation/completion date
-    graduated_at: datetime | None = None        # actual graduation timestamp
+    start_date: datetime | None = Field(default=None, sa_type=UTCTimestamp)
+    end_date: datetime | None = Field(default=None, sa_type=UTCTimestamp)            # expected graduation/completion date
+    graduated_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)        # actual graduation timestamp
     graduated_by: UUID | None = None
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
 
 
 class CohortMember(SQLModel, table=True):
@@ -50,7 +51,7 @@ class CohortMember(SQLModel, table=True):
     )
     org_id: UUID = Field(index=True, nullable=False)
     added_by: UUID = Field(nullable=False)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
     # Stored as a plain string (validated by MemberStatus) to avoid enum migrations.
     status: str = Field(
         default=MemberStatus.ACTIVE.value,
@@ -78,4 +79,4 @@ class TeacherCohortAssignment(SQLModel, table=True):
     assigned_by: UUID | None = Field(
         default=None, foreign_key="users.id", ondelete="SET NULL", nullable=True
     )
-    assigned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    assigned_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))

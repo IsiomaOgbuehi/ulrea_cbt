@@ -37,6 +37,24 @@ def register_fulfiller(purpose: PaymentPurpose, fn: Fulfiller) -> None:
     _fulfillers[purpose] = fn
 
 
+# Run for every payment once it's paid, whatever it bought (referral commissions...).
+_paid_listeners: list[Fulfiller] = []
+
+
+def on_paid(fn: Fulfiller) -> None:
+    if fn not in _paid_listeners:
+        _paid_listeners.append(fn)
+
+
+def _given(session: Session, payment: Payment) -> None:
+    """Give what was bought, then tell the listeners. Same transaction as marking it paid."""
+    fulfil = _fulfillers.get(payment.purpose)
+    if fulfil is not None:
+        fulfil(session, payment)
+    for listener in _paid_listeners:
+        listener(session, payment)
+
+
 def new_reference(prefix: str) -> str:
     return f"jw_{prefix}_{secrets.token_hex(10)}"
 
@@ -53,9 +71,7 @@ def _record(session: Session, payment: Payment, price: Discounted | None = None)
     if price is not None:
         coupons.reserve(session, price, payment)
     if payment.status == PaymentStatus.SUCCESSFUL:
-        fulfil = _fulfillers.get(payment.purpose)
-        if fulfil is not None:
-            fulfil(session, payment)
+        _given(session, payment)
     session.commit()          # also ends the transaction: no connection held while the provider is called
     session.refresh(payment)
     return payment
@@ -162,9 +178,7 @@ def _settle(session: Session, payment_id: UUID, verified: VerifiedPayment) -> Pa
         locked.status = PaymentStatus.SUCCESSFUL
         locked.paid_at = datetime.now(timezone.utc)
         coupons.settle(session, locked.id, paid=True)
-        fulfil = _fulfillers.get(locked.purpose)
-        if fulfil is not None:
-            fulfil(session, locked)      # same transaction: paid and given together
+        _given(session, locked)          # same transaction: paid and given together
     session.add(locked)
     session.commit()
     session.refresh(locked)

@@ -1,6 +1,6 @@
 from sqlmodel import Field
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from auth.database.schema.cohort.cohort_api_models import StudentCohort, StudentGraduation
 
 from .token import TokenBase
@@ -312,3 +312,34 @@ class StudentCredentialResetResponse(BaseModel):
     access_code: str | None
     temporary_answer: str
     was_generated: bool
+
+class StudentInviteRequest(BaseModel):
+    email: EmailStr
+
+
+class StudentInviteSent(BaseModel):
+    student_id: UUID
+    email: str
+    institution_id: str | None = None
+    already_has_account: bool
+    invite_link: str | None = None     # dev only, for testing without email
+
+
+class StudentInvitePreview(BaseModel):
+    """What the invite page shows before the student accepts."""
+    org_name: str
+    email: str
+    has_account: bool                  # sign in with their password instead of making one
+    needs_name: bool
+
+
+class StudentInviteToken(BaseModel):
+    token: str = Field(min_length=10, max_length=2000)
+
+
+class StudentInviteAccept(BaseModel):
+    token: str
+    password: str = Field(min_length=1, max_length=128)
+    confirm_password: str | None = None
+    firstname: str | None = Field(default=None, max_length=80)
+    lastname: str | None = Field(default=None, max_length=80)

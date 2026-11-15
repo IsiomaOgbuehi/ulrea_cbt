@@ -20,6 +20,7 @@ from auth.database.schema.organization.organization_db import OrganizationModel
 from auth.dependencies.auth_dependencies import get_user_context, require_permission
 from auth.services.billing import coupons, exam_access, org_billing, payments, pricing  # noqa: F401  (registers fulfilment)
 from auth.services.billing.coupons import Discounted
+from auth.services import referrals  # noqa: F401  (credits referral commissions when payments go through)
 from auth.services.user.user_context import UserContext
 from auth.utility.payment.providers.base import InvalidWebhook, PaymentProviderError
 from auth.utility.payment.providers.registry import active_provider, provider_named

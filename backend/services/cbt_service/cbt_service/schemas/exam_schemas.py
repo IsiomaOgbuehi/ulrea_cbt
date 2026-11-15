@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 from cbt_service.database.models.enums.exam_enum import ExamAction, ExamStatus, AssignmentStatus
 from cbt_service.database.models.enums.enums import UserRole
+from cbt_service.schemas.utc import UTCDateTime
 
 
 class ExamCreate(BaseModel):
@@ -14,8 +15,8 @@ class ExamCreate(BaseModel):
     instructions: str | None = None
     duration_minutes: int = 60
     pass_mark: float | None = None
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    start_time: UTCDateTime | None = None
+    end_time: UTCDateTime | None = None
     shuffle_questions: bool = False
     shuffle_options: bool = False
     show_result_immediately: bool = True
@@ -67,8 +68,8 @@ class ExamUpdate(BaseModel):
     instructions: str | None = None
     duration_minutes: int | None = None
     pass_mark: float | None = None
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    start_time: UTCDateTime | None = None
+    end_time: UTCDateTime | None = None
     shuffle_questions: bool | None = None
     shuffle_options: bool | None = None
     show_result_immediately: bool | None = None
@@ -184,7 +185,7 @@ class ApprovalAction(BaseModel):
 
 class AssignStudentsRequest(BaseModel):
     student_ids: list[UUID]
-    scheduled_at: datetime | None = None
+    scheduled_at: UTCDateTime | None = None
 
 
 class ExamAssignmentRead(BaseModel):
@@ -237,7 +238,7 @@ from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa:
 
 class AssignCohortRequest(BaseModel):
     cohort_id: UUID
-    scheduled_at: datetime | None = None
+    scheduled_at: UTCDateTime | None = None
 
 
 class CohortAssignResult(BaseModel):
