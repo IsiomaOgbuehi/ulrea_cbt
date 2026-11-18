@@ -50,7 +50,8 @@ from auth.api_models.login_response import LoginResponse
 from auth.api_models.user_api_models import (
     StudentInviteAccept, StudentInvitePreview, StudentInviteRequest, StudentInviteSent, StudentInviteToken,
 )
-from auth.services.user import student_invites
+from auth.services.user import password_change, student_invites
+from auth.api_models.user_api_models import ChangePasswordRequest
 from auth.services.workspace_service import WorkspaceService
 
 
@@ -640,6 +641,33 @@ def change_my_security_qa(
     return {"detail": "Security question and answer updated."}
 
 
+''' CHANGE MY PASSWORD 🔑 '''
+@router.post("/me/password", response_model=LoginResponse)
+async def change_my_password(
+    payload: ChangePasswordRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(get_user_context),
+) -> LoginResponse:
+    """
+    Anyone signed in with a password (staff, admins, students who use email).
+    Other devices are signed out at their next refresh; this one gets new tokens.
+    """
+    await password_change.check_not_locked(ctx.user.id)
+    try:
+        await run_in_threadpool(
+            password_change.change, session, ctx.user,
+            payload.current_password, payload.new_password, payload.confirm_password,
+        )
+    except password_change.WrongPassword:
+        await password_change.record_failure(ctx.user.id)
+        raise HTTPException(status_code=400, detail="Your current password is not correct.")
+    await password_change.clear_failures(ctx.user.id)
+    org = session.get(OrganizationModel, ctx.membership.org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    return await run_in_threadpool(WorkspaceService.session_response, session, ctx.user, ctx.membership, org)
+
+
 ''' STUDENT LOGIN VALIDATE CODE AND SHOW QUESTION 🔐 '''
 @router.post(AuthRoutes.STUDENT_LOGIN_QUESTION.value)
 def get_student_security_question(
@@ -963,7 +991,9 @@ def reset_password(
     if not user or not user.password:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    password_change.validate_new(payload.new_password, payload.confirm_password)
     user.password = PasswordHasher.create(payload.new_password)
+    user.password_changed_at = datetime.now(UTC)
     session.add(user)
     session.commit()
 

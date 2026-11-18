@@ -115,3 +115,43 @@ def test_staff_tick_show_in_external_exams(client: TestClient, admin_headers: H,
     assert r.status_code == 200 and r.json() == {"listed": True}
     assert _practise(client, student_headers, exam).status_code == 200
     assert client.patch(f"{V1}/exams/{exam['exam_id']}/external", json={"listed": True}, headers=student_headers).status_code == 403
+
+
+def _titled(title: str) -> dict[str, Any]:
+    exam = _listed(n_mcq=1)
+    with Session(engine) as s:
+        e = s.get(ExamModel, exam["exam_id"])
+        assert e is not None
+        e.title = title
+        s.add(e)
+        s.commit()
+    return exam
+
+
+def test_catalogue_pages_sorts_and_searches(client: TestClient, student_headers: H, access: dict[str, bool]) -> None:
+    for t in ["Physics 2019", "Biology 2021", "Chemistry 2020", "Biology 2018", "English 2022"]:
+        _titled(t)
+    url = f"{V1}/external/bodies/{ORG_ID}/exams"
+
+    first = client.get(url, params={"page_size": 2}, headers=student_headers).json()
+    assert first["total"] == 5 and first["total_pages"] == 3 and first["page"] == 1
+    assert [e["title"] for e in first["exams"]] == ["Biology 2018", "Biology 2021"]
+    last = client.get(url, params={"page_size": 2, "page": 3}, headers=student_headers).json()
+    assert [e["title"] for e in last["exams"]] == ["Physics 2019"]
+
+    found = client.get(url, params={"search": "bio"}, headers=student_headers).json()
+    assert found["total"] == 2
+    assert client.get(url, params={"search": "100%_"}, headers=student_headers).json()["total"] == 0
+
+    # Taken exams come first by best score; untaken ones first with not_taken.
+    chem = next(e for e in client.get(url, headers=student_headers).json()["exams"] if e["title"] == "Chemistry 2020")
+    attempt = client.post(f"{V1}/external/exams/{chem['exam_id']}/start", headers=student_headers).json()
+    client.post(f"{V1}/attempts/{attempt['id']}/submit", headers=student_headers)
+    best = client.get(url, params={"sort": "best_score"}, headers=student_headers).json()["exams"]
+    assert best[0]["title"] == "Chemistry 2020"
+    untaken = client.get(url, params={"sort": "not_taken"}, headers=student_headers).json()["exams"]
+    assert untaken[-1]["title"] == "Chemistry 2020"
+    recent = client.get(url, params={"sort": "recently_taken"}, headers=student_headers).json()["exams"]
+    assert recent[0]["title"] == "Chemistry 2020"
+    assert client.get(url, params={"sort": "bogus"}, headers=student_headers).status_code == 422
+    assert client.get(url, params={"page_size": 101}, headers=student_headers).status_code == 422

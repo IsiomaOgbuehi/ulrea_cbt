@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -20,10 +21,17 @@ class PracticeExamRead(BaseModel):
     latest_attempt_id: UUID | None = None          # review the last finished one
 
 
+PracticeSort = Literal["title", "newest", "subject", "recently_taken", "best_score", "not_taken"]
+
+
 class PracticeCatalogue(BaseModel):
     subscribed: bool
     expires_at: datetime | None
-    exams: list[PracticeExamRead]
+    exams: list[PracticeExamRead]          # this page
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    total_pages: int = 0
 
 
 class PracticeStatsRead(BaseModel):

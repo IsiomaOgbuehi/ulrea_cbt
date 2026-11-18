@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy import ColumnElement, UnaryExpression, and_
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, delete, func, select
 
 from cbt_service.core.permissions import P
@@ -17,9 +19,10 @@ from cbt_service.database.models.enums.exam_enum import AssignmentStatus, ExamSt
 from cbt_service.database.models.exam import ExamAssignment, ExamItem, ExamModel, PracticeSummary
 from cbt_service.database.models.subject import SubjectModel
 from cbt_service.schemas.current_user import CurrentUser
-from cbt_service.schemas.practice_schemas import PracticeExamRead, PracticeStatsRead
+from cbt_service.schemas.practice_schemas import PracticeExamRead, PracticeSort, PracticeStatsRead
 from cbt_service.services.attempt_service import AttemptService
 from cbt_service.services.exam_service import ExamService
+from cbt_service.services.item.utils.search import escape_like
 
 OPEN_STATUSES: tuple[ExamStatus, ...] = (ExamStatus.APPROVED, ExamStatus.ACTIVE)
 
@@ -35,29 +38,50 @@ class PracticeService:
         return exam
 
     @staticmethod
-    def catalogue(session: Session, body_id: UUID, student_id: UUID) -> list[PracticeExamRead]:
-        exams = list(session.exec(
-            select(ExamModel).where(
-                ExamModel.org_id == body_id, col(ExamModel.external_listed).is_(True),
-                col(ExamModel.status).in_(OPEN_STATUSES),
-            ).order_by(col(ExamModel.title))
-        ).all())
-        if not exams:
-            return []
-        ids = [e.id for e in exams]
+    def catalogue(
+        session: Session,
+        body_id: UUID,
+        student_id: UUID,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        sort: PracticeSort = "title",
+        search: str = "",
+    ) -> tuple[list[PracticeExamRead], int]:
+        """One page of an exam body's listed exams with this student's progress, and the total."""
+        conds: list[ColumnElement[bool]] = [
+            col(ExamModel.org_id) == body_id, col(ExamModel.external_listed).is_(True),
+            col(ExamModel.status).in_(OPEN_STATUSES),
+        ]
+        if search.strip():
+            conds.append(col(ExamModel.title).ilike(f"%{escape_like(search.strip())}%", escape="\\"))
+        total = int(session.exec(select(func.count()).select_from(ExamModel).where(*conds)).one())
+        if total == 0:
+            return [], 0
+
+        summary = aliased(PracticeSummary)
+        stmt = (
+            select(ExamModel, summary, SubjectModel.name)
+            .outerjoin(summary, and_(col(summary.exam_id) == ExamModel.id, col(summary.student_id) == student_id))
+            .outerjoin(SubjectModel, col(SubjectModel.id) == ExamModel.subject_id)
+            .where(*conds)
+        )
+        title = col(ExamModel.title).asc()
+        order: dict[str, list[UnaryExpression[object]]] = {
+            "title": [title],
+            "newest": [col(ExamModel.created_at).desc()],
+            "subject": [col(SubjectModel.name).asc().nulls_last(), title],
+            "recently_taken": [col(summary.last_taken_at).desc().nulls_last(), title],
+            "best_score": [col(summary.best_percentage).desc().nulls_last(), title],
+            "not_taken": [func.coalesce(col(summary.times_taken), 0).asc(), title],
+        }
+        rows = session.exec(
+            stmt.order_by(*order[sort], col(ExamModel.id)).offset((page - 1) * page_size).limit(page_size)
+        ).all()
+        ids = [e.id for e, _, _ in rows]
         counts: dict[UUID, int] = {
             eid: int(n) for eid, n in session.exec(
                 select(ExamItem.exam_id, func.count()).where(col(ExamItem.exam_id).in_(ids)).group_by(col(ExamItem.exam_id))
-            ).all()
-        }
-        subjects: dict[UUID, str] = {
-            s.id: s.name for s in session.exec(
-                select(SubjectModel).where(col(SubjectModel.id).in_({e.subject_id for e in exams if e.subject_id}))
-            ).all()
-        }
-        summaries: dict[UUID, PracticeSummary] = {
-            s.exam_id: s for s in session.exec(
-                select(PracticeSummary).where(PracticeSummary.student_id == student_id, col(PracticeSummary.exam_id).in_(ids))
             ).all()
         }
         attempts: dict[UUID, AttemptModel] = {
@@ -69,11 +93,10 @@ class PracticeService:
             ).all()
         }
         out: list[PracticeExamRead] = []
-        for e in exams:
-            s = summaries.get(e.id)
+        for e, s, subject_name in rows:
             a = attempts.get(e.id)
             out.append(PracticeExamRead(
-                exam_id=e.id, title=e.title, subject_name=subjects.get(e.subject_id) if e.subject_id else None,
+                exam_id=e.id, title=e.title, subject_name=subject_name,
                 description=e.description, duration_minutes=e.duration_minutes, question_count=counts.get(e.id, 0),
                 times_taken=s.times_taken if s else 0,
                 best_percentage=s.best_percentage if s else None,
@@ -82,7 +105,7 @@ class PracticeService:
                 in_progress_attempt_id=a.id if a is not None and a.status == AttemptStatus.STARTED else None,
                 latest_attempt_id=a.id if a is not None and a.status != AttemptStatus.STARTED else None,
             ))
-        return out
+        return out, total
 
     @staticmethod
     def start(session: Session, exam_id: UUID, student_id: UUID) -> AttemptModel:

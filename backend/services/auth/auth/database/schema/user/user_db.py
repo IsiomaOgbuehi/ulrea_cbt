@@ -28,6 +28,8 @@ class UserBase(SQLModel):
     is_platform_admin: bool = Field(default=False, sa_column_kwargs={"server_default": "false"})
     # When the student first opened External Exams (the menu shows "New" until then).
     external_exams_seen_at: datetime | None = Field(sa_type=UTCTimestamp, default=None, nullable=True)
+    # Sign-ins from before this moment end at their next token refresh.
+    password_changed_at: datetime | None = Field(sa_type=UTCTimestamp, default=None, nullable=True)
 
 
 
