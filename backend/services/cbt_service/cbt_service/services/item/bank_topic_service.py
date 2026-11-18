@@ -12,7 +12,8 @@ from cbt_service.database.models.subject import SubjectAssignment
 from cbt_service.database.models.enums.item_subject_enums import BankStatus, ItemStatus
 from cbt_service.database.models.item import ItemModel
 from cbt_service.schemas.bank_topic_schemas import (
-    BankCreate, BankRead, BankStaffSet, BankUpdate, StaffBanksRead, StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
+    BankCreate, BankRead, BankSharingResult, BankSharingUpdate, BankStaffSet, BankUpdate, StaffBanksRead,
+    StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
 )
 from cbt_service.schemas.item_subject_schemas import CurrentUser
 from cbt_service.services.item.item_service import ItemService
@@ -126,6 +127,33 @@ class BankService:
             BankService._item_counts(session, subject_id).get(bank.id, 0),
             BankService._staff_ids(session, [bank.id]).get(bank.id),
         )
+
+    @staticmethod
+    def set_sharing(
+        session: Session, subject_id: UUID, payload: BankSharingUpdate, current_user: CurrentUser,
+    ) -> BankSharingResult:
+        """Share several of the subject's banks with other organisations (or stop),
+        in one go. Archived banks, and banks the caller can't manage, are skipped."""
+        ItemService._assert_subject_access(session, subject_id, current_user, P.BANKS_TOPICS_MANAGE)
+        wanted: list[UUID] = list(dict.fromkeys(payload.bank_ids))
+        allowed = ScopeService.allowed_bank_ids(session, current_user, P.BANKS_TOPICS_MANAGE)
+        banks = list(session.exec(
+            select(QuestionBank).where(
+                col(QuestionBank.id).in_(wanted),
+                QuestionBank.subject_id == subject_id,
+                QuestionBank.org_id == current_user.org_id,
+                QuestionBank.status == BankStatus.ACTIVE.value,
+            )
+        ).all())
+        usable = [b for b in banks if allowed is None or b.id in allowed]
+        changed = [b for b in usable if b.shared != payload.shared]
+        now = _now()
+        for b in changed:
+            b.shared = payload.shared
+            b.updated_at = now
+            session.add(b)
+        session.commit()
+        return BankSharingResult(updated=len(changed), skipped=len(wanted) - len(usable))
 
     @staticmethod
     def set_staff(

@@ -246,3 +246,58 @@ def test_topic_test_ignores_questions_that_are_not_shared(client: TestClient, st
         json={"answers": [{"item_id": str(item), "answer": ["A"]}]}, headers=student_headers,
     ).json()
     assert r["items"] == [] and r["missing"] == 1
+
+
+def test_topic_tests_use_shared_banks_without_any_approved_exam(
+    client: TestClient, student_headers: H, access: dict[str, bool],
+) -> None:
+    exam = _plain_exam(n_mcq=3)                   # not offered in External Exams
+    subject = _subject_of(exam)
+    bank = _bank(exam, "Practice bank", shared=False)
+
+    # Not shared: nothing to practise from this subject.
+    topics = client.get(f"{V1}/external/bodies/{ORG_ID}/topics", headers=student_headers).json()
+    assert str(subject) not in [s["id"] for s in topics]
+
+    with Session(engine) as s:
+        b = s.get(QuestionBank, bank)
+        assert b is not None
+        b.shared = True
+        s.add(b)
+        s.commit()
+    topics = client.get(f"{V1}/external/bodies/{ORG_ID}/topics", headers=student_headers).json()
+    mine = next(s for s in topics if s["id"] == str(subject))
+    assert mine["question_count"] == 4            # objective only: 3 MCQs + true/false (no essay)
+    test = client.post(
+        f"{V1}/external/bodies/{ORG_ID}/topic-test",
+        json={"subject_id": str(subject), "topic_ids": [], "count": 10}, headers=student_headers,
+    ).json()
+    assert len(test["items"]) == 4 and all("correct_answers" not in i for i in test["items"])
+    answers = [{"item_id": i["id"], "answer": ["A"]} for i in test["items"]]
+    result = client.post(f"{V1}/external/bodies/{ORG_ID}/topic-test/score", json={"answers": answers}, headers=student_headers).json()
+    assert result["missing"] == 0 and result["score"] == 3 and result["max_score"] == 4
+
+
+def test_share_several_banks_at_once(client: TestClient, admin_headers: H) -> None:
+    exam = _plain_exam(n_mcq=1)
+    sid = _subject_of(exam)
+    with Session(engine) as s:
+        a = QuestionBank(org_id=ORG_ID, subject_id=sid, name="Paper A", created_by=TEACHER_ID)
+        b = QuestionBank(org_id=ORG_ID, subject_id=sid, name="Paper B", created_by=TEACHER_ID)
+        old = QuestionBank(org_id=ORG_ID, subject_id=sid, name="Old", created_by=TEACHER_ID, status="archived")
+        s.add_all([a, b, old])
+        s.commit()
+        ids = [str(a.id), str(b.id), str(old.id), str(uuid4())]
+    r = client.post(f"{V1}/subjects/{sid}/banks/sharing", json={"bank_ids": ids, "shared": True}, headers=admin_headers)
+    assert r.status_code == 200, r.json()
+    assert r.json() == {"updated": 2, "skipped": 2}          # archived and unknown banks are skipped
+    again = client.post(f"{V1}/subjects/{sid}/banks/sharing", json={"bank_ids": ids[:2], "shared": True}, headers=admin_headers)
+    assert again.json() == {"updated": 0, "skipped": 0}       # already shared
+    off = client.post(f"{V1}/subjects/{sid}/banks/sharing", json={"bank_ids": ids[:2], "shared": False}, headers=admin_headers)
+    assert off.json()["updated"] == 2
+    with Session(engine) as s:
+        assert all(not s.get(QuestionBank, UUID(i)).shared for i in ids[:2])  # type: ignore[union-attr]
+    # Students can't.
+    from .conftest import STUDENT_PAYLOAD
+    student = make_auth_header(STUDENT_PAYLOAD)
+    assert client.post(f"{V1}/subjects/{sid}/banks/sharing", json={"bank_ids": ids[:1], "shared": True}, headers=student).status_code == 403

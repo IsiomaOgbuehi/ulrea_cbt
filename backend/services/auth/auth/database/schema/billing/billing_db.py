@@ -123,3 +123,53 @@ class OrgBillingPeriod(SQLModel, table=True):
     note: str | None = None
     created_by: UUID | None = None
     created_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class CouponKind(str, Enum):
+    PERCENT = "percent"      # off the whole payment
+    AMOUNT = "amount"        # off each student / place, in one currency
+
+
+class RedemptionStatus(str, Enum):
+    RESERVED = "reserved"    # checkout started, not paid yet
+    USED = "used"            # paid (or free) and given
+    RELEASED = "released"    # the payment failed: doesn't count
+
+
+class Coupon(SQLModel, table=True):
+    """A discount code Juwazi gives out to subsidise schools' or students' payments."""
+    __tablename__ = "coupons"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    code: str = Field(index=True, unique=True, max_length=40)      # kept in capitals
+    description: str = ""
+    kind: CouponKind
+    percent_off: Decimal | None = Field(default=None, sa_column=Column(Numeric(5, 2), nullable=True))
+    amount_off: Decimal | None = Field(default=None, sa_column=Column(Numeric(14, 2), nullable=True))
+    currency: str | None = Field(default=None, max_length=3)       # amount coupons only
+    # Which payments it's for (PaymentPurpose values).
+    purposes: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    # Only these schools (organisation ids); empty: every school.
+    org_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    once_per_payer: bool = False          # a school (or, paying for themselves, a student) uses it once
+    max_redemptions: int | None = None    # in all
+    expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    active: bool = Field(default=True, index=True)
+    created_by: UUID | None = None
+    created_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class CouponRedemption(SQLModel, table=True):
+    """A coupon used on one payment."""
+    __tablename__ = "coupon_redemptions"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    coupon_id: UUID = Field(foreign_key="coupons.id", index=True)
+    payment_id: UUID = Field(foreign_key="payments.id", unique=True)
+    payer: str = Field(index=True, max_length=60)      # "org:<id>" or "user:<id>"
+    org_id: UUID | None = Field(default=None, index=True)
+    user_id: UUID = Field(index=True)
+    discount: Decimal = Field(sa_column=Column(Numeric(14, 2), nullable=False))
+    currency: str = Field(max_length=3)
+    status: RedemptionStatus = Field(default=RedemptionStatus.RESERVED, index=True)
+    created_at: datetime = Field(default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False, index=True))

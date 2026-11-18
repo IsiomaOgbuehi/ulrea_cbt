@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 from cbt_service.database.models.enums.violation_enums import ViolationType, ViolationSeverity
+from cbt_service.schemas.utc import UTCDateTime
 
 
 class ViolationCreate(BaseModel):
@@ -11,7 +12,7 @@ class ViolationCreate(BaseModel):
     severity: ViolationSeverity = ViolationSeverity.LOW
     description: str | None = None
     metadata_: dict | None = None
-    occurred_at: datetime
+    occurred_at: UTCDateTime
 
 
 class ViolationRead(BaseModel):

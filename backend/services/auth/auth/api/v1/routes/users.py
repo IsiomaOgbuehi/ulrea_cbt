@@ -12,7 +12,7 @@ from auth.database.schema.user.enums import MembershipStatus, UserRole, Verifica
 from auth.database.schema.user.user_db import UserModel
 from auth.dependencies.auth_dependencies import get_user_context
 from auth.database.database import SessionDep
-from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentChangeSecurityQARequest, StudentCreatedResponse, StudentCredentialResetRequest, StudentCredentialResetResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
+from auth.api_models.user_api_models import AdminUpdateUserRequest, BulkStudentCheck, BulkStudentResult, CreateStaffUser, CreateStudent, DeleteUserResponse, MoveCohortRequest, PaginatedStaffResponse, PaginatedStudentResponse, ResendActivationResponse, StaffActivationPayload, StaffCreatedResponse, StaffFirstLoginSetup, StudentChangeSecurityQARequest, StudentCreatedResponse, StudentCredentialResetRequest, StudentCredentialResetResponse, StudentFirstLoginSetup, StudentListItem, StudentLoginRequest, StudentLoginResponse, StudentLoginUserResponse, UpdateStaffEmailRequest, UpdateStudentRequest, UserRead, StudentAccessCodeRequest, UserReadResponse
 from auth.services.user.user_management_service import UserManagementService
 from auth.utility.email.email_service import EmailService
 from auth.api.v1.routes.auth import IS_DEV
@@ -45,6 +45,14 @@ from auth.utility.redis.redis_client import redis_client
 from auth.core.permissions import P
 from auth.dependencies.auth_dependencies import require_candidate_or, require_permission
 from auth.services.role_service import RoleService
+from starlette.concurrency import run_in_threadpool
+from auth.api_models.login_response import LoginResponse
+from auth.api_models.user_api_models import (
+    StudentInviteAccept, StudentInvitePreview, StudentInviteRequest, StudentInviteSent, StudentInviteToken,
+)
+from auth.services.user import password_change, student_invites
+from auth.api_models.user_api_models import ChangePasswordRequest
+from auth.services.workspace_service import WorkspaceService
 
 
 router = APIRouter()
@@ -292,6 +300,8 @@ async def create_student(
         org_id=ctx.membership.org_id,
         role=memebership.role if memebership else None,
         access_code=access_code,  # caller shares this with student
+        institution_id=memebership.institution_id if memebership else None,
+        institution_id_generated=bool(memebership and memebership.institution_id_generated),
     )
 
 
@@ -307,6 +317,21 @@ def download_student_template(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=students_template.xlsx"},
     )
+
+
+''' CHECK A STUDENT UPLOAD 🔎 '''
+@router.post(AuthRoutes.CHECK_STUDENTS_BULK.value, response_model=BulkStudentCheck)
+async def check_students_bulk(
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
+    file: UploadFile = File(...),
+) -> BulkStudentCheck:
+    """Look at an upload before creating anything: which rows have no
+    institution ID (Juwazi will generate one for each, if the user agrees)."""
+    if not (file.filename or "").endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only .xlsx and .xls files are accepted.")
+    rows = parse_student_excel(await file.read(), file.filename or "")
+    missing = [n for n, row in enumerate(rows, start=2) if not str(row.get("institution_id") or "").strip()]
+    return BulkStudentCheck(total_rows=len(rows), missing_institution_id_rows=missing)
 
 
 ''' BULK CREATE STUDENTS 📤 '''
@@ -614,6 +639,33 @@ def change_my_security_qa(
         session=session, user=ctx.user, payload=payload,
     )
     return {"detail": "Security question and answer updated."}
+
+
+''' CHANGE MY PASSWORD 🔑 '''
+@router.post("/me/password", response_model=LoginResponse)
+async def change_my_password(
+    payload: ChangePasswordRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(get_user_context),
+) -> LoginResponse:
+    """
+    Anyone signed in with a password (staff, admins, students who use email).
+    Other devices are signed out at their next refresh; this one gets new tokens.
+    """
+    await password_change.check_not_locked(ctx.user.id)
+    try:
+        await run_in_threadpool(
+            password_change.change, session, ctx.user,
+            payload.current_password, payload.new_password, payload.confirm_password,
+        )
+    except password_change.WrongPassword:
+        await password_change.record_failure(ctx.user.id)
+        raise HTTPException(status_code=400, detail="Your current password is not correct.")
+    await password_change.clear_failures(ctx.user.id)
+    org = session.get(OrganizationModel, ctx.membership.org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    return await run_in_threadpool(WorkspaceService.session_response, session, ctx.user, ctx.membership, org)
 
 
 ''' STUDENT LOGIN VALIDATE CODE AND SHOW QUESTION 🔐 '''
@@ -939,7 +991,9 @@ def reset_password(
     if not user or not user.password:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    password_change.validate_new(payload.new_password, payload.confirm_password)
     user.password = PasswordHasher.create(payload.new_password)
+    user.password_changed_at = datetime.now(UTC)
     session.add(user)
     session.commit()
 
@@ -1098,6 +1152,8 @@ def list_students(
             StudentListItem(
                 id=user.id, firstname=user.firstname, lastname=user.lastname,
                 email=user.email, access_code=user.access_code,
+                institution_id=membership.institution_id,
+                institution_id_generated=membership.institution_id_generated,
                 status=membership.status, created_at=membership.created_at,
                 cohorts=cohorts.get(user.id, []),
                 graduations=graduations.get(user.id, []),
@@ -1209,3 +1265,90 @@ def delete_user(
         actor_role=ctx.membership.role,
         force=force,
     )
+
+# ------------------------------------------------------------ inviting students by email
+
+def _invite_link(token: str) -> str:
+    return f"{settings.FRONTEND_URL}/accept-invite?token={token}"
+
+
+async def _send_invite(invited: student_invites.Invited, org_name: str) -> str:
+    """Email the link; returns it (shown only in dev)."""
+    link = _invite_link(student_invites.link_token(invited))
+    try:
+        await asyncio.wait_for(
+            EmailService.send_student_invite_email(
+                email=invited.user.email or "", org_name=org_name, invite_link=link,
+                has_account=invited.has_account,
+            ),
+            timeout=10.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        # The invite stands; the school can send it again.
+        logging.exception("Student invite email failed for %s", invited.user.email)
+    if IS_DEV:
+        print(f"STUDENT INVITE LINK: {link}")
+    return link
+
+
+@router.post("/students/invites", response_model=StudentInviteSent, status_code=201)
+async def invite_student(
+    payload: StudentInviteRequest,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
+) -> StudentInviteSent:
+    """Invite a student by email. They join with their email and a password."""
+    org_id = ctx.membership.org_id
+
+    def _make() -> tuple[student_invites.Invited, str]:
+        org_billing.assert_can_add_students(session, org_id)    # an invite takes a student place
+        org = session.get(OrganizationModel, org_id)
+        return student_invites.invite(session, org_id, str(payload.email), ctx.user.id), org.name if org else "your school"
+
+    invited, org_name = await run_in_threadpool(_make)
+    link = await _send_invite(invited, org_name)
+    return StudentInviteSent(
+        student_id=invited.user.id, email=invited.user.email or "", institution_id=invited.membership.institution_id,
+        already_has_account=invited.has_account, invite_link=link if IS_DEV else None,
+    )
+
+
+@router.post("/students/{user_id}/invite/resend", response_model=StudentInviteSent)
+async def resend_student_invite(
+    user_id: UUID,
+    session: SessionDep,
+    ctx: UserContext = Depends(require_permission(P.CANDIDATES_MANAGE)),
+) -> StudentInviteSent:
+    """A new link (7 days) for a student who hasn't accepted yet."""
+    org_id = ctx.membership.org_id
+
+    def _find() -> tuple[student_invites.Invited, str]:
+        org = session.get(OrganizationModel, org_id)
+        return student_invites.pending_invite(session, org_id, user_id), org.name if org else "your school"
+
+    invited, org_name = await run_in_threadpool(_find)
+    link = await _send_invite(invited, org_name)
+    return StudentInviteSent(
+        student_id=invited.user.id, email=invited.user.email or "", institution_id=invited.membership.institution_id,
+        already_has_account=invited.has_account, invite_link=link if IS_DEV else None,
+    )
+
+
+@router.post("/students/invites/preview", response_model=StudentInvitePreview)
+def preview_student_invite(payload: StudentInviteToken, session: SessionDep) -> StudentInvitePreview:
+    """For the invite page: which school, and whether they already have a sign-in."""
+    found = student_invites.open_invite(session, payload.token)
+    return StudentInvitePreview(
+        org_name=found.org.name, email=found.user.email or "", has_account=found.user.password is not None,
+        needs_name=found.user.password is None and student_invites.needs_name(found.user),
+    )
+
+
+@router.post("/students/invites/accept", response_model=LoginResponse)
+def accept_student_invite(payload: StudentInviteAccept, session: SessionDep) -> LoginResponse:
+    """Join the school and sign in."""
+    found = student_invites.accept(
+        session, payload.token, password=payload.password, confirm_password=payload.confirm_password,
+        firstname=payload.firstname, lastname=payload.lastname,
+    )
+    return WorkspaceService.session_response(session, found.user, found.membership, found.org, False)

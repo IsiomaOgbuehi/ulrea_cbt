@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 from sqlmodel import SQLModel, Field, Column
 from sqlalchemy import JSON
 from .enum import OrgSubscriptionStatus, PlatformPlanStatus
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 class PlatformPlan(SQLModel, table=True):
     """
@@ -45,10 +46,10 @@ class PlatformPlan(SQLModel, table=True):
     # Paystack
     paystack_plan_code: str | None = None   # for recurring billing
 
-    created_at: datetime = Field(
+    created_at: datetime = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc)
     )
-    updated_at: datetime = Field(
+    updated_at: datetime = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
@@ -73,12 +74,12 @@ class OrgPlatformSubscription(SQLModel, table=True):
 
     # Trial tracking
     is_trial: bool = Field(default=True)
-    trial_ends_at: datetime | None = None
+    trial_ends_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)
 
     # Billing period
-    current_period_start: datetime | None = None
-    current_period_end: datetime | None = None
-    cancelled_at: datetime | None = None
+    current_period_start: datetime | None = Field(default=None, sa_type=UTCTimestamp)
+    current_period_end: datetime | None = Field(default=None, sa_type=UTCTimestamp)
+    cancelled_at: datetime | None = Field(default=None, sa_type=UTCTimestamp)
     cancel_reason: str | None = None
 
     # Limits snapshot (from plan at time of subscription)
@@ -92,9 +93,9 @@ class OrgPlatformSubscription(SQLModel, table=True):
     amount_paid: float | None = None
     currency: str = Field(default="USD")
 
-    created_at: datetime = Field(
+    created_at: datetime = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc)
     )
-    updated_at: datetime = Field(
+    updated_at: datetime = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc)
     )

@@ -1,3 +1,4 @@
+import html
 import os
 # from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
 # from pydantic import EmailStr
@@ -301,4 +302,38 @@ class EmailService:
             email_to=email,
             subject=f"You've been added to {org_name}",
             html=html_content,
+        )
+    @staticmethod
+    async def send_student_invite_email(email: str, org_name: str, invite_link: str, has_account: bool) -> None:
+        """A school inviting a student; the link lets them join (7 days)."""
+        action = "Join" if has_account else "Accept the invite"
+        detail = (
+            "Sign in with your Juwazi password on the page the button opens to join."
+            if has_account else
+            "The button opens a page where you add your name and choose a password."
+        )
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #4A90E2; text-align: center;">You're invited to {html.escape(org_name)}</h2>
+                    <p>Hello,</p>
+                    <p><strong>{html.escape(org_name)}</strong> has invited you to join them on Juwazi as a student,
+                    to take your tests and exams online.</p>
+                    <p>{detail}</p>
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{html.escape(invite_link, quote=True)}"
+                           style="background-color: #4A90E2; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+                            {action}
+                        </a>
+                    </div>
+                    <p style="font-size: 13px; color: #666;">The link works for 7 days. If you weren't expecting this, you can ignore it.</p>
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    <p style="font-size: 12px; color: #888; text-align: center;">This is an automated message, please do not reply.</p>
+                </div>
+            </body>
+        </html>
+        """
+        await EmailService._send_email(
+            email_to=email, subject=f"{org_name} invited you to Juwazi", html=html_content,
         )

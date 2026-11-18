@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, Query
 
 from cbt_service.database.database import SessionDep
 from cbt_service.schemas.bank_topic_schemas import (
-    BankCreate, BankRead, BankStaffSet, BankUpdate, StaffBanksRead, StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
+    BankCreate, BankRead, BankSharingResult, BankSharingUpdate, BankStaffSet, BankUpdate, StaffBanksRead,
+    StaffBanksSet, TopicCreate, TopicRead, TopicUpdate,
 )
 from cbt_service.schemas.item_subject_schemas import CurrentUser
 from cbt_service.services.item.bank_topic_service import BankService, TopicService
@@ -52,6 +53,19 @@ def update_bank(
 ) -> BankRead:
     """Rename, reorder, or restore an archived bank (status=active)."""
     return BankService.update(session, subject_id, bank_id, payload, current_user)
+
+
+''' SHARE BANKS IN BULK 🔗 '''
+@router.post("/banks/sharing", response_model=BankSharingResult)
+def set_banks_sharing(
+    subject_id: UUID,
+    payload: BankSharingUpdate,
+    session: SessionDep,
+    current_user: CurrentUser = Depends(require_permission(P.BANKS_TOPICS_MANAGE)),
+) -> BankSharingResult:
+    """Exam bodies: share (or stop sharing) several banks at once with other
+    organisations (question library) and subscribed students (topic tests)."""
+    return BankService.set_sharing(session, subject_id, payload, current_user)
 
 
 ''' SET BANK STAFF 👥 '''

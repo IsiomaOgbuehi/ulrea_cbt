@@ -16,6 +16,7 @@ class StudentSelfSignup(BaseModel):
     phone: str | None = None
     password: str
     confirm_password: str
+    referral_code: str | None = None      # from a student's share link
 
 
 class OrgSubscribeRequest(BaseModel):

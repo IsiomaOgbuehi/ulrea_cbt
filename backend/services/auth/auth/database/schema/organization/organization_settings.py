@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from sqlalchemy.dialects.postgresql import JSONB, JSON
 from sqlmodel import Column, SQLModel, Field
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 def json_column():
     return JSONB().with_variant(JSON(), "sqlite")
@@ -16,7 +17,7 @@ class OrganizationSettingsBase(SQLModel):
     settings: dict = Field(
         sa_column=Column(json_column(), nullable=False)
     )
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(sa_type=UTCTimestamp, default_factory=lambda: datetime.now(timezone.utc))
 
 
 class OrganizationSettingsModel(OrganizationSettingsBase, table=True):

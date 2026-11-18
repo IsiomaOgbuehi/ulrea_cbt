@@ -19,6 +19,8 @@ from starlette.concurrency import run_in_threadpool
 from sqlmodel import Session, select
 
 from auth.database.schema.billing.billing_db import Payment, PaymentPurpose, PaymentStatus
+from auth.services.billing import coupons
+from auth.services.billing.coupons import Discounted
 from auth.utility.payment.providers.registry import provider_named
 from auth.utility.payment.providers.base import (
     CheckoutRequest, PaymentProvider, PaymentProviderError, VerifiedPayment,
@@ -35,12 +37,41 @@ def register_fulfiller(purpose: PaymentPurpose, fn: Fulfiller) -> None:
     _fulfillers[purpose] = fn
 
 
+# Run for every payment once it's paid, whatever it bought (referral commissions...).
+_paid_listeners: list[Fulfiller] = []
+
+
+def on_paid(fn: Fulfiller) -> None:
+    if fn not in _paid_listeners:
+        _paid_listeners.append(fn)
+
+
+def _given(session: Session, payment: Payment) -> None:
+    """Give what was bought, then tell the listeners. Same transaction as marking it paid."""
+    fulfil = _fulfillers.get(payment.purpose)
+    if fulfil is not None:
+        fulfil(session, payment)
+    for listener in _paid_listeners:
+        listener(session, payment)
+
+
 def new_reference(prefix: str) -> str:
     return f"jw_{prefix}_{secrets.token_hex(10)}"
 
 
-def _record(session: Session, payment: Payment) -> Payment:
+# Payments a coupon paid in full: no provider involved.
+COUPON_PROVIDER = "coupon"
+
+
+def _record(session: Session, payment: Payment, price: Discounted | None = None) -> Payment:
+    """Save the payment (and hold its coupon). One the coupon pays in full is
+    given straight away, in the same transaction."""
     session.add(payment)
+    session.flush()
+    if price is not None:
+        coupons.reserve(session, price, payment)
+    if payment.status == PaymentStatus.SUCCESSFUL:
+        _given(session, payment)
     session.commit()          # also ends the transaction: no connection held while the provider is called
     session.refresh(payment)
     return payment
@@ -52,6 +83,7 @@ def _mark_failed(session: Session, payment_id: UUID, reason: str) -> None:
         payment.status = PaymentStatus.FAILED
         payment.failure_reason = reason[:500]
         session.add(payment)
+        coupons.settle(session, payment_id, paid=False)
     session.commit()
 
 
@@ -69,17 +101,35 @@ async def start_checkout(
     description: str,
     details: dict[str, Any],
     redirect_url: str,
+    price: Discounted | None = None,
 ) -> tuple[Payment, str]:
     """Record the payment, then get the provider's hosted checkout page.
     Database work runs in the thread pool; no connection is held while waiting
-    on the provider."""
-    if amount <= 0:
+    on the provider.
+
+    With a coupon (`price`), `amount` should be `price.due`. When the coupon
+    covers everything, what was bought is given now and the payer goes
+    straight back to `redirect_url`, where confirming finds it already paid."""
+    if price is not None and price.coupon is not None:
+        details = {
+            **details, "coupon_code": price.coupon.code,
+            "amount_before_coupon": str(price.total), "coupon_discount": str(price.discount),
+        }
+        description = f"{description} (coupon {price.coupon.code})"
+    free = price is not None and price.coupon is not None and amount <= 0
+    if amount <= 0 and not free:
         raise HTTPException(status_code=400, detail="Nothing to pay.")
     payment = await run_in_threadpool(_record, session, Payment(
         reference=new_reference(purpose.value.split("_")[0]),
-        provider=provider.name, purpose=purpose, user_id=user_id, org_id=org_id,
-        amount=amount, currency=currency.upper(), description=description, details=details,
-    ))
+        provider=COUPON_PROVIDER if free else provider.name, purpose=purpose, user_id=user_id, org_id=org_id,
+        amount=Decimal(0) if free else amount, currency=currency.upper(), description=description, details=details,
+        status=PaymentStatus.SUCCESSFUL if free else PaymentStatus.PENDING,
+        channel=COUPON_PROVIDER if free else None,
+        paid_at=datetime.now(timezone.utc) if free else None,
+    ), price)
+    if free:
+        joiner = "&" if "?" in redirect_url else "?"
+        return payment, f"{redirect_url}{joiner}reference={payment.reference}"
     try:
         checkout = await provider.create_checkout(CheckoutRequest(
             reference=payment.reference, amount=amount, currency=payment.currency,
@@ -118,16 +168,17 @@ def _settle(session: Session, payment_id: UUID, verified: VerifiedPayment) -> Pa
     if verified.state == "failed":
         locked.status = PaymentStatus.FAILED
         locked.failure_reason = "Declined or cancelled."
+        coupons.settle(session, locked.id, paid=False)
     elif not _matches(locked, verified):
         locked.status = PaymentStatus.MISMATCH
         locked.failure_reason = f"Provider reported {verified.amount} {verified.currency}."
         logger.error("Payment %s doesn't match: %s", locked.reference, locked.failure_reason)
+        coupons.settle(session, locked.id, paid=False)
     else:
         locked.status = PaymentStatus.SUCCESSFUL
         locked.paid_at = datetime.now(timezone.utc)
-        fulfil = _fulfillers.get(locked.purpose)
-        if fulfil is not None:
-            fulfil(session, locked)      # same transaction: paid and given together
+        coupons.settle(session, locked.id, paid=True)
+        _given(session, locked)          # same transaction: paid and given together
     session.add(locked)
     session.commit()
     session.refresh(locked)

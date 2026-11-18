@@ -9,6 +9,7 @@ from cbt_service.database.models.enums.attempt_enum import AttemptStatus
 
 # One CurrentUser for the whole service (see item_subject_schemas).
 from cbt_service.schemas.current_user import CurrentUser as CurrentUser  # noqa: E402
+from cbt_service.schemas.utc import UTCDateTime
 
 
 class StartAttemptRequest(BaseModel):
@@ -230,7 +231,7 @@ class ExtraTimeSummary(ExtraTimePreview):
 
 class ResetAttemptRequest(BaseModel):
     reason: str
-    new_scheduled_at: datetime | None = None  # if rescheduling, not just voiding
+    new_scheduled_at: UTCDateTime | None = None  # if rescheduling, not just voiding
 
 
 class AttemptStatusRead(BaseModel):

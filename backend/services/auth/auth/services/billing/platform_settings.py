@@ -20,6 +20,13 @@ class PlatformSettings(BaseModel):
     base_currency: str = Field(default="NGN", min_length=3, max_length=3)
     # Off: limits are shown but not enforced (a safe switch-over for existing organisations).
     enforce_limits: bool = False
+    # Referrals: a student earns this percent of what friends who signed up through
+    # their link pay. 0 = no commissions.
+    referral_percent: float = Field(default=10, ge=0, le=100)
+    # Only payments in a friend's first this-many months earn it. 0 = every payment, forever.
+    referral_months: int = Field(default=0, ge=0, le=120)
+    # The least a student can withdraw, in the base currency.
+    referral_min_withdrawal: int = Field(default=5000, ge=0, le=10_000_000)
 
 
 def get_settings(session: Session) -> PlatformSettings:

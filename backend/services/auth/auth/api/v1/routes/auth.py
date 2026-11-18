@@ -293,15 +293,19 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
 
 
 def _load_refresh_subject(
-    session: Session, user_id: UUID, org_id: UUID | None
+    session: Session, user_id: UUID, org_id: UUID | None, auth_time: datetime,
 ) -> tuple[UserModel, OrgMembership]:
     """
     org_id: the organisation the refresh token is for. Old tokens without one
     (or one they've since left) fall back to the last-used / first organisation.
+    auth_time: when this sign-in began; sign-ins from before a password change end.
     """
     user = session.get(UserModel, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists.")
+    changed = user.password_changed_at
+    if changed is not None and int(auth_time.timestamp()) < int(changed.timestamp()):
+        raise HTTPException(status_code=401, detail="Your password was changed. Please log in again.")
     if not user.verified:
         raise HTTPException(status_code=403, detail="Account is not verified.")
     picked = WorkspaceService.pick(WorkspaceService.active_memberships(session, user_id), org_id)
@@ -370,7 +374,7 @@ async def refresh_token(payload: RefreshRequest, session: SessionDep):
 
     token_org = token_payload.get('org_id')
     org_id = UUID(token_org) if token_org else await WorkspaceService.preferred(user_id)
-    user, membership = await run_in_threadpool(_load_refresh_subject, session, user_id, org_id)
+    user, membership = await run_in_threadpool(_load_refresh_subject, session, user_id, org_id, auth_time)
 
     new_perms = await run_in_threadpool(RoleService.token_perms, session, membership)
     new_token = create_access_token(user.id, membership.org_id, membership.role, perms=new_perms)

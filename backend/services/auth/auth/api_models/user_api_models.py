@@ -1,6 +1,6 @@
 from sqlmodel import Field
 from auth.database.schema.user.enums import DeleteAction, MembershipStatus, UserRole
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from auth.database.schema.cohort.cohort_api_models import StudentCohort, StudentGraduation
 
 from .token import TokenBase
@@ -93,7 +93,9 @@ class CreateStudent(BaseModel):
     othername: str | None = None
     email: EmailStr | None = None
     phone: str | None = None
-    institution_id: str  # e.g. student reg number
+    # e.g. student reg number. Optional: when left out, Juwazi generates one
+    # (JW-XXXXXXXX) that no other student anywhere has.
+    institution_id: str | None = None
     cohort_id: UUID | None = None
     access_code: str | None = None     # if provided, use it; else auto-generate
 
@@ -125,6 +127,14 @@ class StudentCreatedResponse(BaseModel):
     org_id: UUID
     is_first_login: bool
     access_code: str              # shown once only, share with student
+    institution_id: str | None = None
+    institution_id_generated: bool = False   # made by Juwazi because none was given
+
+
+class BulkStudentCheck(BaseModel):
+    """An upload looked at before anything is created."""
+    total_rows: int
+    missing_institution_id_rows: list[int]   # spreadsheet row numbers (header is row 1)
 
 
 class BulkStudentResult(BaseModel):
@@ -189,6 +199,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
     confirm_password: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(max_length=128)
+    confirm_password: str = Field(max_length=128)
+
 class StudentForgotPasswordRequest(BaseModel):
     access_code: str
 
@@ -231,6 +246,8 @@ class StudentListItem(BaseModel):
     email: str | None
     status: MembershipStatus
     access_code: str | None = None
+    institution_id: str | None = None
+    institution_id_generated: bool = False
     created_at: datetime
     # Cohorts they're in now.
     cohorts: list[StudentCohort] = []
@@ -300,3 +317,34 @@ class StudentCredentialResetResponse(BaseModel):
     access_code: str | None
     temporary_answer: str
     was_generated: bool
+
+class StudentInviteRequest(BaseModel):
+    email: EmailStr
+
+
+class StudentInviteSent(BaseModel):
+    student_id: UUID
+    email: str
+    institution_id: str | None = None
+    already_has_account: bool
+    invite_link: str | None = None     # dev only, for testing without email
+
+
+class StudentInvitePreview(BaseModel):
+    """What the invite page shows before the student accepts."""
+    org_name: str
+    email: str
+    has_account: bool                  # sign in with their password instead of making one
+    needs_name: bool
+
+
+class StudentInviteToken(BaseModel):
+    token: str = Field(min_length=10, max_length=2000)
+
+
+class StudentInviteAccept(BaseModel):
+    token: str
+    password: str = Field(min_length=1, max_length=128)
+    confirm_password: str | None = None
+    firstname: str | None = Field(default=None, max_length=80)
+    lastname: str | None = Field(default=None, max_length=80)

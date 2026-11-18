@@ -1,7 +1,10 @@
 """External Exams: subscribers practising exam bodies' exams."""
+from functools import partial
+from math import ceil
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -12,7 +15,7 @@ from cbt_service.database.database import SessionDep, release_connection
 from cbt_service.dependencies import StudentOnly, require_permission
 from cbt_service.schemas.attempt_schemas import AttemptRead
 from cbt_service.schemas.current_user import CurrentUser
-from cbt_service.schemas.practice_schemas import PracticeCatalogue, PracticeStatsRead
+from cbt_service.schemas.practice_schemas import PracticeCatalogue, PracticeSort, PracticeStatsRead
 from cbt_service.schemas.question_library_schemas import (
     PoolSubjectRead, TopicTestRead, TopicTestRequest, TopicTestResult, TopicTestScoreRequest,
 )
@@ -25,14 +28,28 @@ router = APIRouter(tags=["external exams"])
 
 
 @router.get("/external/bodies/{body_id}/exams", response_model=PracticeCatalogue)
-async def body_exams(body_id: UUID, session: SessionDep, current_user: CurrentUser = StudentOnly) -> PracticeCatalogue:
-    """An exam body's practice exams, with the student's progress. Listed for
-    everyone; taking them needs a subscription."""
+async def body_exams(
+    body_id: UUID,
+    session: SessionDep,
+    current_user: CurrentUser = StudentOnly,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort: PracticeSort = "title",
+    search: Annotated[str, Query(max_length=100)] = "",
+) -> PracticeCatalogue:
+    """A page of an exam body's practice exams, with the student's progress.
+    Listed for everyone; taking them needs a subscription."""
     public, subscribed = await AuthClient(redis_client).exam_access(current_user.id, body_id)
     if not public:
         raise HTTPException(status_code=404, detail="Exam body not found.")
-    exams = await run_in_threadpool(PracticeService.catalogue, session, body_id, current_user.id)
-    return PracticeCatalogue(subscribed=subscribed, expires_at=None, exams=exams)
+    exams, total = await run_in_threadpool(
+        partial(PracticeService.catalogue, page=page, page_size=page_size, sort=sort, search=search),
+        session, body_id, current_user.id,
+    )
+    return PracticeCatalogue(
+        subscribed=subscribed, expires_at=None, exams=exams,
+        total=total, page=page, page_size=page_size, total_pages=ceil(total / page_size),
+    )
 
 
 @router.post("/external/exams/{exam_id}/start", response_model=AttemptRead)

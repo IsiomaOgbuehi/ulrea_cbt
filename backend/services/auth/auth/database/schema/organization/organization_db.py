@@ -5,6 +5,7 @@ from pydantic import EmailStr
 
 from auth.database.schema.exam_subscription.enum import SubscriptionPlan
 from .enums import OrganizationType, OrganizationVisibility
+from auth.database.schema.utc_timestamp import UTCTimestamp
 
 class OrganizationBase(SQLModel):
     name: str = Field(index=True)
@@ -42,12 +43,12 @@ class OrganizationBase(SQLModel):
 class OrganizationModel(OrganizationBase, table=True):
     __tablename__ = 'organizations'
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    created_at: datetime | None = Field(
+    created_at: datetime | None = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc),
         index=True,
         nullable=False,
     )
-    updated_at: datetime | None = Field(
+    updated_at: datetime | None = Field(sa_type=UTCTimestamp, 
         default_factory=lambda: datetime.now(timezone.utc),
         index=True,
         nullable=False,

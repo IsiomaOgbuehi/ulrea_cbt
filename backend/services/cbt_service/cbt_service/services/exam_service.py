@@ -37,6 +37,7 @@ from cbt_service.database.models.bank_topic import ItemTopic
 from cbt_service.database.models.enums.item_subject_enums import ItemStatus, ItemType
 from sqlalchemy import exists
 from sqlmodel.sql.expression import Select, SelectOfScalar
+from cbt_service.schemas.utc import as_utc
 
 
 def _log(
@@ -505,6 +506,12 @@ class ExamService:
                 session, exam.subject_id, new_topic_ids, current_user.org_id
             )
             ScopeService.set_exam_topics(session, exam.id, new_topic_ids)
+
+        # The window as it will be (a new end against the saved start, too).
+        start = data["start_time"] if "start_time" in data else exam.start_time
+        end = data["end_time"] if "end_time" in data else exam.end_time
+        if start is not None and end is not None and as_utc(end) <= as_utc(start):
+            raise HTTPException(status_code=400, detail="The end time must be after the start time.")
 
         for key, value in data.items():
             setattr(exam, key, value)

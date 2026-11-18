@@ -228,7 +228,8 @@ def _fulfil_bulk(session: Session, payment: Payment) -> None:
     ids = [UUID(x) for x in d["student_ids"]]
     grant(
         session, UUID(d["exam_body_org_id"]), ids, int(d["days"]),
-        amount_each=float(d["unit_amount"]), currency=payment.currency, org_id=payment.org_id,
+        # What was really paid each (less any coupon).
+        amount_each=float(payment.amount) / len(ids) if ids else 0.0, currency=payment.currency, org_id=payment.org_id,
         by=SubscribedBy.ORGANIZATION,
     )
 

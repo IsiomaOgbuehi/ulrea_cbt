@@ -89,6 +89,7 @@ class MembershipService:
         role: UserRole,
         created_by: UUID,
         institution_id: str | None = None,
+        institution_id_generated: bool = False,
     ) -> OrgMembership:
         """
         Created when admin creates a staff or student member.
@@ -111,6 +112,7 @@ class MembershipService:
             status=MembershipStatus.PENDING,
             join_type=MembershipJoinType.INVITED,
             institution_id=institution_id,
+            institution_id_generated=institution_id_generated,
             created_by=created_by,
         )
         session.add(membership)
