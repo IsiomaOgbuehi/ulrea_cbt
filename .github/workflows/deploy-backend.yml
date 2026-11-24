@@ -58,11 +58,19 @@ jobs:
         env:
           FASTAPI_CLOUD_TOKEN: ${{ secrets.AUTH_FASTAPI_CLOUD_TOKEN }}
           FASTAPI_CLOUD_APP_ID: ${{ secrets.AUTH_FASTAPI_CLOUD_APP_ID }}
-        run: uv run fastapi deploy
+        run: |
+          set +e
+          uv run fastapi deploy
+          code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "::warning::FastAPI Cloud couldn't confirm the deployment in time; checking the app directly instead."
+            exit 0
+          fi
+          exit "$code"
 
       - name: Check auth is up
         if: ${{ vars.AUTH_URL != '' }}
-        run: curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.AUTH_URL }}/openapi.json" > /dev/null
+        run: curl --fail --silent --show-error --retry 30 --retry-delay 10 --retry-all-errors "${{ vars.AUTH_URL }}/openapi.json" > /dev/null
 
   cbt:
     name: CBT → ${{ inputs.environment }}
@@ -93,8 +101,16 @@ jobs:
         env:
           FASTAPI_CLOUD_TOKEN: ${{ secrets.CBT_FASTAPI_CLOUD_TOKEN }}
           FASTAPI_CLOUD_APP_ID: ${{ secrets.CBT_FASTAPI_CLOUD_APP_ID }}
-        run: uv run fastapi deploy
+        run: |
+          set +e
+          uv run fastapi deploy
+          code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "::warning::FastAPI Cloud couldn't confirm the deployment in time; checking the app directly instead."
+            exit 0
+          fi
+          exit "$code"
 
       - name: Check cbt is up
         if: ${{ vars.CBT_URL != '' }}
-        run: curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.CBT_URL }}/openapi.json" > /dev/null
+        run: curl --fail --silent --show-error --retry 30 --retry-delay 10 --retry-all-errors "${{ vars.CBT_URL }}/openapi.json" > /dev/null
