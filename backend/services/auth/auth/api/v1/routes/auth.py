@@ -23,6 +23,8 @@ from auth.api_models.schemas.otp import OTPResponse, OTPRequestSchema, OTPVerify
 from auth.utility.otp.otp_service import OtpService
 import logging
 import asyncio
+from auth.utility.redis import redis_client as redis_module
+from auth.utility.jwt.token_activation import create_staff_activation_token
 from auth.utility.email.email_service import EmailService
 from auth.core.settings import settings
 from auth.api_models.token import RefreshResponse, RefreshRequest
@@ -61,32 +63,70 @@ router = APIRouter(
 class _LoginResult:
     response: LoginResponse | None = None
     needs_otp_for: UserModel | None = None   # unverified, handled async below
+    needs_activation_for: UserModel | None = None   # staff who never opened their activation link
     user: UserModel | None = None
     # Every organisation they're active in, so login can land on the last one used.
     active: list[tuple[OrgMembership, OrganizationModel]] | None = None
 
 
-async def handle_unverified_user(user: UserModel):
+async def handle_unverified_user(user: UserModel) -> dict[str, str | None]:
+    """
+    Email a verification code and tell the app to ask for it. If a code went
+    out moments ago (or too many were sent), the app still asks for the code
+    already sent, and can offer to resend later.
+    """
+    message: str = "Your email isn't verified yet. We've emailed you a code to finish setting up your account."
     try:
         otp = await OtpService.request_otp(
             purpose=OtpPurpose.LOGIN_VERIFICATION,
             identifier=user.email,
         )
-
         await EmailService.send_otp_email(user.email, otp)
         if IS_DEV:
             print(f"OTP: {otp}")
-
-        return {
-            "message": "Account not verified. OTP has been sent.",
-            "code": "ACCOUNT_NOT_VERIFIED",
-            "action": "VERIFY_OTP",
-            "identifier": user.email
-        }
     except ValueError as e:
-        raise HTTPException(status_code=429, detail=str(e))  # 429 = Too Many Requests
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+        message = f"Your email isn't verified yet. Enter the code we emailed you. {e}"
+    except Exception:
+        logging.exception("Couldn't send a verification code to %s", user.email)
+        raise HTTPException(status_code=502, detail="We couldn't send your verification code. Please try again.")
+    return {
+        "message": message,
+        "code": "ACCOUNT_NOT_VERIFIED",
+        "action": "VERIFY_OTP",
+        "identifier": user.email,
+    }
+
+
+ACTIVATION_RESEND_COOLDOWN_SECONDS: int = 60
+
+
+async def resend_activation_on_login(user: UserModel) -> dict[str, str | None]:
+    """Staff who never activated: email a fresh activation link (at most once a minute)."""
+    email: str = user.email or ""
+    try:
+        first = await redis_module.redis_client.set(
+            f"activation-resend:{user.id}", 1, ex=ACTIVATION_RESEND_COOLDOWN_SECONDS, nx=True,
+        )
+    except Exception:
+        first = True    # Redis down: send anyway
+    if first:
+        token = create_staff_activation_token(user_id=str(user.id), email=email)
+        link = f"{settings.FRONTEND_URL}/activate-staff-account?token={token}"
+        try:
+            await asyncio.wait_for(
+                EmailService.send_staff_activation_email(email=email, firstname=user.firstname, activation_link=link),
+                timeout=10.0,
+            )
+            if IS_DEV:
+                print(f"ACTIVATION LINK: {link}")
+        except Exception:
+            logging.exception("Couldn't resend the activation link to %s", email)
+    return {
+        "message": "Your account isn't activated yet. We've emailed you a new activation link; open it to set your password.",
+        "code": "ACTIVATION_REQUIRED",
+        "action": "CHECK_EMAIL",
+        "identifier": email,
+    }
 
 
 
@@ -121,7 +161,7 @@ def _login_sync(session: Session, username: str, password: str) -> _LoginResult:
 
     if not user.verified:
         if pending is not None and pending.role != UserRole.STUDENT:
-            raise HTTPException(status_code=403, detail={...})   # ACTIVATION_REQUIRED, unchanged
+            return _LoginResult(needs_activation_for=user)
         return _LoginResult(needs_otp_for=user)
 
     if active is None:
@@ -156,6 +196,8 @@ async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], sess
     if result.needs_otp_for is not None:
         detail = await handle_unverified_user(result.needs_otp_for)
         raise HTTPException(status_code=403, detail=detail)
+    if result.needs_activation_for is not None:
+        raise HTTPException(status_code=403, detail=await resend_activation_on_login(result.needs_activation_for))
     assert result.response is not None
 
     # In several organisations: land in the one they used last.
@@ -582,10 +624,19 @@ def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OT
         session.add(user)
         session.flush()
 
-        if payload.purpose == OtpPurpose.SIGNUP:
+        # A code from signing in (they skipped verifying at sign-up) finishes sign-up the same way.
+        if payload.purpose in (OtpPurpose.SIGNUP, OtpPurpose.LOGIN_VERIFICATION):
             org: OrganizationModel | None = MembershipService.get_pending_org_for_user(session, user.id)
 
-            if org is None:
+            has_school: bool = session.exec(
+                select(OrgMembership.id).where(
+                    OrgMembership.user_id == user.id, OrgMembership.status == MembershipStatus.ACTIVE,
+                )
+            ).first() is not None
+            if org is None and has_school:
+                session.commit()      # a school already added them: sign in below
+                session.refresh(user)
+            elif org is None:
                 # Self-signup student: verified, but no org yet
                 session.commit()
                 session.refresh(user)
@@ -596,16 +647,16 @@ def _complete_otp_verification(session: Session, payload: OTPVerifySchema) -> OT
                     token=TokenData(access_token=provisional.access_token, refresh_token=""),
                     is_provisional=True,
                 )
-
-            MembershipService.auto_add_on_verification(
-                session=session, user=user, org_id=org.id, role=UserRole.SUPER_ADMIN,
-                created_by=user.id, verification_method=VerificationMethod.EMAIL_OTP,
-            )
-            # The free trial: student places for the trial period (platform settings).
-            org_billing.start_trial(session, org.id, created_by=user.id)
-
-            session.commit()
-            session.refresh(user)
+            else:
+                # The organisation's owner: make them its admin and start the free trial.
+                MembershipService.auto_add_on_verification(
+                    session=session, user=user, org_id=org.id, role=UserRole.SUPER_ADMIN,
+                    created_by=user.id, verification_method=VerificationMethod.EMAIL_OTP,
+                )
+                # The free trial: student places for the trial period (platform settings).
+                org_billing.start_trial(session, org.id, created_by=user.id)
+                session.commit()
+                session.refresh(user)
         else:
             session.commit()   # see note below
             session.refresh(user)

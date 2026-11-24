@@ -2,10 +2,8 @@ import html
 import os
 # from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
 # from pydantic import EmailStr
-import resend
 from auth.core.settings import settings
-
-resend.api_key = settings.RESEND_API_KEY
+from auth.utility.email.senders import get_sender
 
 SUPPRESS_SEND = settings.ENVIRONMENT in ("test", "dev")
 
@@ -17,18 +15,11 @@ class EmailService:
         email_to: str,
         subject: str,
         html: str,
-    ):
+    ) -> None:
+        """Send through the provider in EMAIL_PROVIDER; raises EmailSendError if it's refused."""
         if SUPPRESS_SEND:
             return
-        
-        params: resend.Emails.SendParams = {
-            "from": settings.MAIL_FROM,
-            "to": [email_to],
-            "subject": subject,
-            "html": html,
-        }
-
-        return await resend.Emails.send_async(params)
+        await get_sender().send(to=email_to, subject=subject, html=html)
 
     @staticmethod
     async def send_otp_email(email_to: str, otp: str):

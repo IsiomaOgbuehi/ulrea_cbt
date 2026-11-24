@@ -15,6 +15,7 @@ from cbt_service.database.models.enums.item_subject_enums import ItemStatus, Ite
 from cbt_service.database.models.exam import ExamAssignment, ExamAuditLog, ExamItem, ExamModel, ExamSection
 from cbt_service.database.models.item import ItemModel
 from cbt_service.database.models.subject import SubjectModel
+from cbt_service.services.attempt_service import AttemptService
 from .conftest import ORG_ID, STUDENT_ID, TEACHER_ID, engine
 
 H = dict[str, str]
@@ -321,6 +322,32 @@ def test_time_is_strict_and_late_answers_never_change_the_score(client: TestClie
     statuses = {l["question_text"]: l["status"] for l in r.json()["late_answers"]}
     assert statuses == {"Q1": "accepted", "Q2": "rejected"}
     assert client.post(f"{V1}/attempts/late-answers/{lates['Q1']['id']}/decision", json={"accept": True}, headers=admin_headers).status_code == 409
+
+
+def _save_raw(client: TestClient, h: H, attempt_id: str, item: dict[str, Any], answer: list[str] | None) -> Any:
+    return client.post(f"{V1}/attempts/{attempt_id}/responses", json={"item_id": item["id"], "exam_item_id": item["exam_item_id"], "answer": answer}, headers=h)
+
+
+def test_late_saves_that_change_nothing_are_not_shown(client: TestClient, student_headers: H, admin_headers: H) -> None:
+    exam = _exam(duration_minutes=10, extra_time_seconds=0)
+    attempt = _start(client, student_headers, exam)
+    q1, q2, q3 = _content(client, student_headers, attempt["id"])[:3]
+    assert _save(client, student_headers, attempt["id"], q1, ["B"]).status_code == 200
+
+    _age(attempt["id"], 10, 3)
+    # The 30-second timing saves: q1 with its saved answer, q2 unanswered.
+    assert _save(client, student_headers, attempt["id"], q1, ["B"]).status_code == 202
+    assert _save_raw(client, student_headers, attempt["id"], q2, None).status_code == 202
+    assert _save_raw(client, student_headers, attempt["id"], q2, ["", "<p></p>"]).status_code == 202
+    # A real late answer, then a timing save repeating it, then a blank: the real one stays.
+    _save(client, student_headers, attempt["id"], q3, ["A"])
+    _save(client, student_headers, attempt["id"], q3, ["A"])
+    _save_raw(client, student_headers, attempt["id"], q3, None)
+
+    detail = client.get(f"{V1}/attempts/{attempt['id']}/detail", headers=admin_headers).json()
+    assert [(l["question_text"], l["answer"]) for l in detail["late_answers"]] == [("Q3", ["A"])]
+    with Session(engine) as session:
+        assert AttemptService.late_pending_counts(session, [UUID(attempt["id"])]) == {UUID(attempt["id"]): 1}
 
 
 def test_late_answers_only_for_attempts_closed_by_time_and_within_the_window(client: TestClient, student_headers: H, teacher_headers: H) -> None:
