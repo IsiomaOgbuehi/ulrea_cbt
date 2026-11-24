@@ -11,6 +11,7 @@ from sqlalchemy import and_, or_
 from pydantic import BaseModel
 from typing import Any
 import math
+import re
 import random
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -92,6 +93,29 @@ _CHUNK: int = 1000   # ids per IN (...) list, far below the driver's parameter c
 
 def _chunks(ids: list[UUID]) -> list[list[UUID]]:
     return [ids[i:i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
+
+
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _answer_key(answer: list[str] | None) -> tuple[str, ...]:
+    """An answer reduced for comparing: no markup or spacing, order ignored, blanks dropped."""
+    parts: list[str] = []
+    for value in answer or []:
+        text: str = " ".join(_TAG.sub(" ", str(value)).replace("&nbsp;", " ").split())
+        if text:
+            parts.append(text)
+    return tuple(sorted(parts))
+
+
+def _late_changes_nothing(late: list[str] | None, saved: list[str] | None) -> bool:
+    """
+    A save that arrived after time ran out but carries no real answer: blank
+    (the 30-second timing save on an unanswered question) or the answer that
+    was already saved on time. Nothing for staff to decide.
+    """
+    key: tuple[str, ...] = _answer_key(late)
+    return not key or key == _answer_key(saved)
 
 
 @dataclass
@@ -434,7 +458,22 @@ class AttemptService:
         session: Session, attempt: AttemptModel, exam_item: ExamItem,
         payload: SaveResponseRequest, now: datetime, deadline: datetime,
     ) -> LateResponseModel:
-        """One late answer per question: a newer one replaces an undecided older one."""
+        """
+        One late answer per question: a newer one replaces an undecided older one.
+        A save that changes nothing (blank, or the answer saved on time) isn't
+        kept, and doesn't replace a real late answer either.
+        """
+        saved: ResponseModel | None = session.exec(
+            select(ResponseModel).where(
+                ResponseModel.attempt_id == attempt.id, ResponseModel.item_id == exam_item.item_id,
+            )
+        ).first()
+        if _late_changes_nothing(payload.answer, saved.answer if saved else None):
+            session.commit()         # keep the attempt's closing, if this call closed it; nothing else to save
+            return LateResponseModel(
+                attempt_id=attempt.id, org_id=attempt.org_id,
+                item_id=exam_item.item_id, exam_item_id=exam_item.id, answer=payload.answer,
+            )
         last_on_time: datetime | None = session.exec(
             select(func.max(ResponseModel.updated_at)).where(
                 ResponseModel.attempt_id == attempt.id, col(ResponseModel.updated_at) <= deadline,
@@ -1256,6 +1295,13 @@ class AttemptService:
             for r in session.exec(select(ResponseModel).where(col(ResponseModel.attempt_id).in_(chunk))).all():
                 existing[(r.attempt_id, r.item_id)] = r
         for late in lates:
+            current = existing.get((late.attempt_id, late.item_id))
+            if _late_changes_nothing(late.answer, current.answer if current else None):
+                late.status = "rejected"      # blank or unchanged: keep the saved answer
+                late.decided_by = actor_id
+                late.decided_at = now
+                session.add(late)
+                continue
             response = existing.get((late.attempt_id, late.item_id)) or ResponseModel(
                 attempt_id=late.attempt_id, item_id=late.item_id,
                 exam_item_id=late.exam_item_id, org_id=late.org_id,

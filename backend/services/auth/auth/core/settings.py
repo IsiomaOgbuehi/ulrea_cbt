@@ -1,4 +1,6 @@
 from pydantic_settings import BaseSettings
+from typing import Literal
+
 from pydantic import ConfigDict
 
 class Settings(BaseSettings):
@@ -35,13 +37,22 @@ class Settings(BaseSettings):
     # REDIS_HOST: str = "localhost"
     # REDIS_PORT: int = 6379
     
-    # Mail
-    MAIL_USERNAME: str | None = ""
-    MAIL_PASSWORD: str | None = ""
-    MAIL_FROM: str
+    # Mail. EMAIL_PROVIDER picks who sends: resend | zoho_cpaas | smtp.
+    # Only the chosen provider's settings are needed.
+    EMAIL_PROVIDER: Literal["resend", "zoho_cpaas", "smtp"] = "resend"
+    MAIL_FROM: str                       # "Juwazi <no-reply@juwazi.com>" or Juwazi <noreply@ulrea.com.ng> or a bare address
+    RESEND_API_KEY: str = ""
+    # Zoho CPaaS (formerly ZeptoMail): the Send Mail token from the mail agent's
+    # SMTP/API page. The URL depends on the account's data centre; copy it from
+    # that page if it isn't this one.
+    ZOHO_CPAAS_API_KEY: str = ""
+    ZOHO_CPAAS_API_URL: str = "https://cpaas.zoho.com/v1.1/email"
+    # SMTP (e.g. a school's own mail server). Port 465 = SSL; otherwise STARTTLS when MAIL_STARTTLS.
     MAIL_SERVER: str | None = ""
     MAIL_PORT: int = 587
-    RESEND_API_KEY: str
+    MAIL_USERNAME: str | None = ""
+    MAIL_PASSWORD: str | None = ""
+    MAIL_STARTTLS: bool = True
 
 
     FRONTEND_URL: str | None = "http://localhost:3000"
