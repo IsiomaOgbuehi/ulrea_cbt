@@ -114,4 +114,6 @@ jobs:
 
       - name: Check cbt is up
         if: ${{ vars.CBT_URL != '' }}
-        run: curl --fail --silent --show-error --retry 30 --retry-delay 10 --retry-all-errors "${{ vars.CBT_URL }}/openapi.json" > /dev/null
+        run:  |
+          url="${{ vars.CBT_URL }}"
+          curl --fail --silent --show-error --retry 30 --retry-delay 10 --retry-all-errors "${url%/}/openapi.json" > /dev/null
