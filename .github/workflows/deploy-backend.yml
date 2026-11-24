@@ -1,0 +1,100 @@
+# Deploys auth and cbt to one environment (staging or production) on FastAPI
+# Cloud: test, migrate each database, deploy auth, then cbt (cbt calls auth).
+#
+# Each GitHub environment (Settings > Environments) holds the same secret
+# names, so staging and production run exactly the same steps:
+#   AUTH_FASTAPI_CLOUD_TOKEN, AUTH_FASTAPI_CLOUD_APP_ID, AUTH_DATABASE_URL
+#   CBT_FASTAPI_CLOUD_TOKEN,  CBT_FASTAPI_CLOUD_APP_ID,  CBT_DATABASE_URL
+# and, optionally, these variables for a check after each deploy:
+#   AUTH_URL, CBT_URL   (e.g. https://auth-staging-xxxx.fastapicloud.dev)
+#
+# The apps' own settings (SECRET_KEY, JWT_SECRET, REDIS_URL, EMAIL_PROVIDER, ...)
+# live in each FastAPI Cloud app's Environment Variables, not here.
+name: Deploy backend
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub environment to deploy to: staging or production"
+        required: true
+        type: string
+
+jobs:
+  tests:
+    uses: ./.github/workflows/backend-tests.yml
+
+  auth:
+    name: Auth → ${{ inputs.environment }}
+    needs: tests
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: backend/services/auth
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Migrate the auth database
+        env:
+          DATABASE_URL: ${{ secrets.AUTH_DATABASE_URL }}
+          # Settings require these to load; migrations don't use them.
+          SECRET_KEY: migrate
+          JWT_SECRET: migrate
+          JWT_ALGORITHM: HS256
+          OTP_SECRET: migrate
+          INTERNAL_SECRET: migrate
+          CBT_SERVICE_URL: http://unused
+          MAIL_FROM: migrate@example.com
+          FRONTEND_URL: http://unused
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: uv run alembic upgrade head
+
+      - name: Deploy auth
+        env:
+          FASTAPI_CLOUD_TOKEN: ${{ secrets.AUTH_FASTAPI_CLOUD_TOKEN }}
+          FASTAPI_CLOUD_APP_ID: ${{ secrets.AUTH_FASTAPI_CLOUD_APP_ID }}
+        run: uv run fastapi deploy
+
+      - name: Check auth is up
+        if: ${{ vars.AUTH_URL != '' }}
+        run: curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.AUTH_URL }}/openapi.json" > /dev/null
+
+  cbt:
+    name: CBT → ${{ inputs.environment }}
+    needs: auth
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: backend/services/cbt_service
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+
+      - name: Migrate the cbt database
+        env:
+          DATABASE_URL: ${{ secrets.CBT_DATABASE_URL }}
+          SECRET_KEY: migrate
+          JWT_SECRET: migrate
+          JWT_ALGORITHM: HS256
+          OTP_SECRET: migrate
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: uv run alembic upgrade head
+
+      - name: Deploy cbt
+        env:
+          FASTAPI_CLOUD_TOKEN: ${{ secrets.CBT_FASTAPI_CLOUD_TOKEN }}
+          FASTAPI_CLOUD_APP_ID: ${{ secrets.CBT_FASTAPI_CLOUD_APP_ID }}
+        run: uv run fastapi deploy
+
+      - name: Check cbt is up
+        if: ${{ vars.CBT_URL != '' }}
+        run: curl --fail --silent --show-error --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.CBT_URL }}/openapi.json" > /dev/null
