@@ -1,0 +1,21 @@
+# Every push to the staging branch tests and deploys both services to staging.
+# Production will be the same workflow with `environment: production`
+# (e.g. on push to main or a version tag), so staging is a true replica.
+name: Staging
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+# One deploy at a time; a newer push waits for the running one to finish.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy-backend.yml
+    with:
+      environment: staging
+    secrets: inherit
