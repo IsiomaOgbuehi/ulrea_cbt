@@ -1,0 +1,21 @@
+# Every push to main (normally: merging staging into main) tests and deploys
+# both services to production, with exactly the same steps as staging.
+# Add required reviewers to the "production" environment in GitHub so each
+# deploy waits for an approval.
+name: Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy-backend.yml
+    with:
+      environment: production
+    secrets: inherit
